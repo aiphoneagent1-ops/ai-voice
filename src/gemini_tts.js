@@ -54,11 +54,62 @@ function createWavHeader(dataLength, { numChannels, sampleRate, bitsPerSample })
   return buffer;
 }
 
+function parseWavHeader(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 44) return null;
+  if (buf.toString("ascii", 0, 4) !== "RIFF") return null;
+  if (buf.toString("ascii", 8, 12) !== "WAVE") return null;
+  // We assume a standard 44-byte PCM header (as we write ourselves).
+  const audioFormat = buf.readUInt16LE(20);
+  const numChannels = buf.readUInt16LE(22);
+  const sampleRate = buf.readUInt32LE(24);
+  const bitsPerSample = buf.readUInt16LE(34);
+  const dataTag = buf.toString("ascii", 36, 40);
+  const dataLength = buf.readUInt32LE(40);
+  if (dataTag !== "data") return null;
+  return { audioFormat, numChannels, sampleRate, bitsPerSample, dataLength, headerBytes: 44 };
+}
+
+function downsamplePcm16Mono({ pcm, factor }) {
+  if (!Buffer.isBuffer(pcm)) return null;
+  if (factor !== 2 && factor !== 3) return null;
+  // 16-bit signed little-endian samples
+  const sampleCount = Math.floor(pcm.length / 2);
+  const outSamples = Math.floor(sampleCount / factor);
+  const out = Buffer.alloc(outSamples * 2);
+  for (let i = 0; i < outSamples; i++) {
+    const inIndex = i * factor * 2;
+    out[inIndex / factor] = 0; // no-op (kept for clarity)
+    pcm.copy(out, i * 2, inIndex, inIndex + 2);
+  }
+  return out;
+}
+
+function ensureTwilioPlayableWav(wavBuf) {
+  // Twilio is picky; safest is PCM 16-bit mono 8000Hz.
+  const h = parseWavHeader(wavBuf);
+  if (!h) return wavBuf;
+  if (h.audioFormat !== 1) return wavBuf; // not PCM
+  if (h.numChannels !== 1) return wavBuf; // keep simple (we generate mono anyway)
+  if (h.bitsPerSample !== 16) return wavBuf;
+
+  const pcm = wavBuf.subarray(h.headerBytes, h.headerBytes + h.dataLength);
+  let factor = null;
+  if (h.sampleRate === 24000) factor = 3;
+  if (h.sampleRate === 16000) factor = 2;
+  if (!factor) return wavBuf;
+
+  const down = downsamplePcm16Mono({ pcm, factor });
+  if (!down) return wavBuf;
+  const header = createWavHeader(down.length, { numChannels: 1, sampleRate: 8000, bitsPerSample: 16 });
+  return Buffer.concat([header, down]);
+}
+
 function convertRawPcmToWav(base64Data, mimeType) {
   const opts = parseMimeType(mimeType);
   const pcm = Buffer.from(base64Data || "", "base64");
   const header = createWavHeader(pcm.length, opts);
-  return Buffer.concat([header, pcm]);
+  const wav = Buffer.concat([header, pcm]);
+  return ensureTwilioPlayableWav(wav);
 }
 
 export async function geminiTtsToFile({
@@ -117,6 +168,7 @@ export async function geminiTtsToFile({
 
     if (mimeType.includes("wav")) {
       audioBuf = Buffer.from(inlineData.data, "base64");
+      audioBuf = ensureTwilioPlayableWav(audioBuf);
       fs.writeFileSync(wavPath, audioBuf);
       return `/tts/${key}.wav`;
     }
