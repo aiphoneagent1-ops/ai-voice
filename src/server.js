@@ -1400,7 +1400,9 @@ app.all("/twilio/play_end", async (req, res) => {
   }
 });
 
-const HOST = process.env.HOST || "127.0.0.1";
+// Render (וגם רוב ספקי ה-hosting) דורשים bind ל-0.0.0.0 כדי שה-Service יהיה נגיש מבחוץ.
+// בלוקאלי אפשר להישאר על 127.0.0.1.
+const HOST = process.env.HOST || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
 app.listen(PORT, HOST, () => {
   console.log(`Server listening on ${HOST}:${PORT}`);
 
