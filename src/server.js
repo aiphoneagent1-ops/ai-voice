@@ -70,6 +70,9 @@ if (!IS_RENDER && process.platform === "darwin" && (RAW_DATA_DIR === "/var/data"
 // Default to a high-quality chat model. You can override via OPENAI_MODEL in env.
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1";
 const OPENAI_STT_MODEL = process.env.OPENAI_STT_MODEL || "whisper-1";
+const OPENAI_STT_PROMPT =
+  process.env.OPENAI_STT_PROMPT ||
+  "תמלול שיחה טלפונית בעברית. מילים נפוצות: חדרה, קהילה, לשכה, שיעור תורה, הפרשת חלה, רישום, כתובת, יום, שעה, עלות, תרומה, תודה.";
 const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
 const OPENAI_TTS_VOICE_MALE = process.env.OPENAI_TTS_VOICE_MALE || "alloy";
 const OPENAI_TTS_VOICE_FEMALE = process.env.OPENAI_TTS_VOICE_FEMALE || "alloy";
@@ -1223,7 +1226,8 @@ app.all("/twilio/record", async (req, res) => {
     const transcription = await openai.audio.transcriptions.create({
       model: OPENAI_STT_MODEL,
       file: fs.createReadStream(tmpPath),
-      language: "he"
+      language: "he",
+      prompt: OPENAI_STT_PROMPT
     });
     const speech = String(transcription.text || "").trim();
 
