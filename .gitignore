@@ -1,0 +1,16 @@
+node_modules/
+
+# Env / secrets
+.env
+.env.*
+
+# App data (DB, recordings, TTS cache)
+data/
+
+# OS / editor noise
+.DS_Store
+.cursor/
+
+# Logs
+*.log
+

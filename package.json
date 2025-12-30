@@ -1,0 +1,28 @@
+{
+  "name": "ai-voice-outbound",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node src/server.js",
+    "start": "node src/server.js",
+    "import:xlsx": "node scripts/import-xlsx.js",
+    "add:contacts": "node scripts/add-contacts.js",
+    "remove:contact": "node scripts/remove-contact.js",
+    "test:gemini-tts": "node scripts/test-gemini-tts.js",
+    "dial": "node scripts/dial.js"
+  },
+  "dependencies": {
+    "@google/genai": "^1.6.0",
+    "better-sqlite3": "^11.7.0",
+    "csv-parse": "^5.5.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "openai": "^4.73.1",
+    "twilio": "^5.3.6",
+    "xlsx": "^0.18.5"
+  }
+}
+
+
