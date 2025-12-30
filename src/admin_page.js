@@ -280,7 +280,7 @@ export function renderAdminPage() {
           <button class="secondary" id="closeCallsModalBtn">סגור</button>
         </div>
         <div class="status" style="margin-top:4px;">
-          כאן רואים מה הלקוח אמר (תמלול) ומה הסוכן ענה בפועל. זה מגיע מהמסד נתונים (`call_messages`).
+          כאן רואים מה הלקוח אמר (תמלול) ומה הסוכן ענה בפועל. זה מגיע מהמסד נתונים (<code>call_messages</code>).
         </div>
 
         <div style="height:10px;"></div>
