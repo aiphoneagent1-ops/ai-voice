@@ -35,7 +35,8 @@ import { normalizePhoneE164IL } from "./phone.js";
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = String(process.env.DATA_DIR || "./data").trim() || "./data";
 const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "app.db");
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+// Default to a high-quality chat model. You can override via OPENAI_MODEL in env.
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1";
 const OPENAI_STT_MODEL = process.env.OPENAI_STT_MODEL || "whisper-1";
 const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
 const OPENAI_TTS_VOICE_MALE = process.env.OPENAI_TTS_VOICE_MALE || "alloy";
