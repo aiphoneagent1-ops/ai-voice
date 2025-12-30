@@ -50,7 +50,16 @@ function pickLocalDataDir() {
 }
 
 const DATA_DIR = pickLocalDataDir();
-const DB_PATH = RAW_DB_PATH || path.join(DATA_DIR, "app.db");
+function pickLocalDbPath() {
+  // If DB_PATH is set to a Render mount on macOS, ignore it and use the local data dir.
+  if (!IS_RENDER && process.platform === "darwin" && RAW_DB_PATH.startsWith("/var/data")) {
+    // Keep the same filename if provided (usually app.db)
+    const fname = path.basename(RAW_DB_PATH) || "app.db";
+    return path.join(DATA_DIR, fname);
+  }
+  return RAW_DB_PATH || path.join(DATA_DIR, "app.db");
+}
+const DB_PATH = pickLocalDbPath();
 
 if (!IS_RENDER && process.platform === "darwin" && (RAW_DATA_DIR === "/var/data" || RAW_DB_PATH.startsWith("/var/data"))) {
   console.warn(
