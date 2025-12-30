@@ -90,6 +90,15 @@ const TTS_POLL_MAX = Number(process.env.TTS_POLL_MAX || 20);
 const TTS_POLL_WAIT_SECONDS = Number(process.env.TTS_POLL_WAIT_SECONDS || 1);
 const RECORD_MAX_LENGTH_SECONDS = Number(process.env.RECORD_MAX_LENGTH_SECONDS || 4);
 const RECORD_TIMEOUT_SECONDS = Number(process.env.RECORD_TIMEOUT_SECONDS || 1);
+// Twilio <Record> "timeout" is silence timeout (seconds). Historically we forced a minimum of 2s to avoid premature "לא שמעתי".
+// If you want faster turn-taking, set RECORD_TIMEOUT_MIN_SECONDS=1 and RECORD_TIMEOUT_SECONDS=1.
+const RECORD_TIMEOUT_MIN_SECONDS = Number(process.env.RECORD_TIMEOUT_MIN_SECONDS || 2);
+
+function recordTimeoutSeconds() {
+  const min = Number.isFinite(RECORD_TIMEOUT_MIN_SECONDS) ? RECORD_TIMEOUT_MIN_SECONDS : 2;
+  const v = Number.isFinite(RECORD_TIMEOUT_SECONDS) ? RECORD_TIMEOUT_SECONDS : 1;
+  return Math.max(1, Math.max(min, v));
+}
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
 const ELEVENLABS_VOICE_MALE = process.env.ELEVENLABS_VOICE_MALE || "";
@@ -324,7 +333,7 @@ async function respondWithPlayAndMaybeHangup(req, res, { text, persona, hangup =
     actionUrl: toAbsoluteUrl(req, "/twilio/record"),
     playBeep: false,
     maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
-    timeoutSeconds: Math.max(2, RECORD_TIMEOUT_SECONDS)
+    timeoutSeconds: recordTimeoutSeconds()
   });
   res.type("text/xml").send(xml);
 }
@@ -1302,7 +1311,7 @@ app.all("/twilio/record", async (req, res) => {
           actionUrl: toAbsoluteUrl(req, "/twilio/record"),
           playBeep: false,
           maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
-          timeoutSeconds: RECORD_TIMEOUT_SECONDS
+          timeoutSeconds: recordTimeoutSeconds()
         });
         res.type("text/xml").send(xml);
         return;
@@ -1380,7 +1389,7 @@ app.all("/twilio/record", async (req, res) => {
       actionUrl: toAbsoluteUrl(req, "/twilio/record"),
       playBeep: false,
       maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
-      timeoutSeconds: Math.max(2, RECORD_TIMEOUT_SECONDS)
+      timeoutSeconds: recordTimeoutSeconds()
     });
 
     res.type("text/xml").send(xml);
@@ -1467,7 +1476,7 @@ app.all("/twilio/play", async (req, res) => {
       playBeep: false,
       maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
       // מינימום זמן לענות אחרי שהושמע האודיו (פתיח/תשובה), כדי לא ליפול מהר ל-"לא שמעתי".
-      timeoutSeconds: Math.max(2, RECORD_TIMEOUT_SECONDS)
+      timeoutSeconds: recordTimeoutSeconds()
     });
     res.type("text/xml").send(xml);
   } catch (err) {
