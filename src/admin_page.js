@@ -227,53 +227,20 @@ export function renderAdminPage() {
           <textarea id="knowledgeBase" placeholder="כתוב כאן את כל הידע של הסוכן..."></textarea>
 
           <div style="height:12px;"></div>
-          <div class="tabs">
-            <button class="tab active" data-tab="opening">פתיח</button>
-            <button class="tab" data-tab="middle">אמצע שיחה</button>
-            <button class="tab" data-tab="closing">סיום</button>
-          </div>
-          <div style="height:10px;"></div>
-          <div id="tab_opening">
-            <label>פתיח (מה אומרים ישר כשעונים)</label>
-            <div class="row" style="gap:12px; align-items:flex-start;">
-              <div style="flex:1; min-width:240px;">
-                <label style="margin-top:0;">לגברים (שיעור תורה)</label>
-                <textarea id="openingScriptMale" placeholder="פתיח לגברים..."></textarea>
-              </div>
-              <div style="flex:1; min-width:240px;">
-                <label style="margin-top:0;">לנשים (הפרשת חלה)</label>
-                <textarea id="openingScriptFemale" placeholder="פתיח לנשים..."></textarea>
-              </div>
+          <label>פתיח קבוע (מה אומרים ישר כשעונים)</label>
+          <div class="row" style="gap:12px; align-items:flex-start;">
+            <div style="flex:1; min-width:240px;">
+              <label style="margin-top:0;">לגברים (שיעור תורה)</label>
+              <textarea id="openingScriptMale" placeholder="פתיח לגברים..."></textarea>
             </div>
-          </div>
-          <div id="tab_middle" style="display:none;">
-            <label>אמצע שיחה (התנגדויות, שאלות נפוצות, איך לענות)</label>
-            <div class="row" style="gap:12px; align-items:flex-start;">
-              <div style="flex:1; min-width:240px;">
-                <label style="margin-top:0;">לגברים (שיעור תורה)</label>
-                <textarea id="middleScriptMale" placeholder="התנגדויות/תשובות לגברים..."></textarea>
-              </div>
-              <div style="flex:1; min-width:240px;">
-                <label style="margin-top:0;">לנשים (הפרשת חלה)</label>
-                <textarea id="middleScriptFemale" placeholder="התנגדויות/תשובות לנשים..."></textarea>
-              </div>
-            </div>
-          </div>
-          <div id="tab_closing" style="display:none;">
-            <label>סיום (מה אומרים בסגירה)</label>
-            <div class="row" style="gap:12px; align-items:flex-start;">
-              <div style="flex:1; min-width:240px;">
-                <label style="margin-top:0;">לגברים (שיעור תורה)</label>
-                <textarea id="closingScriptMale" placeholder="סיום לגברים..."></textarea>
-              </div>
-              <div style="flex:1; min-width:240px;">
-                <label style="margin-top:0;">לנשים (הפרשת חלה)</label>
-                <textarea id="closingScriptFemale" placeholder="סיום לנשים..."></textarea>
-              </div>
+            <div style="flex:1; min-width:240px;">
+              <label style="margin-top:0;">לנשים (הפרשת חלה)</label>
+              <textarea id="openingScriptFemale" placeholder="פתיח לנשים..."></textarea>
             </div>
           </div>
           <div class="row" style="margin-top:10px;">
             <button id="saveKbBtn">שמור</button>
+            <button class="secondary" id="showCallsBtn">שיחות אחרונות</button>
             <button class="secondary" id="reloadBtn">רענן</button>
             <span class="status" id="kbStatus"></span>
           </div>
@@ -306,6 +273,33 @@ export function renderAdminPage() {
       </div>
     </div>
 
+    <div class="modalOverlay" id="callsModal">
+      <div class="modal" style="max-width: 820px;">
+        <div class="row" style="justify-content:space-between; align-items:center;">
+          <h3>שיחות אחרונות — תמלול ותגובות</h3>
+          <button class="secondary" id="closeCallsModalBtn">סגור</button>
+        </div>
+        <div class="status" style="margin-top:4px;">
+          כאן רואים מה הלקוח אמר (תמלול) ומה הסוכן ענה בפועל. זה מגיע מהמסד נתונים (`call_messages`).
+        </div>
+
+        <div style="height:10px;"></div>
+        <div class="row" style="gap:10px;">
+          <div style="flex:1; min-width:260px;">
+            <label style="margin-top:0;">בחר שיחה</label>
+            <select id="callsSelect"></select>
+          </div>
+          <div class="row" style="align-items:flex-end; gap:8px;">
+            <button class="secondary" id="refreshCallsBtn">רענן שיחות</button>
+          </div>
+        </div>
+        <div class="status" id="callsMeta" style="margin-top:8px;"></div>
+
+        <label>תמלול</label>
+        <textarea id="callsTranscript" readonly placeholder="בחר שיחה כדי לראות את התמלול..." style="min-height: 300px;"></textarea>
+      </div>
+    </div>
+
     <script>
       const $ = (id) => document.getElementById(id);
       function setStatus(el, msg, ok=true){ el.textContent = msg; el.className = "status " + (ok ? "ok" : "err"); }
@@ -333,10 +327,6 @@ export function renderAdminPage() {
           $("knowledgeBase").value = data.knowledgeBase || "";
           $("openingScriptMale").value = data.openingScriptMale || "";
           $("openingScriptFemale").value = data.openingScriptFemale || "";
-          $("middleScriptMale").value = data.middleScriptMale || "";
-          $("middleScriptFemale").value = data.middleScriptFemale || "";
-          $("closingScriptMale").value = data.closingScriptMale || "";
-          $("closingScriptFemale").value = data.closingScriptFemale || "";
           $("autoDialEnabled").checked = !!data.autoDialEnabled;
           $("autoDialBatch").value = data.autoDialBatchSize ?? 5;
           $("autoDialInterval").value = data.autoDialIntervalSeconds ?? 30;
@@ -401,11 +391,7 @@ export function renderAdminPage() {
             body: JSON.stringify({
               knowledgeBase: $("knowledgeBase").value,
               openingScriptMale: $("openingScriptMale").value,
-              openingScriptFemale: $("openingScriptFemale").value,
-              middleScriptMale: $("middleScriptMale").value,
-              middleScriptFemale: $("middleScriptFemale").value,
-              closingScriptMale: $("closingScriptMale").value,
-              closingScriptFemale: $("closingScriptFemale").value
+              openingScriptFemale: $("openingScriptFemale").value
             })
           });
           setStatus($("kbStatus"), "נשמר", true);
@@ -455,17 +441,71 @@ export function renderAdminPage() {
         $("uploadXlsxBtn").click();
       });
 
-      // Tabs
-      document.querySelectorAll(".tab").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
-          btn.classList.add("active");
-          const t = btn.getAttribute("data-tab");
-          $("tab_opening").style.display = t === "opening" ? "block" : "none";
-          $("tab_middle").style.display = t === "middle" ? "block" : "none";
-          $("tab_closing").style.display = t === "closing" ? "block" : "none";
+      // Calls modal (transcripts)
+      const callsModal = $("callsModal");
+      function openCallsModal(){
+        callsModal.style.display = "block";
+        $("callsMeta").textContent = "";
+        $("callsTranscript").value = "";
+        loadRecentCalls().catch((e) => {
+          $("callsMeta").textContent = "שגיאה בטעינת שיחות: " + e.message;
         });
-      });
+      }
+      function closeCallsModal(){
+        callsModal.style.display = "none";
+      }
+      $("showCallsBtn").addEventListener("click", openCallsModal);
+      $("closeCallsModalBtn").addEventListener("click", closeCallsModal);
+      callsModal.addEventListener("click", (e) => { if (e.target === callsModal) closeCallsModal(); });
+
+      async function loadRecentCalls(){
+        const out = await api("/api/calls/recent?limit=20");
+        const select = $("callsSelect");
+        const calls = out.calls || [];
+        select.innerHTML = "";
+        if(!calls.length){
+          const opt = document.createElement("option");
+          opt.value = "";
+          opt.textContent = "אין שיחות עדיין";
+          select.appendChild(opt);
+          $("callsMeta").textContent = "";
+          $("callsTranscript").value = "";
+          return;
+        }
+        for(const c of calls){
+          const opt = document.createElement("option");
+          opt.value = c.callSid;
+          const who = (c.firstName ? (c.firstName + " • ") : "") + (c.phone || "");
+          const when = c.updatedAt ? (" • " + String(c.updatedAt).replace("T"," ").replace("Z","")) : "";
+          opt.textContent = who + when;
+          select.appendChild(opt);
+        }
+        await loadCallMessages(select.value);
+      }
+
+      async function loadCallMessages(callSid){
+        if(!callSid){
+          $("callsMeta").textContent = "";
+          $("callsTranscript").value = "";
+          return;
+        }
+        const out = await api("/api/calls/messages?callSid=" + encodeURIComponent(callSid) + "&limit=120");
+        const msgs = out.messages || [];
+        $("callsMeta").textContent = "CallSid: " + callSid + " • הודעות: " + msgs.length;
+        const lines = msgs.map((m) => {
+          const role = m.role === "user" ? "לקוח" : m.role === "assistant" ? "סוכן" : m.role;
+          const ts = m.createdAt ? ("[" + m.createdAt + "] ") : "";
+          return ts + role + ": " + (m.content || "");
+        });
+        $("callsTranscript").value = lines.join("\n\n");
+      }
+
+      $("refreshCallsBtn").addEventListener("click", () => loadRecentCalls().catch((e) => {
+        $("callsMeta").textContent = "שגיאה: " + e.message;
+      }));
+      $("callsSelect").addEventListener("change", () => loadCallMessages($("callsSelect").value).catch((e) => {
+        $("callsMeta").textContent = "שגיאה: " + e.message;
+      }));
 
       async function loadContacts(){
         try{

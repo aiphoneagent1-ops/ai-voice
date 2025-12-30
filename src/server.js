@@ -49,6 +49,8 @@ const GEMINI_TTS_MODEL = process.env.GEMINI_TTS_MODEL || "gemini-2.5-pro-preview
 const GEMINI_TTS_VOICE_NAME = process.env.GEMINI_TTS_VOICE_NAME || "Zephyr";
 const DEBUG_TTS = process.env.DEBUG_TTS === "1";
 const GEMINI_TTS_TIMEOUT_MS = Number(process.env.GEMINI_TTS_TIMEOUT_MS || 8000);
+// Default OFF: keep answers driven by KB + LLM (more natural). Set USE_FAQ_RULES=1 to re-enable deterministic FAQ replies.
+const USE_FAQ_RULES = process.env.USE_FAQ_RULES === "1";
 const TTS_POLL_MAX = Number(process.env.TTS_POLL_MAX || 20);
 const TTS_POLL_WAIT_SECONDS = Number(process.env.TTS_POLL_WAIT_SECONDS || 1);
 const RECORD_MAX_LENGTH_SECONDS = Number(process.env.RECORD_MAX_LENGTH_SECONDS || 4);
@@ -837,6 +839,48 @@ app.post("/api/admin/settings", (req, res) => {
   res.json({ ok: true });
 });
 
+// Admin: view recent calls + transcripts (from call_messages).
+app.get("/api/calls/recent", (req, res) => {
+  const limit = Math.max(1, Math.min(50, Number(req.query.limit || 15)));
+  const calls = db
+    .prepare(
+      `
+      SELECT
+        c.call_sid AS callSid,
+        c.phone AS phone,
+        c.persona AS persona,
+        c.turn_count AS turnCount,
+        c.started_at AS startedAt,
+        c.updated_at AS updatedAt,
+        COALESCE(ct.first_name, '') AS firstName
+      FROM calls c
+      LEFT JOIN contacts ct ON ct.phone = c.phone
+      ORDER BY c.updated_at DESC
+      LIMIT ?
+    `
+    )
+    .all(limit);
+  res.json({ calls });
+});
+
+app.get("/api/calls/messages", (req, res) => {
+  const callSid = String(req.query.callSid || "").trim();
+  if (!callSid) return res.status(400).json({ error: "missing callSid" });
+  const limit = Math.max(1, Math.min(200, Number(req.query.limit || 80)));
+  const messages = db
+    .prepare(
+      `
+      SELECT role, content, created_at AS createdAt
+      FROM call_messages
+      WHERE call_sid = ?
+      ORDER BY id ASC
+      LIMIT ?
+    `
+    )
+    .all(callSid, limit);
+  res.json({ callSid, messages });
+});
+
 app.post("/api/admin/dialer", (req, res) => {
   const {
     autoDialEnabled = false,
@@ -1183,18 +1227,7 @@ app.all("/twilio/record", async (req, res) => {
       return;
     }
 
-    const {
-      knowledgeBase,
-      openingScript,
-      middleScript,
-      closingScript,
-      openingScriptMale,
-      openingScriptFemale,
-      middleScriptMale,
-      middleScriptFemale,
-      closingScriptMale,
-      closingScriptFemale
-    } = settingsSnapshot();
+    const { knowledgeBase } = settingsSnapshot();
 
     // "ידע עצום" עובד טוב רק אם מכניסים בכל פעם רק את החלק הרלוונטי למה שהלקוח אמר (RAG פשוט).
     const knowledgeForThisTurn = selectRelevantKnowledge({
@@ -1204,51 +1237,48 @@ app.all("/twilio/record", async (req, res) => {
       maxChunks: 8
     });
 
-    // לפני ה-LLM: תשובות "חוקים" לשאלות נפוצות כדי למנוע תגובות לא קשורות.
-    const ruleReply = quickReplyByRules({ speech, persona });
-    if (ruleReply?.text) {
-      const safe = sanitizeSayText(ruleReply.text);
-      addMessage(db, { callSid, role: "assistant", content: safe });
+    // Optional deterministic FAQ rules. Default is OFF to keep everything driven by the KB + LLM.
+    if (USE_FAQ_RULES) {
+      const ruleReply = quickReplyByRules({ speech, persona });
+      if (ruleReply?.text) {
+        const safe = sanitizeSayText(ruleReply.text);
+        addMessage(db, { callSid, role: "assistant", content: safe });
 
-      const provider = TTS_PROVIDER || "openai";
-      const key = computeTtsCacheKey({ provider, text: safe, persona });
-      const cached = findCachedAudioByKey(key);
-      if (!cached) {
-        kickoffTtsGeneration({ provider, text: safe, persona }).catch(() => {});
-        const redirectUrl = toAbsoluteUrl(
-          req,
-          `/twilio/play?callSid=${encodeURIComponent(callSid)}&k=${encodeURIComponent(key)}&a=0`
-        );
-        const response = new twilio.twiml.VoiceResponse();
-        response.pause({ length: TTS_POLL_WAIT_SECONDS });
-        response.redirect({ method: "POST" }, redirectUrl);
-        res.type("text/xml").send(response.toString());
+        const provider = TTS_PROVIDER || "openai";
+        const key = computeTtsCacheKey({ provider, text: safe, persona });
+        const cached = findCachedAudioByKey(key);
+        if (!cached) {
+          kickoffTtsGeneration({ provider, text: safe, persona }).catch(() => {});
+          const redirectUrl = toAbsoluteUrl(
+            req,
+            `/twilio/play?callSid=${encodeURIComponent(callSid)}&k=${encodeURIComponent(key)}&a=0`
+          );
+          const response = new twilio.twiml.VoiceResponse();
+          response.pause({ length: TTS_POLL_WAIT_SECONDS });
+          response.redirect({ method: "POST" }, redirectUrl);
+          res.type("text/xml").send(response.toString());
+          return;
+        }
+
+        const xml = buildRecordTwiML({
+          sayText: null,
+          playUrl: toAbsoluteUrl(req, cached.rel),
+          actionUrl: toAbsoluteUrl(req, "/twilio/record"),
+          playBeep: false,
+          maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
+          timeoutSeconds: RECORD_TIMEOUT_SECONDS
+        });
+        res.type("text/xml").send(xml);
         return;
       }
-
-      const xml = buildRecordTwiML({
-        sayText: null,
-        playUrl: toAbsoluteUrl(req, cached.rel),
-        actionUrl: toAbsoluteUrl(req, "/twilio/record"),
-        playBeep: false,
-        maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
-        timeoutSeconds: RECORD_TIMEOUT_SECONDS
-      });
-      res.type("text/xml").send(xml);
-      return;
     }
 
     // סגירה דטרמיניסטית: אם המשתמש אומר במפורש שהוא/היא רוצה/מעוניין/ת — נסגור נכון.
     // זה מונע: "אני רוצה לבוא" -> "הבנתי, יום טוב".
-    const closingChosen =
-      persona === "female"
-        ? String(closingScriptFemale || closingScript || "").trim()
-        : String(closingScriptMale || closingScript || "").trim();
     const interested = detectInterested(speech) && !detectNotInterested(speech);
     const notInterested = detectNotInterested(speech) && !interested;
     if (interested || notInterested) {
       const picked =
-        extractClosingLine(closingChosen, { interested }) ||
         (interested
           ? "מעולה. אני מעבירה עכשיו את הפרטים שלך ללשכה שלנו, והם יחזרו אליך בהקדם עם רישום ופרטים. תודה רבה!"
           : "הבנתי, אין בעיה. תודה על הזמן, יום טוב.");
@@ -1272,21 +1302,7 @@ app.all("/twilio/record", async (req, res) => {
       return;
     }
 
-    const system = buildSystemPrompt({
-      persona,
-      knowledgeBase: knowledgeForThisTurn,
-      // legacy
-      openingScript,
-      middleScript,
-      closingScript,
-      // persona-specific
-      openingScriptMale,
-      openingScriptFemale,
-      middleScriptMale,
-      middleScriptFemale,
-      closingScriptMale,
-      closingScriptFemale
-    });
+    const system = buildSystemPrompt({ persona, knowledgeBase: knowledgeForThisTurn });
     const history = getMessages(db, callSid, { limit: 10 });
     const messages = [{ role: "system", content: system }, ...history];
 

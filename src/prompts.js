@@ -21,8 +21,7 @@ export function buildSystemPrompt({
 - עברית בלבד.
 - תשובות קצרות בדרך כלל: 1–3 משפטים, אבל תדברי טבעי ולא רובוטי. מותר לשאול שאלה אחת קצרה כדי להבין.
 - שיחה קצרה: עד ~2–3 דקות. לא ללחוץ, אבל כן להוביל קדימה בנימוס.
-- תסריט הפתיחה נאמר פעם אחת בלבד בתחילת השיחה. אם המשתמש כבר ענה/הגיב — אל תחזרי על הפתיח. תמשיכי ישר לאמצע שיחה.
-- אל תקראי את התסריטים "מילה במילה" כמו טקסט. השתמשי בהם כהכוונה, ותעני למה שהלקוח אומר בפועל.
+- הפתיח כבר נאמר פעם אחת בתחילת השיחה. אם המשתמש כבר ענה/הגיב — אל תחזרי על הפתיח.
 - אל תתווכחי. אם לא מעוניין/ת — להיפרד יפה ולסיים.
 - אם מבקשים "להסיר/אל תתקשרו" — לאשר ולסיים מיד. (חשוב מאוד)
 - אל תבקשי פרטים רגישים. לכל היותר שם פרטי וזמן נוח.
@@ -53,31 +52,21 @@ export function buildSystemPrompt({
 ${knowledgeBase || "(ריק)"} 
 `;
 
-  const openingChosen =
-    persona === "female"
-      ? String(openingScriptFemale || openingScript || "").trim()
-      : String(openingScriptMale || openingScript || "").trim();
-  const middleChosen =
-    persona === "female"
-      ? String(middleScriptFemale || middleScript || "").trim()
-      : String(middleScriptMale || middleScript || "").trim();
-  const closingChosen =
-    persona === "female"
-      ? String(closingScriptFemale || closingScript || "").trim()
-      : String(closingScriptMale || closingScript || "").trim();
+  // NOTE:
+  // The greeting is handled by the telephony layer and stored in history,
+  // so the model should focus purely on answering based on the knowledge base.
+  // We keep the old script fields in the signature for backward-compat, but we do not include them in the prompt.
+  void openingScript;
+  void middleScript;
+  void closingScript;
+  void openingScriptMale;
+  void openingScriptFemale;
+  void middleScriptMale;
+  void middleScriptFemale;
+  void closingScriptMale;
+  void closingScriptFemale;
 
-  const scripts = `
-תסריט פתיחה (מדברים את זה ממש בתחילת השיחה):
-${openingChosen || "(ריק)"}
-
-אמצע שיחה (התנגדויות, שאלות נפוצות, איך לענות):
-${middleChosen || "(ריק)"}
-
-סיום (מה להגיד בסגירה):
-${closingChosen || "(ריק)"}
-`;
-
-  return `${base}\n${personaBlock}\n${closing}\n${kb}\n${scripts}`.trim();
+  return `${base}\n${personaBlock}\n${closing}\n${kb}`.trim();
 }
 
 export function buildGreeting({ persona }) {
