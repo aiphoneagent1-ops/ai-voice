@@ -255,6 +255,43 @@ function sanitizeSayText(text) {
     .trim();
 }
 
+async function respondWithPlayAndMaybeHangup(req, res, { text, persona, hangup = true }) {
+  const safe = sanitizeSayText(text);
+  const provider = TTS_PROVIDER || "openai";
+  const key = computeTtsCacheKey({ provider, text: safe, persona });
+  const cached = findCachedAudioByKey(key);
+
+  if (!cached) {
+    kickoffTtsGeneration({ provider, text: safe, persona }).catch(() => {});
+    const redirectUrl = toAbsoluteUrl(
+      req,
+      `${hangup ? "/twilio/play_end" : "/twilio/play"}?k=${encodeURIComponent(key)}&a=0${
+        hangup ? "" : `&callSid=${encodeURIComponent(String(getParam(req, "CallSid") || ""))}`
+      }`
+    );
+    const response = new twilio.twiml.VoiceResponse();
+    response.pause({ length: TTS_POLL_WAIT_SECONDS });
+    response.redirect({ method: "POST" }, redirectUrl);
+    res.type("text/xml").send(response.toString());
+    return;
+  }
+
+  if (hangup) {
+    res.type("text/xml").send(buildPlayAndHangup({ playUrl: toAbsoluteUrl(req, cached.rel) }));
+    return;
+  }
+
+  const xml = buildRecordTwiML({
+    sayText: null,
+    playUrl: toAbsoluteUrl(req, cached.rel),
+    actionUrl: toAbsoluteUrl(req, "/twilio/record"),
+    playBeep: false,
+    maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
+    timeoutSeconds: Math.max(2, RECORD_TIMEOUT_SECONDS)
+  });
+  res.type("text/xml").send(xml);
+}
+
 function getParam(req, key) {
   // תומך גם ב-POST (body) וגם ב-GET (query) למקרה ש-Twilio/Proxy שולחים אחרת.
   return (req.body && req.body[key]) ?? (req.query && req.query[key]) ?? "";
@@ -976,8 +1013,7 @@ async function handleTwilioVoice(req, res) {
 
   const contact = getContactByPhone(db, phone);
   if (contact?.do_not_call) {
-    const xml = buildSayAndHangup({ sayText: "בסדר גמור. יום טוב." });
-    res.type("text/xml").send(xml);
+    await respondWithPlayAndMaybeHangup(req, res, { text: "בסדר גמור. יום טוב.", persona: "female", hangup: true });
     return;
   }
 
@@ -1037,8 +1073,11 @@ app.all("/twilio/voice", async (req, res) => {
     await handleTwilioVoice(req, res);
   } catch (err) {
     console.error(err);
-    const xml = buildSayAndHangup({ sayText: "סליחה, הייתה תקלה קטנה. יום טוב." });
-    res.type("text/xml").send(xml);
+    await respondWithPlayAndMaybeHangup(req, res, {
+      text: "סליחה, הייתה תקלה קטנה. יום טוב.",
+      persona: "female",
+      hangup: true
+    });
   }
 });
 
@@ -1050,8 +1089,7 @@ app.all("/twilio/record", async (req, res) => {
 
     const contact = getContactByPhone(db, phone);
     if (contact?.do_not_call) {
-      const xml = buildSayAndHangup({ sayText: "בסדר גמור. יום טוב." });
-      res.type("text/xml").send(xml);
+      await respondWithPlayAndMaybeHangup(req, res, { text: "בסדר גמור. יום טוב.", persona: "female", hangup: true });
       return;
     }
 
@@ -1059,23 +1097,30 @@ app.all("/twilio/record", async (req, res) => {
     const callRow = createOrGetCall(db, { callSid, phone, persona });
 
     if (!recordingUrl) {
-      const xml = buildSayAndHangup({ sayText: "לא שמעתי אותך טוב. תודה רבה ויום טוב." });
-      res.type("text/xml").send(xml);
+      await respondWithPlayAndMaybeHangup(req, res, {
+        text: "לא שמעתי אותך טוב. תודה רבה ויום טוב.",
+        persona,
+        hangup: true
+      });
       return;
     }
 
     if (!openai) {
-      const xml = buildSayAndHangup({
-        sayText: "בשביל להמשיך את השיחה החכמה צריך להגדיר מפתח מערכת. תודה רבה ויום טוב."
+      await respondWithPlayAndMaybeHangup(req, res, {
+        text: "בשביל להמשיך את השיחה החכמה צריך להגדיר מפתח מערכת. תודה רבה ויום טוב.",
+        persona,
+        hangup: true
       });
-      res.type("text/xml").send(xml);
       return;
     }
 
     // מורידים את ההקלטה מ-Twilio (דורש Basic Auth)
     if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
-      const xml = buildSayAndHangup({ sayText: "חסר חיבור טלפוניה במערכת. תודה רבה ויום טוב." });
-      res.type("text/xml").send(xml);
+      await respondWithPlayAndMaybeHangup(req, res, {
+        text: "חסר חיבור טלפוניה במערכת. תודה רבה ויום טוב.",
+        persona,
+        hangup: true
+      });
       return;
     }
 
@@ -1089,8 +1134,11 @@ app.all("/twilio/record", async (req, res) => {
       headers: { Authorization: `Basic ${auth}` }
     });
     if (!recRes.ok) {
-      const xml = buildSayAndHangup({ sayText: "סליחה, לא הצלחתי לשמוע אותך. יום טוב." });
-      res.type("text/xml").send(xml);
+      await respondWithPlayAndMaybeHangup(req, res, {
+        text: "סליחה, לא הצלחתי לשמוע אותך. יום טוב.",
+        persona,
+        hangup: true
+      });
       return;
     }
     fs.writeFileSync(tmpPath, Buffer.from(await recRes.arrayBuffer()));
@@ -1109,15 +1157,21 @@ app.all("/twilio/record", async (req, res) => {
     } catch {}
 
     if (!speech) {
-      const xml = buildSayAndHangup({ sayText: "לא שמעתי אותך טוב. תודה רבה ויום טוב." });
-      res.type("text/xml").send(xml);
+      await respondWithPlayAndMaybeHangup(req, res, {
+        text: "לא שמעתי אותך טוב. תודה רבה ויום טוב.",
+        persona,
+        hangup: true
+      });
       return;
     }
 
     if (detectOptOut(speech)) {
       markDoNotCall(db, phone);
-      const xml = buildSayAndHangup({ sayText: "אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב." });
-      res.type("text/xml").send(xml);
+      await respondWithPlayAndMaybeHangup(req, res, {
+        text: "אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב.",
+        persona,
+        hangup: true
+      });
       return;
     }
 
@@ -1125,8 +1179,7 @@ app.all("/twilio/record", async (req, res) => {
     const updated = incrementTurn(db, callSid);
 
     if (updated.turn_count >= MAX_TURNS) {
-      const xml = buildSayAndHangup({ sayText: "תודה רבה על הזמן. יום טוב!" });
-      res.type("text/xml").send(xml);
+      await respondWithPlayAndMaybeHangup(req, res, { text: "תודה רבה על הזמן. יום טוב!", persona, hangup: true });
       return;
     }
 
@@ -1249,8 +1302,7 @@ app.all("/twilio/record", async (req, res) => {
 
     if (detectOptOut(answer)) {
       markDoNotCall(db, phone);
-      const xml = buildSayAndHangup({ sayText: "אין בעיה, הסרתי אותך. יום טוב." });
-      res.type("text/xml").send(xml);
+      await respondWithPlayAndMaybeHangup(req, res, { text: "אין בעיה, הסרתי אותך. יום טוב.", persona, hangup: true });
       return;
     }
 
@@ -1282,8 +1334,11 @@ app.all("/twilio/record", async (req, res) => {
     res.type("text/xml").send(xml);
   } catch (err) {
     console.error(err);
-    const xml = buildSayAndHangup({ sayText: "סליחה, הייתה תקלה קטנה. יום טוב." });
-    res.type("text/xml").send(xml);
+    await respondWithPlayAndMaybeHangup(req, res, {
+      text: "סליחה, הייתה תקלה קטנה. יום טוב.",
+      persona: "female",
+      hangup: true
+    });
   }
 });
 
@@ -1338,8 +1393,8 @@ app.all("/twilio/play", async (req, res) => {
     const cached = findCachedAudioByKey(key);
     if (!cached) {
       if (attempt >= TTS_POLL_MAX) {
-        const xml = buildSayAndHangup({ sayText: "סליחה, הייתה תקלה קטנה. יום טוב." });
-        res.type("text/xml").send(xml);
+        // Never use <Say> (Twilio Hebrew Say is brittle). Just hang up.
+        res.type("text/xml").send(buildPlayAndHangup({ playUrl: null }));
         return;
       }
       const redirectUrl = toAbsoluteUrl(
@@ -1365,8 +1420,7 @@ app.all("/twilio/play", async (req, res) => {
     res.type("text/xml").send(xml);
   } catch (err) {
     console.error(err);
-    const xml = buildSayAndHangup({ sayText: "סליחה, הייתה תקלה קטנה. יום טוב." });
-    res.type("text/xml").send(xml);
+    res.type("text/xml").send(buildPlayAndHangup({ playUrl: null }));
   }
 });
 
@@ -1380,8 +1434,7 @@ app.all("/twilio/play_end", async (req, res) => {
     const cached = findCachedAudioByKey(key);
     if (!cached) {
       if (attempt >= TTS_POLL_MAX) {
-        const xml = buildSayAndHangup({ sayText: "סליחה, הייתה תקלה קטנה. יום טוב." });
-        res.type("text/xml").send(xml);
+        res.type("text/xml").send(buildPlayAndHangup({ playUrl: null }));
         return;
       }
       const redirectUrl = toAbsoluteUrl(req, `/twilio/play_end?k=${encodeURIComponent(key)}&a=${attempt + 1}`);
@@ -1396,8 +1449,7 @@ app.all("/twilio/play_end", async (req, res) => {
     res.type("text/xml").send(xml);
   } catch (err) {
     console.error(err);
-    const xml = buildSayAndHangup({ sayText: "סליחה, הייתה תקלה קטנה. יום טוב." });
-    res.type("text/xml").send(xml);
+    res.type("text/xml").send(buildPlayAndHangup({ playUrl: null }));
   }
 });
 
