@@ -33,8 +33,31 @@ import { renderAdminPage } from "./admin_page.js";
 import { normalizePhoneE164IL } from "./phone.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const DATA_DIR = String(process.env.DATA_DIR || "./data").trim() || "./data";
-const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "app.db");
+
+// Persistent storage paths:
+// - On Render: you typically mount a disk to /var/data
+// - On local macOS: /var/data is usually not writable → fallback to ./data
+const IS_RENDER = !!process.env.RENDER_EXTERNAL_HOSTNAME;
+const RAW_DATA_DIR = String(process.env.DATA_DIR || "./data").trim() || "./data";
+const RAW_DB_PATH = String(process.env.DB_PATH || "").trim();
+
+function pickLocalDataDir() {
+  // If the user explicitly set a local path, respect it.
+  if (RAW_DATA_DIR && RAW_DATA_DIR !== "/var/data") return RAW_DATA_DIR;
+  // If the user set /var/data on macOS (common when copying Render env), fallback.
+  if (!IS_RENDER && process.platform === "darwin" && RAW_DATA_DIR === "/var/data") return "./data";
+  return RAW_DATA_DIR || "./data";
+}
+
+const DATA_DIR = pickLocalDataDir();
+const DB_PATH = RAW_DB_PATH || path.join(DATA_DIR, "app.db");
+
+if (!IS_RENDER && process.platform === "darwin" && (RAW_DATA_DIR === "/var/data" || RAW_DB_PATH.startsWith("/var/data"))) {
+  console.warn(
+    "[config] Detected Render-style DATA_DIR/DB_PATH on macOS. Falling back to local ./data. " +
+      "If you want to override: set DATA_DIR=./data (or any writable path)."
+  );
+}
 // Default to a high-quality chat model. You can override via OPENAI_MODEL in env.
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1";
 const OPENAI_STT_MODEL = process.env.OPENAI_STT_MODEL || "whisper-1";
