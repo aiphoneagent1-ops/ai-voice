@@ -497,7 +497,9 @@ export function renderAdminPage() {
           const ts = m.createdAt ? ("[" + m.createdAt + "] ") : "";
           return ts + role + ": " + (m.content || "");
         });
-        $("callsTranscript").value = lines.join("\n\n");
+        // NOTE: This JS is embedded inside a template literal in Node.
+        // We must escape backslashes so the browser receives a valid JS string literal.
+        $("callsTranscript").value = lines.join("\\n\\n");
       }
 
       $("refreshCallsBtn").addEventListener("click", () => loadRecentCalls().catch((e) => {
