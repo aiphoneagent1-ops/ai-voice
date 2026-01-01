@@ -88,11 +88,14 @@ const GEMINI_TTS_TIMEOUT_MS = Number(process.env.GEMINI_TTS_TIMEOUT_MS || 8000);
 const USE_FAQ_RULES = process.env.USE_FAQ_RULES === "1";
 const TTS_POLL_MAX = Number(process.env.TTS_POLL_MAX || 20);
 const TTS_POLL_WAIT_SECONDS = Number(process.env.TTS_POLL_WAIT_SECONDS || 1);
-const RECORD_MAX_LENGTH_SECONDS = Number(process.env.RECORD_MAX_LENGTH_SECONDS || 4);
+// Twilio <Record> max length per utterance. If too small, callers get cut mid-sentence.
+// We enforce a sane minimum; override by setting a larger value.
+const RECORD_MAX_LENGTH_SECONDS = Math.max(6, Number(process.env.RECORD_MAX_LENGTH_SECONDS || 6));
 const RECORD_TIMEOUT_SECONDS = Number(process.env.RECORD_TIMEOUT_SECONDS || 1);
 // Twilio <Record> "timeout" is silence timeout (seconds). Historically we forced a minimum of 2s to avoid premature "לא שמעתי".
 // If you want faster turn-taking, set RECORD_TIMEOUT_MIN_SECONDS=1 and RECORD_TIMEOUT_SECONDS=1.
 const RECORD_TIMEOUT_MIN_SECONDS = Number(process.env.RECORD_TIMEOUT_MIN_SECONDS || 2);
+const NO_SPEECH_MAX_RETRIES = Number(process.env.NO_SPEECH_MAX_RETRIES || 2);
 
 function recordTimeoutSeconds() {
   const min = Number.isFinite(RECORD_TIMEOUT_MIN_SECONDS) ? RECORD_TIMEOUT_MIN_SECONDS : 2;
@@ -301,7 +304,7 @@ function sanitizeSayText(text) {
     .trim();
 }
 
-async function respondWithPlayAndMaybeHangup(req, res, { text, persona, hangup = true }) {
+async function respondWithPlayAndMaybeHangup(req, res, { text, persona, hangup = true, retry = 0 }) {
   const safe = sanitizeSayText(text);
   const provider = TTS_PROVIDER || "openai";
   const key = computeTtsCacheKey({ provider, text: safe, persona });
@@ -330,12 +333,23 @@ async function respondWithPlayAndMaybeHangup(req, res, { text, persona, hangup =
   const xml = buildRecordTwiML({
     sayText: null,
     playUrl: toAbsoluteUrl(req, cached.rel),
-    actionUrl: toAbsoluteUrl(req, "/twilio/record"),
+    actionUrl: recordActionUrl(req, retry),
     playBeep: false,
     maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
     timeoutSeconds: recordTimeoutSeconds()
   });
   res.type("text/xml").send(xml);
+}
+
+function clampInt(n, { min, max, fallback }) {
+  const v = Number.parseInt(String(n ?? ""), 10);
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(min, Math.min(max, v));
+}
+
+function recordActionUrl(req, retry) {
+  const r = clampInt(retry, { min: 0, max: 10, fallback: 0 });
+  return toAbsoluteUrl(req, `/twilio/record?r=${r}`);
 }
 
 function getParam(req, key) {
@@ -1146,10 +1160,10 @@ async function handleTwilioVoice(req, res) {
   const xml = buildRecordTwiML({
     sayText: null,
     playUrl: toAbsoluteUrl(req, cached.rel),
-    actionUrl: toAbsoluteUrl(req, "/twilio/record"),
+    actionUrl: recordActionUrl(req, 0),
     playBeep: false,
     maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
-    timeoutSeconds: Math.max(2, RECORD_TIMEOUT_SECONDS)
+    timeoutSeconds: recordTimeoutSeconds()
   });
 
   res.type("text/xml").send(xml);
@@ -1174,6 +1188,7 @@ app.all("/twilio/record", async (req, res) => {
     const callSid = String(getParam(req, "CallSid") || "");
     const phone = getConversationPhone(req);
     const recordingUrl = String(getParam(req, "RecordingUrl") || "").trim();
+    const retry = clampInt(req.query?.r, { min: 0, max: 10, fallback: 0 });
 
     const contact = getContactByPhone(db, phone);
     if (contact?.do_not_call) {
@@ -1185,11 +1200,17 @@ app.all("/twilio/record", async (req, res) => {
     const callRow = createOrGetCall(db, { callSid, phone, persona });
 
     if (!recordingUrl) {
-      await respondWithPlayAndMaybeHangup(req, res, {
-        text: "לא שמעתי אותך טוב. תודה רבה ויום טוב.",
-        persona,
-        hangup: true
-      });
+      // Don't hang up immediately if the user is still speaking / recording failed.
+      if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
+        await respondWithPlayAndMaybeHangup(req, res, {
+          text: "לא שמעתי אותך טוב. אפשר להגיד שוב? אני מקשיבה.",
+          persona,
+          hangup: false,
+          retry: retry + 1
+        });
+        return;
+      }
+      await respondWithPlayAndMaybeHangup(req, res, { text: "לא שמעתי אותך טוב. תודה רבה ויום טוב.", persona, hangup: true });
       return;
     }
 
@@ -1222,11 +1243,16 @@ app.all("/twilio/record", async (req, res) => {
       headers: { Authorization: `Basic ${auth}` }
     });
     if (!recRes.ok) {
-      await respondWithPlayAndMaybeHangup(req, res, {
-        text: "סליחה, לא הצלחתי לשמוע אותך. יום טוב.",
-        persona,
-        hangup: true
-      });
+      if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
+        await respondWithPlayAndMaybeHangup(req, res, {
+          text: "סליחה, לא הצלחתי לשמוע אותך. אפשר להגיד שוב?",
+          persona,
+          hangup: false,
+          retry: retry + 1
+        });
+        return;
+      }
+      await respondWithPlayAndMaybeHangup(req, res, { text: "סליחה, לא הצלחתי לשמוע אותך. יום טוב.", persona, hangup: true });
       return;
     }
     fs.writeFileSync(tmpPath, Buffer.from(await recRes.arrayBuffer()));
@@ -1246,11 +1272,16 @@ app.all("/twilio/record", async (req, res) => {
     } catch {}
 
     if (!speech) {
-      await respondWithPlayAndMaybeHangup(req, res, {
-        text: "לא שמעתי אותך טוב. תודה רבה ויום טוב.",
-        persona,
-        hangup: true
-      });
+      if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
+        await respondWithPlayAndMaybeHangup(req, res, {
+          text: "לא הבנתי אותך טוב. אפשר לחזור שוב במשפט שלם? אני מקשיבה.",
+          persona,
+          hangup: false,
+          retry: retry + 1
+        });
+        return;
+      }
+      await respondWithPlayAndMaybeHangup(req, res, { text: "לא שמעתי אותך טוב. תודה רבה ויום טוב.", persona, hangup: true });
       return;
     }
 
@@ -1308,7 +1339,7 @@ app.all("/twilio/record", async (req, res) => {
         const xml = buildRecordTwiML({
           sayText: null,
           playUrl: toAbsoluteUrl(req, cached.rel),
-          actionUrl: toAbsoluteUrl(req, "/twilio/record"),
+          actionUrl: recordActionUrl(req, 0),
           playBeep: false,
           maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
           timeoutSeconds: recordTimeoutSeconds()
@@ -1386,7 +1417,7 @@ app.all("/twilio/record", async (req, res) => {
     const xml = buildRecordTwiML({
       sayText: null,
       playUrl: toAbsoluteUrl(req, cached.rel),
-      actionUrl: toAbsoluteUrl(req, "/twilio/record"),
+      actionUrl: recordActionUrl(req, 0),
       playBeep: false,
       maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
       timeoutSeconds: recordTimeoutSeconds()
@@ -1472,7 +1503,7 @@ app.all("/twilio/play", async (req, res) => {
     const xml = buildRecordTwiML({
       sayText: null,
       playUrl: toAbsoluteUrl(req, cached.rel),
-      actionUrl: toAbsoluteUrl(req, "/twilio/record"),
+      actionUrl: recordActionUrl(req, 0),
       playBeep: false,
       maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
       // מינימום זמן לענות אחרי שהושמע האודיו (פתיח/תשובה), כדי לא ליפול מהר ל-"לא שמעתי".
