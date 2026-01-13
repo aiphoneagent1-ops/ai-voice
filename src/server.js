@@ -2246,37 +2246,10 @@ const HOST = process.env.HOST || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
 
 const server = http.createServer(app);
 
-// Log WS upgrade attempts for ConversationRelay (helps debug "silent call" where Twilio never connects).
-server.on("upgrade", (req) => {
-  try {
-    const u = String(req?.url || "");
-    if (u.includes("/twilio/conversationrelay")) {
-      crLogAlways("ws upgrade", {
-        url: u,
-        ua: req?.headers?.["user-agent"],
-        ip:
-          req?.headers?.["x-forwarded-for"] ||
-          req?.headers?.["cf-connecting-ip"] ||
-          req?.socket?.remoteAddress ||
-          ""
-      });
-    }
-    if (u.includes("/twilio/mediastream") && MS_DEBUG) {
-      console.log("[ms] ws upgrade", {
-        url: u,
-        ua: req?.headers?.["user-agent"],
-        ip:
-          req?.headers?.["x-forwarded-for"] ||
-          req?.headers?.["cf-connecting-ip"] ||
-          req?.socket?.remoteAddress ||
-          ""
-      });
-    }
-  } catch {}
-});
-
-// ConversationRelay WebSocket server (only used when REALTIME_MODE=1)
-const wssConversationRelay = new WebSocketServer({ server, path: "/twilio/conversationrelay" });
+// IMPORTANT:
+// Do NOT attach multiple ws servers with { server, path } — the first one will abortHandshake(400) for other paths.
+// We use noServer=true and route upgrades ourselves.
+const wssConversationRelay = new WebSocketServer({ noServer: true });
 wssConversationRelay.on("error", (e) => {
   crLogAlways("wss error", e?.message || e);
 });
@@ -2407,7 +2380,7 @@ wssConversationRelay.on("connection", (ws, req) => {
 });
 
 // Media Streams WebSocket server (used when REALTIME_MODE=2)
-const wssMediaStream = new WebSocketServer({ server, path: "/twilio/mediastream" });
+const wssMediaStream = new WebSocketServer({ noServer: true });
 wssMediaStream.on("error", (e) => {
   console.warn("[ms] wss error", e?.message || e);
 });
@@ -2690,6 +2663,59 @@ wssMediaStream.on("connection", (ws, req) => {
       return;
     }
   });
+});
+
+// Route WS upgrades by path.
+server.on("upgrade", (req, socket, head) => {
+  const rawUrl = String(req?.url || "");
+  let pathname = rawUrl;
+  try {
+    pathname = new URL(rawUrl, "http://localhost").pathname;
+  } catch {}
+
+  // Logging (helps debug when Twilio can't connect)
+  try {
+    if (pathname === "/twilio/conversationrelay") {
+      crLogAlways("ws upgrade", {
+        url: rawUrl,
+        ua: req?.headers?.["user-agent"],
+        ip:
+          req?.headers?.["x-forwarded-for"] ||
+          req?.headers?.["cf-connecting-ip"] ||
+          req?.socket?.remoteAddress ||
+          ""
+      });
+    }
+    if (pathname === "/twilio/mediastream" && MS_DEBUG) {
+      console.log("[ms] ws upgrade", {
+        url: rawUrl,
+        ua: req?.headers?.["user-agent"],
+        ip:
+          req?.headers?.["x-forwarded-for"] ||
+          req?.headers?.["cf-connecting-ip"] ||
+          req?.socket?.remoteAddress ||
+          ""
+      });
+    }
+  } catch {}
+
+  if (pathname === "/twilio/conversationrelay") {
+    wssConversationRelay.handleUpgrade(req, socket, head, (ws) => {
+      wssConversationRelay.emit("connection", ws, req);
+    });
+    return;
+  }
+  if (pathname === "/twilio/mediastream") {
+    wssMediaStream.handleUpgrade(req, socket, head, (ws) => {
+      wssMediaStream.emit("connection", ws, req);
+    });
+    return;
+  }
+
+  // Unknown WS path
+  try {
+    socket.destroy();
+  } catch {}
 });
 
 server.listen(PORT, HOST, () => {
