@@ -2641,7 +2641,8 @@ wssMediaStream.on("connection", (ws, req) => {
     // LLM
     let answer = "תודה רבה, יום טוב.";
     try {
-      const knowledgeForThisTurn = getSetting(db, "knowledgeBase", "");
+      const knowledgeBase = getSetting(db, "knowledgeBase", "");
+      const knowledgeForThisTurn = selectRelevantKnowledge({ knowledgeBase, query: speech });
       const system = buildSystemPrompt({ persona, knowledgeBase: knowledgeForThisTurn });
       const history = callSid ? getMessages(db, callSid, { limit: 10 }) : [];
       const messages = [{ role: "system", content: system }, ...history, { role: "user", content: speech }];
