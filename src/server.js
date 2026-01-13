@@ -148,6 +148,11 @@ const CR_ENABLED = REALTIME_MODE;
 const CR_LANGUAGE = String(process.env.CR_LANGUAGE || "he-IL").trim();
 const CR_TTS_PROVIDER = String(process.env.CR_TTS_PROVIDER || "Google").trim(); // Google | Amazon | ElevenLabs
 const CR_VOICE = String(process.env.CR_VOICE || "he-IL-Wavenet-D").trim(); // default: male Hebrew (Google)
+// STT provider/model: for some languages (e.g. he-IL) Twilio requires these to be explicitly set
+// or it will fail with: "Incomplete value set in TwiML for language ...".
+// Defaults are chosen to be robust for Hebrew.
+const CR_TRANSCRIPTION_PROVIDER = String(process.env.CR_TRANSCRIPTION_PROVIDER || "Deepgram").trim(); // Google | Deepgram
+const CR_SPEECH_MODEL = String(process.env.CR_SPEECH_MODEL || "nova-2-general").trim(); // Deepgram: nova-2-general|nova-3-general, Google: telephony|long|...
 const CR_INTERRUPTIBLE = String(process.env.CR_INTERRUPTIBLE || "speech").trim(); // none|dtmf|speech|any
 const CR_INTERRUPT_SENSITIVITY = String(process.env.CR_INTERRUPT_SENSITIVITY || "high").trim(); // low|medium|high
 const CR_DEBUG = String(process.env.CR_DEBUG || "").trim(); // e.g. "debugging speaker-events tokens-played"
@@ -172,6 +177,8 @@ function buildConversationRelayTwiML({
   language,
   ttsProvider,
   voice,
+  transcriptionProvider,
+  speechModel,
   welcomeGreeting,
   welcomeGreetingInterruptible,
   interruptible,
@@ -189,6 +196,8 @@ function buildConversationRelayTwiML({
     language ? `language="${escapeXmlAttr(language)}"` : "",
     ttsProvider ? `ttsProvider="${escapeXmlAttr(ttsProvider)}"` : "",
     voice ? `voice="${escapeXmlAttr(voice)}"` : "",
+    transcriptionProvider ? `transcriptionProvider="${escapeXmlAttr(transcriptionProvider)}"` : "",
+    speechModel ? `speechModel="${escapeXmlAttr(speechModel)}"` : "",
     welcomeGreeting ? `welcomeGreeting="${escapeXmlAttr(welcomeGreeting)}"` : "",
     welcomeGreetingInterruptible ? `welcomeGreetingInterruptible="${escapeXmlAttr(welcomeGreetingInterruptible)}"` : "",
     interruptible ? `interruptible="${escapeXmlAttr(interruptible)}"` : "",
@@ -1383,6 +1392,8 @@ app.all("/twilio/voice", async (req, res) => {
         language: CR_LANGUAGE,
         ttsProvider: CR_TTS_PROVIDER,
         voice: CR_VOICE,
+        transcriptionProvider: CR_TRANSCRIPTION_PROVIDER,
+        speechModel: CR_SPEECH_MODEL,
         welcomeGreeting: greeting,
         welcomeGreetingInterruptible: CR_INTERRUPTIBLE,
         interruptible: CR_INTERRUPTIBLE,
