@@ -197,6 +197,13 @@ function langForTextTokens() {
 function wsSendText(ws, payload) {
   const lang = langForTextTokens();
   const msg = lang ? { ...payload, lang } : payload;
+  // Helpful for debugging "it spoke English / nonsense" – see exactly what we sent.
+  try {
+    if (String(payload?.type || "") === "text") {
+      const token = String(payload?.token || "");
+      crLogVerbose("send text", { chars: token.length, last: !!payload?.last, snippet: token.slice(0, 120) });
+    }
+  } catch {}
   wsSendJson(ws, msg);
 }
 
@@ -2123,11 +2130,18 @@ wssConversationRelay.on("connection", (ws, req) => {
     if (
       t === "error" ||
       t === "warning" ||
+      t === "info" ||
       t === "tokensPlayed" ||
       t === "agentSpeaking" ||
       t === "clientSpeaking" ||
       t === "debugging"
     ) {
+      // Keep logs readable: include common fields + a truncated raw JSON payload.
+      let raw = "";
+      try {
+        raw = JSON.stringify(msg);
+        if (raw.length > 1200) raw = `${raw.slice(0, 1200)}…`;
+      } catch {}
       crLogAlways("ws event", {
         type: t,
         callSid: String(msg?.callSid || callSid || ""),
@@ -2135,7 +2149,8 @@ wssConversationRelay.on("connection", (ws, req) => {
         // common fields (Twilio uses different shapes across events)
         description: msg?.description || msg?.msg || msg?.message || "",
         data: msg?.data || "",
-        last: typeof msg?.last === "boolean" ? msg.last : undefined
+        last: typeof msg?.last === "boolean" ? msg.last : undefined,
+        raw
       });
     } else {
       crLogVerbose("ws message", { type: t });
