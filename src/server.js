@@ -174,7 +174,7 @@ function startsWithLang(code, prefix) {
 }
 
 function normalizeConversationRelaySettings() {
-  const transcriptionLanguage = CR_TRANSCRIPTION_LANGUAGE || CR_LANGUAGE;
+  let transcriptionLanguage = CR_TRANSCRIPTION_LANGUAGE || CR_LANGUAGE;
 
   // Base attrs (may be overridden by compatibility rules below)
   let languageAttr = CR_LANGUAGE;
@@ -194,11 +194,14 @@ function normalizeConversationRelaySettings() {
   }
 
   // --- STT rules ---
-  // Twilio currently rejects Deepgram he-IL (e.g. deepgram/he-IL/nova-2-general).
-  // For Hebrew, force Google telephony unless user isn't using Hebrew.
-  if (startsWithLang(transcriptionLanguage, "he") && sttProviderLower === "deepgram") {
-    transcriptionProviderAttr = "Google";
-    speechModelAttr = "telephony";
+  // Twilio ConversationRelay validation rejects explicit Hebrew locale for STT in some accounts
+  // (e.g. google/he-IL/telephony, deepgram/he-IL/nova-2-general). Workaround:
+  // use automatic language detection for STT: transcriptionLanguage="multi"
+  // which requires Deepgram + nova-2-general (or nova-3-general).
+  if (startsWithLang(transcriptionLanguage, "he")) {
+    transcriptionLanguage = "multi";
+    transcriptionProviderAttr = "Deepgram";
+    speechModelAttr = "nova-2-general";
   }
 
   // Normalize model for provider
