@@ -169,6 +169,57 @@ function primaryLangTag(code) {
   return s.split("-")[0] || s;
 }
 
+function startsWithLang(code, prefix) {
+  return new RegExp(`^${String(prefix).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-|$)`, "i").test(String(code || ""));
+}
+
+function normalizeConversationRelaySettings() {
+  const transcriptionLanguage = CR_TRANSCRIPTION_LANGUAGE || CR_LANGUAGE;
+
+  // Base attrs (may be overridden by compatibility rules below)
+  let languageAttr = CR_LANGUAGE;
+  let ttsLanguageAttr = CR_TTS_LANGUAGE;
+  let transcriptionProviderAttr = CR_TRANSCRIPTION_PROVIDER;
+  let speechModelAttr = CR_SPEECH_MODEL;
+
+  const ttsProviderLower = String(CR_TTS_PROVIDER || "").toLowerCase();
+  const sttProviderLower = String(transcriptionProviderAttr || "").toLowerCase();
+
+  // --- TTS rules ---
+  // Twilio validation may reject ElevenLabs + language="he-IL".
+  // Workaround: omit language, set ttsLanguage="multi" and send lang="he" per token.
+  if (ttsProviderLower === "elevenlabs" && startsWithLang(transcriptionLanguage, "he")) {
+    languageAttr = "";
+    if (!ttsLanguageAttr) ttsLanguageAttr = "multi";
+  }
+
+  // --- STT rules ---
+  // Twilio currently rejects Deepgram he-IL (e.g. deepgram/he-IL/nova-2-general).
+  // For Hebrew, force Google telephony unless user isn't using Hebrew.
+  if (startsWithLang(transcriptionLanguage, "he") && sttProviderLower === "deepgram") {
+    transcriptionProviderAttr = "Google";
+    speechModelAttr = "telephony";
+  }
+
+  // Normalize model for provider
+  if (String(transcriptionProviderAttr).toLowerCase() === "google") {
+    const m = String(speechModelAttr || "").toLowerCase();
+    if (m !== "telephony" && m !== "long") speechModelAttr = "telephony";
+  }
+  if (String(transcriptionProviderAttr).toLowerCase() === "deepgram") {
+    const m = String(speechModelAttr || "").toLowerCase();
+    if (!m.startsWith("nova-")) speechModelAttr = "nova-2-general";
+  }
+
+  return {
+    languageAttr,
+    ttsLanguageAttr,
+    transcriptionLanguage,
+    transcriptionProviderAttr,
+    speechModelAttr
+  };
+}
+
 function toWsUrlFromHttpBase(baseHttp) {
   const b = String(baseHttp || "").trim();
   if (b.startsWith("https://")) return `wss://${b.slice("https://".length)}`;
@@ -1403,27 +1454,13 @@ app.all("/twilio/voice", async (req, res) => {
       const wsBase = toWsUrlFromHttpBase(httpBase);
       const wsUrl = `${wsBase}/twilio/conversationrelay`;
 
-      // Twilio validation may reject ElevenLabs + language="he-IL".
-      // Workaround:
-      // - Set transcriptionLanguage for STT explicitly (he-IL)
-      // - Set ttsLanguage="multi" for ElevenLabs (so ElevenLabs can detect language from tokens)
-      // - Omit "language" to avoid the invalid combination validation.
-      const transcriptionLanguage = CR_TRANSCRIPTION_LANGUAGE || CR_LANGUAGE;
-      let languageAttr = CR_LANGUAGE;
-      let ttsLanguageAttr = CR_TTS_LANGUAGE;
-      if (String(CR_TTS_PROVIDER).toLowerCase() === "elevenlabs" && /^he(-|$)/i.test(transcriptionLanguage)) {
-        languageAttr = "";
-        if (!ttsLanguageAttr) ttsLanguageAttr = "multi";
-      }
-
-      // Twilio currently rejects Deepgram he-IL (e.g. deepgram/he-IL/nova-2-general).
-      // For Hebrew, default STT to Google telephony unless explicitly overridden via env.
-      let transcriptionProviderAttr = CR_TRANSCRIPTION_PROVIDER;
-      let speechModelAttr = CR_SPEECH_MODEL;
-      if (/^he(-|$)/i.test(transcriptionLanguage) && String(transcriptionProviderAttr).toLowerCase() === "deepgram") {
-        transcriptionProviderAttr = "Google";
-        speechModelAttr = "telephony";
-      }
+      const {
+        languageAttr,
+        ttsLanguageAttr,
+        transcriptionLanguage,
+        transcriptionProviderAttr,
+        speechModelAttr
+      } = normalizeConversationRelaySettings();
 
       const xml = buildConversationRelayTwiML({
         wsUrl,
