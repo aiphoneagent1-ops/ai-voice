@@ -148,6 +148,13 @@ const CR_ENABLED = REALTIME_MODE;
 const CR_LANGUAGE = String(process.env.CR_LANGUAGE || "he-IL").trim();
 const CR_TTS_PROVIDER = String(process.env.CR_TTS_PROVIDER || "Google").trim(); // Google | Amazon | ElevenLabs
 const CR_VOICE = String(process.env.CR_VOICE || "he-IL-Wavenet-D").trim(); // default: male Hebrew (Google)
+// Per Twilio ConversationRelay docs, language can be set via:
+// - language (sets both STT + TTS)
+// - transcriptionLanguage (STT)
+// - ttsLanguage (TTS)
+// Some combinations (e.g. ElevenLabs + he-IL) can be rejected by Twilio validation.
+const CR_TRANSCRIPTION_LANGUAGE = String(process.env.CR_TRANSCRIPTION_LANGUAGE || "").trim(); // e.g. "he-IL"
+const CR_TTS_LANGUAGE = String(process.env.CR_TTS_LANGUAGE || "").trim(); // e.g. "multi"
 // STT provider/model: for some languages (e.g. he-IL) Twilio requires these to be explicitly set
 // or it will fail with: "Incomplete value set in TwiML for language ...".
 // Defaults are chosen to be robust for Hebrew.
@@ -156,6 +163,12 @@ const CR_SPEECH_MODEL = String(process.env.CR_SPEECH_MODEL || "nova-2-general").
 const CR_INTERRUPTIBLE = String(process.env.CR_INTERRUPTIBLE || "speech").trim(); // none|dtmf|speech|any
 const CR_INTERRUPT_SENSITIVITY = String(process.env.CR_INTERRUPT_SENSITIVITY || "high").trim(); // low|medium|high
 const CR_DEBUG = String(process.env.CR_DEBUG || "").trim(); // e.g. "debugging speaker-events tokens-played"
+
+function primaryLangTag(code) {
+  const s = String(code || "").trim();
+  if (!s) return "";
+  return s.split("-")[0] || s;
+}
 
 function toWsUrlFromHttpBase(baseHttp) {
   const b = String(baseHttp || "").trim();
@@ -175,8 +188,10 @@ function escapeXmlAttr(v) {
 function buildConversationRelayTwiML({
   wsUrl,
   language,
+  ttsLanguage,
   ttsProvider,
   voice,
+  transcriptionLanguage,
   transcriptionProvider,
   speechModel,
   welcomeGreeting,
@@ -194,8 +209,10 @@ function buildConversationRelayTwiML({
   const attrs = [
     `url="${escapeXmlAttr(wsUrl)}"`,
     language ? `language="${escapeXmlAttr(language)}"` : "",
+    ttsLanguage ? `ttsLanguage="${escapeXmlAttr(ttsLanguage)}"` : "",
     ttsProvider ? `ttsProvider="${escapeXmlAttr(ttsProvider)}"` : "",
     voice ? `voice="${escapeXmlAttr(voice)}"` : "",
+    transcriptionLanguage ? `transcriptionLanguage="${escapeXmlAttr(transcriptionLanguage)}"` : "",
     transcriptionProvider ? `transcriptionProvider="${escapeXmlAttr(transcriptionProvider)}"` : "",
     speechModel ? `speechModel="${escapeXmlAttr(speechModel)}"` : "",
     welcomeGreeting ? `welcomeGreeting="${escapeXmlAttr(welcomeGreeting)}"` : "",
@@ -1387,11 +1404,26 @@ app.all("/twilio/voice", async (req, res) => {
       const wsBase = toWsUrlFromHttpBase(httpBase);
       const wsUrl = `${wsBase}/twilio/conversationrelay`;
 
+      // Twilio validation may reject ElevenLabs + language="he-IL".
+      // Workaround:
+      // - Set transcriptionLanguage for STT explicitly (he-IL)
+      // - Set ttsLanguage="multi" for ElevenLabs (so ElevenLabs can detect language from tokens)
+      // - Omit "language" to avoid the invalid combination validation.
+      const transcriptionLanguage = CR_TRANSCRIPTION_LANGUAGE || CR_LANGUAGE;
+      let languageAttr = CR_LANGUAGE;
+      let ttsLanguageAttr = CR_TTS_LANGUAGE;
+      if (String(CR_TTS_PROVIDER).toLowerCase() === "elevenlabs" && /^he(-|$)/i.test(transcriptionLanguage)) {
+        languageAttr = "";
+        if (!ttsLanguageAttr) ttsLanguageAttr = "multi";
+      }
+
       const xml = buildConversationRelayTwiML({
         wsUrl,
-        language: CR_LANGUAGE,
+        language: languageAttr,
+        ttsLanguage: ttsLanguageAttr,
         ttsProvider: CR_TTS_PROVIDER,
         voice: CR_VOICE,
+        transcriptionLanguage,
         transcriptionProvider: CR_TRANSCRIPTION_PROVIDER,
         speechModel: CR_SPEECH_MODEL,
         welcomeGreeting: greeting,
@@ -1837,7 +1869,8 @@ async function streamAssistantToConversationRelay({
   userText
 }) {
   if (!openai) {
-    wsSendJson(ws, { type: "text", token: "בשביל להמשיך את השיחה החכמה צריך להגדיר מפתח מערכת.", last: true });
+    const lang = primaryLangTag(CR_TRANSCRIPTION_LANGUAGE || CR_LANGUAGE) || "he";
+    wsSendJson(ws, { type: "text", token: "בשביל להמשיך את השיחה החכמה צריך להגדיר מפתח מערכת.", lang, last: true });
     return;
   }
 
@@ -1868,7 +1901,8 @@ async function streamAssistantToConversationRelay({
     full += delta;
     // Hold back one token chunk so we can mark the last chunk with last:true.
     if (pending) {
-      wsSendJson(ws, { type: "text", token: pending, last: false, interruptible: true, preemptible: true });
+      const lang = primaryLangTag(CR_TRANSCRIPTION_LANGUAGE || CR_LANGUAGE) || "he";
+      wsSendJson(ws, { type: "text", token: pending, lang, last: false, interruptible: true, preemptible: true });
     }
     pending = delta;
   }
@@ -1878,7 +1912,10 @@ async function streamAssistantToConversationRelay({
     full = pending;
   }
 
-  wsSendJson(ws, { type: "text", token: pending, last: true, interruptible: true, preemptible: true });
+  {
+    const lang = primaryLangTag(CR_TRANSCRIPTION_LANGUAGE || CR_LANGUAGE) || "he";
+    wsSendJson(ws, { type: "text", token: pending, lang, last: true, interruptible: true, preemptible: true });
+  }
 
   const answer = sanitizeSayText(full.trim());
   addMessage(db, { callSid, role: "assistant", content: answer });
