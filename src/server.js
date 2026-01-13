@@ -1534,8 +1534,16 @@ app.all("/twilio/play", async (req, res) => {
     const cached = findCachedAudioByKey(key);
     if (!cached) {
       if (attempt >= TTS_POLL_MAX) {
-        // Never use <Say> (Twilio Hebrew Say is brittle). Just hang up.
-        res.type("text/xml").send(buildPlayAndHangup({ playUrl: null }));
+        // Never leave the caller in silence. Fallback to Twilio <Say> (Polly.Carmit) and continue.
+        const xml = buildRecordTwiML({
+          sayText: "רגע אחד, אני בודקת... אפשר להגיד שוב?",
+          playUrl: null,
+          actionUrl: recordActionUrl(req, 0),
+          playBeep: false,
+          maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
+          timeoutSeconds: recordTimeoutSeconds()
+        });
+        res.type("text/xml").send(xml);
         return;
       }
       const redirectUrl = toAbsoluteUrl(
@@ -1561,7 +1569,16 @@ app.all("/twilio/play", async (req, res) => {
     res.type("text/xml").send(xml);
   } catch (err) {
     console.error(err);
-    res.type("text/xml").send(buildPlayAndHangup({ playUrl: null }));
+    // Safety: never return "nothing". Continue the conversation even on errors.
+    const xml = buildRecordTwiML({
+      sayText: "סליחה, הייתה תקלה קטנה. אפשר להגיד שוב?",
+      playUrl: null,
+      actionUrl: recordActionUrl(req, 0),
+      playBeep: false,
+      maxLengthSeconds: RECORD_MAX_LENGTH_SECONDS,
+      timeoutSeconds: recordTimeoutSeconds()
+    });
+    res.type("text/xml").send(xml);
   }
 });
 
@@ -1575,7 +1592,8 @@ app.all("/twilio/play_end", async (req, res) => {
     const cached = findCachedAudioByKey(key);
     if (!cached) {
       if (attempt >= TTS_POLL_MAX) {
-        res.type("text/xml").send(buildPlayAndHangup({ playUrl: null }));
+        // End-call fallback: say a short goodbye (avoid silent hangup).
+        res.type("text/xml").send(buildSayAndHangup({ sayText: "תודה רבה ויום טוב." }));
         return;
       }
       const redirectUrl = toAbsoluteUrl(req, `/twilio/play_end?k=${encodeURIComponent(key)}&a=${attempt + 1}`);
@@ -1590,7 +1608,7 @@ app.all("/twilio/play_end", async (req, res) => {
     res.type("text/xml").send(xml);
   } catch (err) {
     console.error(err);
-    res.type("text/xml").send(buildPlayAndHangup({ playUrl: null }));
+    res.type("text/xml").send(buildSayAndHangup({ sayText: "תודה רבה ויום טוב." }));
   }
 });
 
