@@ -1489,6 +1489,17 @@ app.all("/twilio/voice", async (req, res) => {
         }
       });
 
+      // Breadcrumb for correlating Twilio /twilio/voice request with WS logs.
+      crLogAlways("twiml served", {
+        callSid,
+        wsUrl,
+        ttsProvider: CR_TTS_PROVIDER,
+        voice: CR_VOICE,
+        transcriptionLanguage,
+        transcriptionProvider: transcriptionProviderAttr,
+        speechModel: speechModelAttr
+      });
+
       res.type("text/xml").send(xml);
       return;
     }
@@ -1913,13 +1924,17 @@ function wsSendJson(ws, obj) {
   } catch {}
 }
 
-function crServerDebugEnabled() {
-  // If TwiML debug is enabled, Twilio will send debugging events; enable our server logs too.
+function crServerVerboseEnabled() {
+  // Verbose logging can be enabled explicitly. Always-on logs (connect/setup/errors) do not depend on this.
   return Boolean(CR_DEBUG) || process.env.CR_SERVER_DEBUG === "1" || process.env.CR_SERVER_DEBUG === "true";
 }
 
-function crLog(...args) {
-  if (!crServerDebugEnabled()) return;
+function crLogAlways(...args) {
+  console.log("[cr]", ...args);
+}
+
+function crLogVerbose(...args) {
+  if (!crServerVerboseEnabled()) return;
   console.log("[cr]", ...args);
 }
 
@@ -1988,8 +2003,29 @@ const HOST = process.env.HOST || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
 
 const server = http.createServer(app);
 
+// Log WS upgrade attempts for ConversationRelay (helps debug "silent call" where Twilio never connects).
+server.on("upgrade", (req) => {
+  try {
+    const u = String(req?.url || "");
+    if (u.includes("/twilio/conversationrelay")) {
+      crLogAlways("ws upgrade", {
+        url: u,
+        ua: req?.headers?.["user-agent"],
+        ip:
+          req?.headers?.["x-forwarded-for"] ||
+          req?.headers?.["cf-connecting-ip"] ||
+          req?.socket?.remoteAddress ||
+          ""
+      });
+    }
+  } catch {}
+});
+
 // ConversationRelay WebSocket server (only used when REALTIME_MODE=1)
 const wssConversationRelay = new WebSocketServer({ server, path: "/twilio/conversationrelay" });
+wssConversationRelay.on("error", (e) => {
+  crLogAlways("wss error", e?.message || e);
+});
 wssConversationRelay.on("connection", (ws, req) => {
   // Session state per socket
   let callSid = "";
@@ -1999,7 +2035,7 @@ wssConversationRelay.on("connection", (ws, req) => {
   let closed = false;
   let greetingSent = false;
 
-  crLog("ws connected", {
+  crLogAlways("ws connected", {
     path: req?.url,
     ua: req?.headers?.["user-agent"],
     ip:
@@ -2011,7 +2047,11 @@ wssConversationRelay.on("connection", (ws, req) => {
 
   ws.on("close", () => {
     closed = true;
-    crLog("ws closed", { callSid, phone });
+    crLogAlways("ws closed", { callSid, phone });
+  });
+
+  ws.on("error", (e) => {
+    crLogAlways("ws error", { callSid, err: e?.message || String(e) });
   });
 
   ws.on("message", (data) => {
@@ -2025,7 +2065,7 @@ wssConversationRelay.on("connection", (ws, req) => {
     }
 
     const t = String(msg?.type || "");
-    crLog("ws message", { type: t });
+    crLogVerbose("ws message", { type: t });
     if (t === "setup") {
       callSid = String(msg?.callSid || "");
       const cp = msg?.customParameters || {};
@@ -2044,7 +2084,7 @@ wssConversationRelay.on("connection", (ws, req) => {
         greetingSent = true;
         const lang = primaryLangTag(CR_LANGUAGE) || "he";
         wsSendJson(ws, { type: "text", token: greeting, lang, last: true, interruptible: true, preemptible: true });
-        crLog("sent greeting token", { callSid, chars: greeting.length });
+        crLogAlways("sent greeting token", { callSid, chars: greeting.length });
       }
       return;
     }
