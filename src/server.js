@@ -2065,7 +2065,27 @@ wssConversationRelay.on("connection", (ws, req) => {
     }
 
     const t = String(msg?.type || "");
-    crLogVerbose("ws message", { type: t });
+    // Always surface Twilio-side errors/warnings + playback/speaker signals.
+    if (
+      t === "error" ||
+      t === "warning" ||
+      t === "tokensPlayed" ||
+      t === "agentSpeaking" ||
+      t === "clientSpeaking" ||
+      t === "debugging"
+    ) {
+      crLogAlways("ws event", {
+        type: t,
+        callSid: String(msg?.callSid || callSid || ""),
+        sessionId: String(msg?.sessionId || ""),
+        // common fields (Twilio uses different shapes across events)
+        description: msg?.description || msg?.msg || msg?.message || "",
+        data: msg?.data || "",
+        last: typeof msg?.last === "boolean" ? msg.last : undefined
+      });
+    } else {
+      crLogVerbose("ws message", { type: t });
+    }
     if (t === "setup") {
       callSid = String(msg?.callSid || "");
       const cp = msg?.customParameters || {};
