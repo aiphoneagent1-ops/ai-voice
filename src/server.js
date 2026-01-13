@@ -179,8 +179,8 @@ const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 400);
 const ELEVENLABS_STREAM_OUTPUT_FORMAT = String(process.env.ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000").trim();
 const MS_TEST_TONE = process.env.MS_TEST_TONE === "1" || process.env.MS_TEST_TONE === "true";
 // Barge-in tuning: avoid clearing agent speech on line noise/echo.
-const MS_BARGE_IN_FRAMES = Number(process.env.MS_BARGE_IN_FRAMES || 5); // 5 frames * 20ms = 100ms
-const MS_BARGE_IN_GRACE_MS = Number(process.env.MS_BARGE_IN_GRACE_MS || 350); // don't barge-in instantly after agent starts
+const MS_BARGE_IN_FRAMES = Number(process.env.MS_BARGE_IN_FRAMES || 15); // 15 frames * 20ms = 300ms
+const MS_BARGE_IN_GRACE_MS = Number(process.env.MS_BARGE_IN_GRACE_MS || 400); // don't barge-in instantly after agent starts
 
 function primaryLangTag(code) {
   const s = String(code || "").trim();
@@ -2465,6 +2465,12 @@ wssMediaStream.on("connection", (ws, req) => {
   let greeting = "";
   let closed = false;
 
+  // We want a "normal call":
+  // - Greeting plays fully (no barge-in, no listening)
+  // - After greeting ends, enable listening + barge-in
+  let allowListen = false;
+  let allowBargeIn = false;
+
   // Outbound playback state
   let playTimer = null;
   let playing = false;
@@ -2597,12 +2603,12 @@ wssMediaStream.on("connection", (ws, req) => {
     });
   }
 
-  async function sayText(text) {
+  async function sayText(text, { label = "elevenlabs" } = {}) {
     const safe = sanitizeSayText(String(text || "").trim());
     if (!safe) return;
     const ulaw = await elevenlabsTtsToUlaw8000({ text: safe, persona: AGENT_VOICE_PERSONA });
     if (!ulaw) return;
-    await playUlaw(ulaw, { label: "elevenlabs" });
+    await playUlaw(ulaw, { label });
   }
 
   async function transcribeAndRespond(pcm8kAll) {
@@ -2684,7 +2690,7 @@ wssMediaStream.on("connection", (ws, req) => {
       if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: answer });
     } catch {}
 
-    await sayText(answer);
+    await sayText(answer, { label: "reply" });
   }
 
   msLog("ws connected", {
@@ -2737,6 +2743,10 @@ wssMediaStream.on("connection", (ws, req) => {
 
       // Speak greeting immediately
       inFlight = (async () => {
+        // During greeting: do NOT listen and do NOT barge-in (prevents echo/noise from cutting speech).
+        allowListen = false;
+        allowBargeIn = false;
+
         // Debug: prove audio-out works even without ElevenLabs/OpenAI (beep tone)
         if (MS_TEST_TONE) {
           try {
@@ -2763,9 +2773,16 @@ wssMediaStream.on("connection", (ws, req) => {
         } catch {}
         if (!g) g = sanitizeSayText(buildGreeting({ persona }));
         msLog("greeting", { chars: g.length });
-        await sayText(g);
+        await sayText(g, { label: "greeting" });
+
+        // Now we can listen + allow barge-in for the rest of the call.
+        allowListen = true;
+        allowBargeIn = true;
       })().catch((e) => {
         console.warn("[ms] greeting failed", e?.message || e);
+        // Fail-open: if greeting fails, still allow the call to proceed.
+        allowListen = true;
+        allowBargeIn = true;
       });
       return;
     }
@@ -2775,6 +2792,9 @@ wssMediaStream.on("connection", (ws, req) => {
       if (track && track !== "inbound") return;
       const b64 = String(msg?.media?.payload || "");
       if (!b64) return;
+
+      // While greeting is playing, ignore inbound audio (avoids echo triggering VAD and clearing playback).
+      if (!allowListen) return;
 
       const ulawBuf = Buffer.from(b64, "base64");
       const pcm16 = ulawBufferToPcm16(ulawBuf);
@@ -2793,7 +2813,7 @@ wssMediaStream.on("connection", (ws, req) => {
 
         // Barge-in (debounced): only interrupt after sustained voiced frames,
         // and not immediately after agent starts (prevents noise/echo causing silence).
-        if (playing) {
+        if (playing && allowBargeIn) {
           const inGrace = playingSince && now - playingSince < MS_BARGE_IN_GRACE_MS;
           if (!inGrace) {
             bargeInFrames++;
