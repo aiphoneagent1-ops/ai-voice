@@ -115,6 +115,9 @@ const ELEVENLABS_VOICE_FEMALE = process.env.ELEVENLABS_VOICE_FEMALE || "";
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
 const ELEVENLABS_STABILITY = Number(process.env.ELEVENLABS_STABILITY || 0.4);
 const ELEVENLABS_SIMILARITY_BOOST = Number(process.env.ELEVENLABS_SIMILARITY_BOOST || 0.8);
+const ELEVENLABS_STYLE = Number(process.env.ELEVENLABS_STYLE || 0); // 0..1 (optional)
+const ELEVENLABS_SPEAKER_BOOST =
+  process.env.ELEVENLABS_SPEAKER_BOOST === "1" || process.env.ELEVENLABS_SPEAKER_BOOST === "true";
 
 const MAX_TURNS = Number(process.env.MAX_TURNS || 6); // 6 סבבים ~ 2 דק' בשיחה קצרה
 
@@ -657,7 +660,10 @@ async function elevenlabsTtsToFile({ text, persona }) {
       model_id: ELEVENLABS_MODEL_ID,
       voice_settings: {
         stability: Number.isFinite(ELEVENLABS_STABILITY) ? ELEVENLABS_STABILITY : 0.4,
-        similarity_boost: Number.isFinite(ELEVENLABS_SIMILARITY_BOOST) ? ELEVENLABS_SIMILARITY_BOOST : 0.8
+        similarity_boost: Number.isFinite(ELEVENLABS_SIMILARITY_BOOST) ? ELEVENLABS_SIMILARITY_BOOST : 0.8,
+        // Optional knobs (some voices/models benefit from these):
+        ...(Number.isFinite(ELEVENLABS_STYLE) ? { style: Math.max(0, Math.min(1, ELEVENLABS_STYLE)) } : {}),
+        ...(ELEVENLABS_SPEAKER_BOOST ? { use_speaker_boost: true } : {})
       }
     })
   });
@@ -754,7 +760,15 @@ function computeTtsCacheKey({ provider, text, persona }) {
   if (p === "elevenlabs") {
     const voiceId =
       (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
-    return crypto.createHash("sha256").update(`${voiceId}::${text}`).digest("hex");
+    // Include model + settings so changing env doesn't keep serving stale cached audio.
+    const settingsSig = [
+      ELEVENLABS_MODEL_ID,
+      Number.isFinite(ELEVENLABS_STABILITY) ? ELEVENLABS_STABILITY : "",
+      Number.isFinite(ELEVENLABS_SIMILARITY_BOOST) ? ELEVENLABS_SIMILARITY_BOOST : "",
+      Number.isFinite(ELEVENLABS_STYLE) ? ELEVENLABS_STYLE : "",
+      ELEVENLABS_SPEAKER_BOOST ? "boost" : "no-boost"
+    ].join("|");
+    return crypto.createHash("sha256").update(`${voiceId}::${settingsSig}::${text}`).digest("hex");
   }
   // openai
   const voice = persona === "female" ? OPENAI_TTS_VOICE_FEMALE : OPENAI_TTS_VOICE_MALE;
