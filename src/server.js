@@ -222,11 +222,10 @@ function normalizeConversationRelaySettings() {
   // and/or have no TTS settings configured for he-IL (64106).
   // Reliable workaround:
   // - omit any he-IL mapping for TTS (no <Language code="he-IL"...>, no token lang)
-  // - set ttsLanguage to a supported value that Twilio has TTS settings for (e.g. en-US)
-  // - still send Hebrew text tokens; ElevenLabs will read them as-is.
+  // - omit ttsLanguage (let Twilio pick defaults) and still send Hebrew text tokens; ElevenLabs will read them as-is.
   if (ttsProviderLower === "elevenlabs" && startsWithLang(CR_LANGUAGE, "he")) {
     languageAttr = "";
-    if (!ttsLanguageAttr) ttsLanguageAttr = "en-US";
+    ttsLanguageAttr = "";
   }
 
   // --- STT rules ---
