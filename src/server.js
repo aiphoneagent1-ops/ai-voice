@@ -176,6 +176,7 @@ const MS_VAD_THRESHOLD = Number(process.env.MS_VAD_THRESHOLD || 550); // 0..~800
 const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 700);
 const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 400);
 const ELEVENLABS_STREAM_OUTPUT_FORMAT = String(process.env.ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000").trim();
+const MS_TEST_TONE = process.env.MS_TEST_TONE === "1" || process.env.MS_TEST_TONE === "true";
 
 function primaryLangTag(code) {
   const s = String(code || "").trim();
@@ -250,6 +251,39 @@ function mulawToPcmSample(u) {
   let sample = ((mantissa << 4) + MULAW_BIAS) << (exponent + 3);
   sample -= MULAW_BIAS;
   return sign ? -sample : sample;
+}
+
+// 16-bit PCM sample to μ-law byte (G.711)
+function pcmToMulawSample(pcm) {
+  const MULAW_MAX = 0x1fff;
+  const MULAW_BIAS = 0x84;
+  let sign = (pcm >> 8) & 0x80;
+  if (sign) pcm = -pcm;
+  if (pcm > MULAW_MAX) pcm = MULAW_MAX;
+  pcm += MULAW_BIAS;
+
+  // exponent
+  let exponent = 7;
+  for (let expMask = 0x4000; (pcm & expMask) === 0 && exponent > 0; expMask >>= 1) exponent--;
+  let mantissa = (pcm >> (exponent + 3)) & 0x0f;
+  const ulaw = ~(sign | (exponent << 4) | mantissa);
+  return ulaw & 0xff;
+}
+
+function pcm16ToUlawBuffer(pcm16) {
+  const out = Buffer.alloc(pcm16.length);
+  for (let i = 0; i < pcm16.length; i++) out[i] = pcmToMulawSample(pcm16[i]);
+  return out;
+}
+
+function generateUlawTone({ freqHz = 440, ms = 350, sampleRate = 8000, amp = 0.2 } = {}) {
+  const n = Math.max(1, Math.floor((ms / 1000) * sampleRate));
+  const pcm = new Int16Array(n);
+  const a = Math.max(0, Math.min(1, amp)) * 32767;
+  for (let i = 0; i < n; i++) {
+    pcm[i] = Math.round(Math.sin((2 * Math.PI * freqHz * i) / sampleRate) * a);
+  }
+  return pcm16ToUlawBuffer(pcm);
 }
 
 function ulawBufferToPcm16(ulawBuf) {
@@ -2627,6 +2661,17 @@ wssMediaStream.on("connection", (ws, req) => {
 
       // Speak greeting immediately
       inFlight = (async () => {
+        // Debug: prove audio-out works even without ElevenLabs/OpenAI (beep tone)
+        if (MS_TEST_TONE) {
+          try {
+            const tone = generateUlawTone({ freqHz: 440, ms: 350, amp: 0.25 });
+            msLog("test tone", { bytes: tone.length });
+            await playUlaw(tone);
+          } catch (e) {
+            msLog("test tone failed", e?.message || e);
+          }
+        }
+
         // Prefer the greeting saved in DB (avoid relying on XML param parsing/normalization).
         let g = sanitizeSayText(String(greeting || "").trim());
         try {
