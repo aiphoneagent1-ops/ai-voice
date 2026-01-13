@@ -339,7 +339,42 @@ async function elevenlabsTtsToUlaw8000({ text, persona }) {
     console.warn("ElevenLabs ulaw TTS failed:", res.status, errText);
     return null;
   }
-  return Buffer.from(await res.arrayBuffer()); // raw mulaw/8000, no headers
+  const ct = String(res.headers.get("content-type") || "").toLowerCase();
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (MS_DEBUG) {
+    console.log("[ms] elevenlabs ulaw ok", {
+      status: res.status,
+      contentType: ct,
+      bytes: buf.length,
+      format: ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000"
+    });
+  }
+
+  // Safety: sometimes providers return a WAV container. Twilio requires raw mulaw bytes (no headers).
+  // If we detect RIFF/WAVE, extract the "data" chunk.
+  if (buf.length >= 12 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WAVE") {
+    // naive chunk scan
+    let i = 12;
+    while (i + 8 <= buf.length) {
+      const tag = buf.toString("ascii", i, i + 4);
+      const size = buf.readUInt32LE(i + 4);
+      const dataStart = i + 8;
+      if (tag === "data" && dataStart + size <= buf.length) {
+        const raw = buf.subarray(dataStart, dataStart + size);
+        if (MS_DEBUG) console.log("[ms] stripped wav header", { rawBytes: raw.length });
+        return raw;
+      }
+      i = dataStart + size;
+    }
+  }
+
+  // If content-type looks wrong (json/text), avoid sending garbage to Twilio.
+  if (ct && (ct.includes("application/json") || ct.includes("text/"))) {
+    console.warn("ElevenLabs ulaw TTS returned non-audio content-type:", ct);
+    return null;
+  }
+
+  return buf; // raw mulaw/8000 bytes
 }
 function startsWithLang(code, prefix) {
   return new RegExp(`^${String(prefix).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-|$)`, "i").test(String(code || ""));
@@ -2430,6 +2465,7 @@ wssMediaStream.on("connection", (ws, req) => {
     playing = true;
     const CHUNK_BYTES = 160; // 20ms @ 8kHz, 1 byte/sample (mulaw)
     let offset = 0;
+    let sent = 0;
     playTimer = setInterval(() => {
       if (closed || !streamSid || ws.readyState !== ws.OPEN) {
         stopPlayback({ clear: false });
@@ -2443,6 +2479,8 @@ wssMediaStream.on("connection", (ws, req) => {
         streamSid,
         media: { payload: Buffer.from(chunk).toString("base64") }
       });
+      sent++;
+      if (sent === 1) msLog("sent first audio chunk", { callSid, streamSid, bytes: ulawBuf.length });
       if (offset >= ulawBuf.length) {
         wsSendToTwilio({ event: "mark", streamSid, mark: { name: `tts_done_${Date.now()}` } });
         stopPlayback({ clear: false });
@@ -2588,11 +2626,26 @@ wssMediaStream.on("connection", (ws, req) => {
       } catch {}
 
       // Speak greeting immediately
-      if (greeting) {
-        inFlight = (async () => {
-          await sayText(greeting);
-        })().catch(() => {});
-      }
+      inFlight = (async () => {
+        // Prefer the greeting saved in DB (avoid relying on XML param parsing/normalization).
+        let g = sanitizeSayText(String(greeting || "").trim());
+        try {
+          if (callSid) {
+            const row = db
+              .prepare(
+                `SELECT content FROM call_messages WHERE call_sid = ? AND role = 'assistant' ORDER BY id ASC LIMIT 1`
+              )
+              .get(callSid);
+            const fromDb = sanitizeSayText(String(row?.content || "").trim());
+            if (fromDb) g = fromDb;
+          }
+        } catch {}
+        if (!g) g = sanitizeSayText(buildGreeting({ persona }));
+        msLog("greeting", { chars: g.length });
+        await sayText(g);
+      })().catch((e) => {
+        console.warn("[ms] greeting failed", e?.message || e);
+      });
       return;
     }
 
