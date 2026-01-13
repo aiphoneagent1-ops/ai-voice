@@ -169,6 +169,32 @@ function primaryLangTag(code) {
   return s.split("-")[0] || s;
 }
 
+function normalizeTextTokenLang(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  // Prefer BCP-47 like "he-IL". Twilio rejects some values (e.g. plain "he").
+  // Accept language-region, otherwise return empty to omit "lang" entirely.
+  if (/^[a-z]{2,3}-[a-z]{2}$/i.test(s)) return s;
+  // Special-case Hebrew
+  if (/^he(\b|-)/i.test(s)) return "he-IL";
+  return "";
+}
+
+function langForTextTokens() {
+  // Optional override: CR_TEXT_LANG
+  const explicit = normalizeTextTokenLang(process.env.CR_TEXT_LANG);
+  if (explicit) return explicit;
+  const fromCr = normalizeTextTokenLang(CR_LANGUAGE);
+  if (fromCr) return fromCr;
+  return "";
+}
+
+function wsSendText(ws, payload) {
+  const lang = langForTextTokens();
+  const msg = lang ? { ...payload, lang } : payload;
+  wsSendJson(ws, msg);
+}
+
 function startsWithLang(code, prefix) {
   return new RegExp(`^${String(prefix).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-|$)`, "i").test(String(code || ""));
 }
@@ -1945,8 +1971,7 @@ async function streamAssistantToConversationRelay({
   userText
 }) {
   if (!openai) {
-    const lang = primaryLangTag(CR_TRANSCRIPTION_LANGUAGE || CR_LANGUAGE) || "he";
-    wsSendJson(ws, { type: "text", token: "בשביל להמשיך את השיחה החכמה צריך להגדיר מפתח מערכת.", lang, last: true });
+    wsSendText(ws, { type: "text", token: "בשביל להמשיך את השיחה החכמה צריך להגדיר מפתח מערכת.", last: true });
     return;
   }
 
@@ -1977,8 +2002,7 @@ async function streamAssistantToConversationRelay({
     full += delta;
     // Hold back one token chunk so we can mark the last chunk with last:true.
     if (pending) {
-      const lang = primaryLangTag(CR_TRANSCRIPTION_LANGUAGE || CR_LANGUAGE) || "he";
-      wsSendJson(ws, { type: "text", token: pending, lang, last: false, interruptible: true, preemptible: true });
+      wsSendText(ws, { type: "text", token: pending, last: false, interruptible: true, preemptible: true });
     }
     pending = delta;
   }
@@ -1989,8 +2013,7 @@ async function streamAssistantToConversationRelay({
   }
 
   {
-    const lang = primaryLangTag(CR_TRANSCRIPTION_LANGUAGE || CR_LANGUAGE) || "he";
-    wsSendJson(ws, { type: "text", token: pending, lang, last: true, interruptible: true, preemptible: true });
+    wsSendText(ws, { type: "text", token: pending, last: true, interruptible: true, preemptible: true });
   }
 
   const answer = sanitizeSayText(full.trim());
@@ -2102,8 +2125,7 @@ wssConversationRelay.on("connection", (ws, req) => {
       const greeting = sanitizeSayText(String(cp?.greeting || "").trim());
       if (!greetingSent && greeting) {
         greetingSent = true;
-        const lang = primaryLangTag(CR_LANGUAGE) || "he";
-        wsSendJson(ws, { type: "text", token: greeting, lang, last: true, interruptible: true, preemptible: true });
+        wsSendText(ws, { type: "text", token: greeting, last: true, interruptible: true, preemptible: true });
         crLogAlways("sent greeting token", { callSid, chars: greeting.length });
       }
       return;
