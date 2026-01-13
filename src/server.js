@@ -155,11 +155,10 @@ const CR_VOICE = String(process.env.CR_VOICE || "he-IL-Wavenet-D").trim(); // de
 // Some combinations (e.g. ElevenLabs + he-IL) can be rejected by Twilio validation.
 const CR_TRANSCRIPTION_LANGUAGE = String(process.env.CR_TRANSCRIPTION_LANGUAGE || "").trim(); // e.g. "he-IL"
 const CR_TTS_LANGUAGE = String(process.env.CR_TTS_LANGUAGE || "").trim(); // e.g. "multi"
-// STT provider/model: for some languages (e.g. he-IL) Twilio requires these to be explicitly set
-// or it will fail with: "Incomplete value set in TwiML for language ...".
-// Defaults are chosen to be robust for Hebrew.
-const CR_TRANSCRIPTION_PROVIDER = String(process.env.CR_TRANSCRIPTION_PROVIDER || "Deepgram").trim(); // Google | Deepgram
-const CR_SPEECH_MODEL = String(process.env.CR_SPEECH_MODEL || "nova-2-general").trim(); // Deepgram: nova-2-general|nova-3-general, Google: telephony|long|...
+// STT provider/model: Twilio ConversationRelay validates provider+language+model combinations.
+// We default to Google for maximum language coverage (incl. he-IL). You can override via env.
+const CR_TRANSCRIPTION_PROVIDER = String(process.env.CR_TRANSCRIPTION_PROVIDER || "Google").trim(); // Google | Deepgram
+const CR_SPEECH_MODEL = String(process.env.CR_SPEECH_MODEL || "telephony").trim(); // Google: telephony|long|..., Deepgram: nova-2-general|nova-3-general
 const CR_INTERRUPTIBLE = String(process.env.CR_INTERRUPTIBLE || "speech").trim(); // none|dtmf|speech|any
 const CR_INTERRUPT_SENSITIVITY = String(process.env.CR_INTERRUPT_SENSITIVITY || "high").trim(); // low|medium|high
 const CR_DEBUG = String(process.env.CR_DEBUG || "").trim(); // e.g. "debugging speaker-events tokens-played"
@@ -1417,6 +1416,15 @@ app.all("/twilio/voice", async (req, res) => {
         if (!ttsLanguageAttr) ttsLanguageAttr = "multi";
       }
 
+      // Twilio currently rejects Deepgram he-IL (e.g. deepgram/he-IL/nova-2-general).
+      // For Hebrew, default STT to Google telephony unless explicitly overridden via env.
+      let transcriptionProviderAttr = CR_TRANSCRIPTION_PROVIDER;
+      let speechModelAttr = CR_SPEECH_MODEL;
+      if (/^he(-|$)/i.test(transcriptionLanguage) && String(transcriptionProviderAttr).toLowerCase() === "deepgram") {
+        transcriptionProviderAttr = "Google";
+        speechModelAttr = "telephony";
+      }
+
       const xml = buildConversationRelayTwiML({
         wsUrl,
         language: languageAttr,
@@ -1424,8 +1432,8 @@ app.all("/twilio/voice", async (req, res) => {
         ttsProvider: CR_TTS_PROVIDER,
         voice: CR_VOICE,
         transcriptionLanguage,
-        transcriptionProvider: CR_TRANSCRIPTION_PROVIDER,
-        speechModel: CR_SPEECH_MODEL,
+        transcriptionProvider: transcriptionProviderAttr,
+        speechModel: speechModelAttr,
         welcomeGreeting: greeting,
         welcomeGreetingInterruptible: CR_INTERRUPTIBLE,
         interruptible: CR_INTERRUPTIBLE,
