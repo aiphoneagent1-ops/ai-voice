@@ -2464,6 +2464,9 @@ wssMediaStream.on("connection", (ws, req) => {
   // Outbound playback state
   let playTimer = null;
   let playing = false;
+  let playId = 0;
+  /** @type {{ id: number, resolve?: (v:any)=>void, label?: string } | null} */
+  let currentPlay = null;
 
   // Inbound VAD / utterance state
   let speechActive = false;
@@ -2488,38 +2491,65 @@ wssMediaStream.on("connection", (ws, req) => {
     if (playTimer) clearInterval(playTimer);
     playTimer = null;
     playing = false;
+    if (currentPlay?.resolve) {
+      try {
+        currentPlay.resolve({ ok: false, reason: "stopped", label: currentPlay.label });
+      } catch {}
+    }
+    currentPlay = null;
     if (clear && streamSid) {
       wsSendToTwilio({ event: "clear", streamSid });
     }
   }
 
-  async function playUlaw(ulawBuf) {
+  function playUlaw(ulawBuf, { label = "tts" } = {}) {
     if (!ulawBuf || !ulawBuf.length || !streamSid) return;
     stopPlayback({ clear: true });
     playing = true;
     const CHUNK_BYTES = 160; // 20ms @ 8kHz, 1 byte/sample (mulaw)
     let offset = 0;
     let sent = 0;
-    playTimer = setInterval(() => {
-      if (closed || !streamSid || ws.readyState !== ws.OPEN) {
-        stopPlayback({ clear: false });
-        return;
-      }
-      const end = Math.min(offset + CHUNK_BYTES, ulawBuf.length);
-      const chunk = ulawBuf.subarray(offset, end);
-      offset = end;
-      wsSendToTwilio({
-        event: "media",
-        streamSid,
-        media: { payload: Buffer.from(chunk).toString("base64") }
-      });
-      sent++;
-      if (sent === 1) msLog("sent first audio chunk", { callSid, streamSid, bytes: ulawBuf.length });
-      if (offset >= ulawBuf.length) {
-        wsSendToTwilio({ event: "mark", streamSid, mark: { name: `tts_done_${Date.now()}` } });
-        stopPlayback({ clear: false });
-      }
-    }, 20);
+    const myId = ++playId;
+
+    return new Promise((resolve) => {
+      currentPlay = { id: myId, resolve, label };
+      msLog("play start", { callSid, streamSid, label, bytes: ulawBuf.length });
+
+      playTimer = setInterval(() => {
+        if (closed || !streamSid || ws.readyState !== ws.OPEN) {
+          // This will resolve via stopPlayback().
+          stopPlayback({ clear: false });
+          return;
+        }
+        // If a newer play started, abort this one.
+        if (currentPlay?.id !== myId) return;
+
+        const end = Math.min(offset + CHUNK_BYTES, ulawBuf.length);
+        const chunk = ulawBuf.subarray(offset, end);
+        offset = end;
+        wsSendToTwilio({
+          event: "media",
+          streamSid,
+          media: { payload: Buffer.from(chunk).toString("base64") }
+        });
+        sent++;
+        if (sent === 1) msLog("sent first audio chunk", { callSid, streamSid, label, bytes: ulawBuf.length });
+        if (sent % 25 === 0) msLog("sent audio chunks", { label, chunks: sent });
+
+        if (offset >= ulawBuf.length) {
+          wsSendToTwilio({ event: "mark", streamSid, mark: { name: `tts_done_${Date.now()}` } });
+          // Resolve before stopPlayback clears currentPlay.
+          const done = currentPlay;
+          currentPlay = null;
+          playing = false;
+          if (playTimer) clearInterval(playTimer);
+          playTimer = null;
+          try {
+            resolve({ ok: true, label, bytes: ulawBuf.length, chunks: sent });
+          } catch {}
+        }
+      }, 20);
+    });
   }
 
   async function sayText(text) {
@@ -2527,7 +2557,7 @@ wssMediaStream.on("connection", (ws, req) => {
     if (!safe) return;
     const ulaw = await elevenlabsTtsToUlaw8000({ text: safe, persona: AGENT_VOICE_PERSONA });
     if (!ulaw) return;
-    await playUlaw(ulaw);
+    await playUlaw(ulaw, { label: "elevenlabs" });
   }
 
   async function transcribeAndRespond(pcm8kAll) {
@@ -2666,7 +2696,7 @@ wssMediaStream.on("connection", (ws, req) => {
           try {
             const tone = generateUlawTone({ freqHz: 440, ms: 350, amp: 0.25 });
             msLog("test tone", { bytes: tone.length });
-            await playUlaw(tone);
+            await playUlaw(tone, { label: "testTone" });
           } catch (e) {
             msLog("test tone failed", e?.message || e);
           }
