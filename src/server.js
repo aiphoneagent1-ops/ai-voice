@@ -639,10 +639,8 @@ async function elevenlabsTtsToFile({ text, persona }) {
     (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
   if (!voiceId) return null;
 
-  const key = crypto
-    .createHash("sha256")
-    .update(`${voiceId}::${text}`)
-    .digest("hex");
+  // IMPORTANT: must match computeTtsCacheKey() so polling + static /tts lookup work.
+  const key = computeTtsCacheKey({ provider: "elevenlabs", text, persona });
   const filename = `${key}.mp3`;
   const outPath = path.join(ttsDir, filename);
   // ה-URL הציבורי נבנה מה-request בפועל, לכן כאן נחזיר path יחסי.
