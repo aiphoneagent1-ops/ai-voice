@@ -181,6 +181,11 @@ function normalizeTextTokenLang(raw) {
 }
 
 function langForTextTokens() {
+  // If using ElevenLabs with Hebrew content, Twilio may block or lack TTS settings for he-IL.
+  // In that case we omit token lang entirely and rely on a supported ttsLanguage (set in TwiML).
+  if (String(CR_TTS_PROVIDER || "").toLowerCase() === "elevenlabs" && startsWithLang(CR_LANGUAGE, "he")) {
+    return "";
+  }
   // Optional override: CR_TEXT_LANG
   const explicit = normalizeTextTokenLang(process.env.CR_TEXT_LANG);
   if (explicit) return explicit;
@@ -213,14 +218,15 @@ function normalizeConversationRelaySettings() {
 
   // --- TTS rules ---
   // Hebrew + ElevenLabs via Twilio ConversationRelay:
-  // - Twilio may reject ElevenLabs + language="he-IL" AND may not have TTS settings for he-IL (64106).
-  // Workaround:
-  // - omit language attribute (avoid validation)
-  // - use a nested <Language code="he-IL" .../> mapping for TTS
+  // Some accounts reject/block ElevenLabs for he-IL at TwiML validation time (64101 block_elevenlabs/he-IL/...),
+  // and/or have no TTS settings configured for he-IL (64106).
+  // Reliable workaround:
+  // - omit any he-IL mapping for TTS (no <Language code="he-IL"...>, no token lang)
+  // - set ttsLanguage to a supported value that Twilio has TTS settings for (e.g. en-US)
+  // - still send Hebrew text tokens; ElevenLabs will read them as-is.
   if (ttsProviderLower === "elevenlabs" && startsWithLang(CR_LANGUAGE, "he")) {
     languageAttr = "";
-    // Let Twilio use the nested <Language> mapping; don't force ttsLanguage.
-    if (!ttsLanguageAttr) ttsLanguageAttr = "";
+    if (!ttsLanguageAttr) ttsLanguageAttr = "en-US";
   }
 
   // --- STT rules ---
@@ -1536,16 +1542,9 @@ app.all("/twilio/voice", async (req, res) => {
           persona,
           greeting
         },
-        languageElements:
-          String(CR_TTS_PROVIDER).toLowerCase() === "elevenlabs" && startsWithLang(CR_LANGUAGE, "he")
-            ? [
-                {
-                  code: "he-IL",
-                  ttsProvider: "ElevenLabs",
-                  voice: CR_VOICE
-                }
-              ]
-            : []
+        // IMPORTANT: Do NOT add <Language code="he-IL"...> for ElevenLabs.
+        // Some accounts get 64101: block_elevenlabs/he-IL/<voiceId> when that mapping is present.
+        languageElements: []
       });
 
       // Breadcrumb for correlating Twilio /twilio/voice request with WS logs.
