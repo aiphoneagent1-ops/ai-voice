@@ -113,9 +113,20 @@ const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || process.env.ELEVE
 const ELEVENLABS_VOICE_MALE = process.env.ELEVENLABS_VOICE_MALE || "";
 const ELEVENLABS_VOICE_FEMALE = process.env.ELEVENLABS_VOICE_FEMALE || "";
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
-const ELEVENLABS_STABILITY = Number(process.env.ELEVENLABS_STABILITY || 0.4);
-const ELEVENLABS_SIMILARITY_BOOST = Number(process.env.ELEVENLABS_SIMILARITY_BOOST || 0.8);
-const ELEVENLABS_STYLE = Number(process.env.ELEVENLABS_STYLE || 0); // 0..1 (optional)
+const IS_ELEVEN_V3 = String(ELEVENLABS_MODEL_ID).toLowerCase() === "eleven_v3";
+function parseFiniteEnvNumber(raw, fallback) {
+  const v = Number(raw);
+  return Number.isFinite(v) ? v : fallback;
+}
+// Match UI defaults:
+// - Multilingual v2: stability 0.4, similarity 0.8, style 0
+// - Eleven v3 (alpha): stability 0.5 (UI shows only stability)
+const ELEVENLABS_STABILITY = parseFiniteEnvNumber(
+  process.env.ELEVENLABS_STABILITY,
+  IS_ELEVEN_V3 ? 0.5 : 0.4
+);
+const ELEVENLABS_SIMILARITY_BOOST = parseFiniteEnvNumber(process.env.ELEVENLABS_SIMILARITY_BOOST, 0.8);
+const ELEVENLABS_STYLE = parseFiniteEnvNumber(process.env.ELEVENLABS_STYLE, 0); // 0..1 (optional)
 const ELEVENLABS_SPEAKER_BOOST =
   process.env.ELEVENLABS_SPEAKER_BOOST === "1" || process.env.ELEVENLABS_SPEAKER_BOOST === "true";
 
@@ -123,7 +134,8 @@ const ELEVENLABS_SPEAKER_BOOST =
 // ElevenLabs docs: codec_sample_rate_bitrate (e.g. mp3_44100_128, mp3_22050_32, etc.)
 const ELEVENLABS_OUTPUT_FORMAT = String(process.env.ELEVENLABS_OUTPUT_FORMAT || "mp3_44100_128").trim();
 // ISO 639-1 (e.g. "he"). Enforces language + normalization.
-const ELEVENLABS_LANGUAGE_CODE = String(process.env.ELEVENLABS_LANGUAGE_CODE || "he").trim();
+// Leave empty by default to match ElevenLabs UI behavior; set in env if you want to force Hebrew ("he").
+const ELEVENLABS_LANGUAGE_CODE = String(process.env.ELEVENLABS_LANGUAGE_CODE || "").trim();
 
 // Product requirement: agent voice is always male. We still adapt grammar to the callee's gender.
 const AGENT_VOICE_PERSONA = "male";
@@ -670,13 +682,18 @@ async function elevenlabsTtsToFile({ text, persona }) {
       text,
       model_id: ELEVENLABS_MODEL_ID,
       ...(ELEVENLABS_LANGUAGE_CODE ? { language_code: ELEVENLABS_LANGUAGE_CODE } : {}),
-      voice_settings: {
-        stability: Number.isFinite(ELEVENLABS_STABILITY) ? ELEVENLABS_STABILITY : 0.4,
-        similarity_boost: Number.isFinite(ELEVENLABS_SIMILARITY_BOOST) ? ELEVENLABS_SIMILARITY_BOOST : 0.8,
-        // Optional knobs (some voices/models benefit from these):
-        ...(Number.isFinite(ELEVENLABS_STYLE) ? { style: Math.max(0, Math.min(1, ELEVENLABS_STYLE)) } : {}),
-        ...(ELEVENLABS_SPEAKER_BOOST ? { use_speaker_boost: true } : {})
-      }
+      // Eleven v3 (alpha) UI exposes only Stability; keep request minimal to match it closely.
+      voice_settings: IS_ELEVEN_V3
+        ? {
+            stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY))
+          }
+        : {
+            stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)),
+            similarity_boost: Math.max(0, Math.min(1, ELEVENLABS_SIMILARITY_BOOST)),
+            // Optional knobs (some voices/models benefit from these):
+            ...(Number.isFinite(ELEVENLABS_STYLE) ? { style: Math.max(0, Math.min(1, ELEVENLABS_STYLE)) } : {}),
+            ...(ELEVENLABS_SPEAKER_BOOST ? { use_speaker_boost: true } : {})
+          }
     })
   });
 
@@ -773,15 +790,19 @@ function computeTtsCacheKey({ provider, text, persona }) {
     const voiceId =
       (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
     // Include model + settings so changing env doesn't keep serving stale cached audio.
-    const settingsSig = [
-      ELEVENLABS_MODEL_ID,
-      ELEVENLABS_OUTPUT_FORMAT || "",
-      ELEVENLABS_LANGUAGE_CODE || "",
-      Number.isFinite(ELEVENLABS_STABILITY) ? ELEVENLABS_STABILITY : "",
-      Number.isFinite(ELEVENLABS_SIMILARITY_BOOST) ? ELEVENLABS_SIMILARITY_BOOST : "",
-      Number.isFinite(ELEVENLABS_STYLE) ? ELEVENLABS_STYLE : "",
-      ELEVENLABS_SPEAKER_BOOST ? "boost" : "no-boost"
-    ].join("|");
+    const settingsSig = IS_ELEVEN_V3
+      ? [ELEVENLABS_MODEL_ID, ELEVENLABS_OUTPUT_FORMAT || "", ELEVENLABS_LANGUAGE_CODE || "", ELEVENLABS_STABILITY].join(
+          "|"
+        )
+      : [
+          ELEVENLABS_MODEL_ID,
+          ELEVENLABS_OUTPUT_FORMAT || "",
+          ELEVENLABS_LANGUAGE_CODE || "",
+          Number.isFinite(ELEVENLABS_STABILITY) ? ELEVENLABS_STABILITY : "",
+          Number.isFinite(ELEVENLABS_SIMILARITY_BOOST) ? ELEVENLABS_SIMILARITY_BOOST : "",
+          Number.isFinite(ELEVENLABS_STYLE) ? ELEVENLABS_STYLE : "",
+          ELEVENLABS_SPEAKER_BOOST ? "boost" : "no-boost"
+        ].join("|");
     return crypto.createHash("sha256").update(`${voiceId}::${settingsSig}::${text}`).digest("hex");
   }
   // openai
