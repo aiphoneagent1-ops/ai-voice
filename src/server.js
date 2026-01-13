@@ -162,6 +162,8 @@ const CR_SPEECH_MODEL = String(process.env.CR_SPEECH_MODEL || "telephony").trim(
 const CR_INTERRUPTIBLE = String(process.env.CR_INTERRUPTIBLE || "speech").trim(); // none|dtmf|speech|any
 const CR_INTERRUPT_SENSITIVITY = String(process.env.CR_INTERRUPT_SENSITIVITY || "high").trim(); // low|medium|high
 const CR_DEBUG = String(process.env.CR_DEBUG || "").trim(); // e.g. "debugging speaker-events tokens-played"
+// Twilio ConversationRelay: ElevenLabs-only option. Values: on|auto|off
+const CR_ELEVENLABS_TEXT_NORMALIZATION = String(process.env.CR_ELEVENLABS_TEXT_NORMALIZATION || "").trim();
 
 function primaryLangTag(code) {
   const s = String(code || "").trim();
@@ -289,6 +291,7 @@ function buildConversationRelayTwiML({
   transcriptionLanguage,
   transcriptionProvider,
   speechModel,
+  elevenlabsTextNormalization,
   welcomeGreeting,
   welcomeGreetingInterruptible,
   interruptible,
@@ -329,6 +332,7 @@ function buildConversationRelayTwiML({
     transcriptionLanguage ? `transcriptionLanguage="${escapeXmlAttr(transcriptionLanguage)}"` : "",
     transcriptionProvider ? `transcriptionProvider="${escapeXmlAttr(transcriptionProvider)}"` : "",
     speechModel ? `speechModel="${escapeXmlAttr(speechModel)}"` : "",
+    elevenlabsTextNormalization ? `elevenlabsTextNormalization="${escapeXmlAttr(elevenlabsTextNormalization)}"` : "",
     welcomeGreeting ? `welcomeGreeting="${escapeXmlAttr(welcomeGreeting)}"` : "",
     welcomeGreetingInterruptible ? `welcomeGreetingInterruptible="${escapeXmlAttr(welcomeGreetingInterruptible)}"` : "",
     interruptible ? `interruptible="${escapeXmlAttr(interruptible)}"` : "",
@@ -1535,6 +1539,8 @@ app.all("/twilio/voice", async (req, res) => {
         transcriptionLanguage,
         transcriptionProvider: transcriptionProviderAttr,
         speechModel: speechModelAttr,
+        elevenlabsTextNormalization:
+          String(CR_TTS_PROVIDER).toLowerCase() === "elevenlabs" ? CR_ELEVENLABS_TEXT_NORMALIZATION : "",
         // Avoid TwiML welcomeGreeting to prevent "silent greeting" cases.
         // We'll send the greeting as the first "text" token from our WebSocket handler on setup.
         welcomeGreeting: "",
