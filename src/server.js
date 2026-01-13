@@ -178,6 +178,9 @@ const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 700);
 const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 400);
 const ELEVENLABS_STREAM_OUTPUT_FORMAT = String(process.env.ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000").trim();
 const MS_TEST_TONE = process.env.MS_TEST_TONE === "1" || process.env.MS_TEST_TONE === "true";
+// Barge-in tuning: avoid clearing agent speech on line noise/echo.
+const MS_BARGE_IN_FRAMES = Number(process.env.MS_BARGE_IN_FRAMES || 5); // 5 frames * 20ms = 100ms
+const MS_BARGE_IN_GRACE_MS = Number(process.env.MS_BARGE_IN_GRACE_MS || 350); // don't barge-in instantly after agent starts
 
 function primaryLangTag(code) {
   const s = String(code || "").trim();
@@ -2468,10 +2471,12 @@ wssMediaStream.on("connection", (ws, req) => {
   let playId = 0;
   /** @type {{ id: number, resolve?: (v:any)=>void, label?: string } | null} */
   let currentPlay = null;
+  let playingSince = 0;
 
   // Inbound VAD / utterance state
   let speechActive = false;
   let lastVoiceAt = 0;
+  let bargeInFrames = 0;
   /** @type {Int16Array[]} */
   let utterancePcm8kChunks = [];
   let utteranceStartAt = 0;
@@ -2492,6 +2497,7 @@ wssMediaStream.on("connection", (ws, req) => {
     if (playTimer) clearInterval(playTimer);
     playTimer = null;
     playing = false;
+    playingSince = 0;
     if (currentPlay?.resolve) {
       try {
         currentPlay.resolve({ ok: false, reason: "stopped", label: currentPlay.label });
@@ -2507,6 +2513,7 @@ wssMediaStream.on("connection", (ws, req) => {
     if (!ulawBuf || !ulawBuf.length || !streamSid) return;
     stopPlayback({ clear: true });
     playing = true;
+    playingSince = Date.now();
     const CHUNK_BYTES = 160; // 20ms @ 8kHz, 1 byte/sample (mulaw)
     let offset = 0;
     let sent = 0;
@@ -2761,11 +2768,32 @@ wssMediaStream.on("connection", (ws, req) => {
         }
         utterancePcm8kChunks.push(pcm16);
 
-        // Barge-in: if caller speaks while we're playing, stop and clear Twilio buffer.
-        if (playing) stopPlayback({ clear: true });
+        // Barge-in (debounced): only interrupt after sustained voiced frames,
+        // and not immediately after agent starts (prevents noise/echo causing silence).
+        if (playing) {
+          const inGrace = playingSince && now - playingSince < MS_BARGE_IN_GRACE_MS;
+          if (!inGrace) {
+            bargeInFrames++;
+            if (bargeInFrames >= Math.max(1, MS_BARGE_IN_FRAMES)) {
+              if (MS_DEBUG) {
+                msLog("barge-in: clear", {
+                  label: currentPlay?.label || "",
+                  rms: Math.round(rms),
+                  frames: bargeInFrames
+                });
+              }
+              bargeInFrames = 0;
+              stopPlayback({ clear: true });
+            }
+          }
+        }
       } else if (speechActive) {
         // Keep short trailing silence to help Whisper; but don't grow unbounded.
         if (utterancePcm8kChunks.length < 400) utterancePcm8kChunks.push(pcm16);
+      }
+      if (!voiced && bargeInFrames > 0) {
+        // decay quickly so random noise doesn't accumulate
+        bargeInFrames = Math.max(0, bargeInFrames - 1);
       }
 
       if (speechActive && lastVoiceAt && now - lastVoiceAt >= MS_END_SILENCE_MS) {
