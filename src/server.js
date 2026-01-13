@@ -181,6 +181,10 @@ function normalizeTextTokenLang(raw) {
 }
 
 function langForTextTokens() {
+  // Hebrew + ElevenLabs: omit lang to avoid Twilio mapping to he-IL TTS (64106).
+  if (String(CR_TTS_PROVIDER || "").toLowerCase() === "elevenlabs" && startsWithLang(CR_LANGUAGE, "he")) {
+    return "";
+  }
   // Optional override: CR_TEXT_LANG
   const explicit = normalizeTextTokenLang(process.env.CR_TEXT_LANG);
   if (explicit) return explicit;
@@ -212,11 +216,15 @@ function normalizeConversationRelaySettings() {
   const sttProviderLower = String(transcriptionProviderAttr || "").toLowerCase();
 
   // --- TTS rules ---
-  // Twilio validation may reject ElevenLabs + language="he-IL".
-  // Workaround: omit language, set ttsLanguage="multi" and send lang="he" per token.
-  if (ttsProviderLower === "elevenlabs" && startsWithLang(transcriptionLanguage, "he")) {
+  // Hebrew + ElevenLabs via Twilio ConversationRelay:
+  // - Twilio may reject ElevenLabs + language="he-IL" AND may not have TTS settings for he-IL (64106).
+  // Workaround:
+  // - omit language attribute (avoid validation)
+  // - set a supported ttsLanguage that Twilio *does* have TTS settings for (e.g. en-US)
+  // - do NOT send 'lang' in text tokens (so Twilio doesn't try to map to he-IL).
+  if (ttsProviderLower === "elevenlabs" && startsWithLang(CR_LANGUAGE, "he")) {
     languageAttr = "";
-    if (!ttsLanguageAttr) ttsLanguageAttr = "multi";
+    if (!ttsLanguageAttr) ttsLanguageAttr = "en-US";
   }
 
   // --- STT rules ---
