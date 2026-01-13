@@ -1474,15 +1474,18 @@ app.all("/twilio/voice", async (req, res) => {
         transcriptionLanguage,
         transcriptionProvider: transcriptionProviderAttr,
         speechModel: speechModelAttr,
-        welcomeGreeting: greeting,
-        welcomeGreetingInterruptible: CR_INTERRUPTIBLE,
+        // Avoid TwiML welcomeGreeting to prevent "silent greeting" cases.
+        // We'll send the greeting as the first "text" token from our WebSocket handler on setup.
+        welcomeGreeting: "",
+        welcomeGreetingInterruptible: "",
         interruptible: CR_INTERRUPTIBLE,
         interruptSensitivity: CR_INTERRUPT_SENSITIVITY,
         debug: CR_DEBUG,
         customParameters: {
           callSid,
           phone,
-          persona
+          persona,
+          greeting
         }
       });
 
@@ -1910,6 +1913,16 @@ function wsSendJson(ws, obj) {
   } catch {}
 }
 
+function crServerDebugEnabled() {
+  // If TwiML debug is enabled, Twilio will send debugging events; enable our server logs too.
+  return Boolean(CR_DEBUG) || process.env.CR_SERVER_DEBUG === "1" || process.env.CR_SERVER_DEBUG === "true";
+}
+
+function crLog(...args) {
+  if (!crServerDebugEnabled()) return;
+  console.log("[cr]", ...args);
+}
+
 async function streamAssistantToConversationRelay({
   ws,
   callSid,
@@ -1977,16 +1990,28 @@ const server = http.createServer(app);
 
 // ConversationRelay WebSocket server (only used when REALTIME_MODE=1)
 const wssConversationRelay = new WebSocketServer({ server, path: "/twilio/conversationrelay" });
-wssConversationRelay.on("connection", (ws) => {
+wssConversationRelay.on("connection", (ws, req) => {
   // Session state per socket
   let callSid = "";
   let phone = "";
   let persona = "male";
   let inFlight = null; // Promise
   let closed = false;
+  let greetingSent = false;
+
+  crLog("ws connected", {
+    path: req?.url,
+    ua: req?.headers?.["user-agent"],
+    ip:
+      req?.headers?.["x-forwarded-for"] ||
+      req?.headers?.["cf-connecting-ip"] ||
+      req?.socket?.remoteAddress ||
+      ""
+  });
 
   ws.on("close", () => {
     closed = true;
+    crLog("ws closed", { callSid, phone });
   });
 
   ws.on("message", (data) => {
@@ -2000,6 +2025,7 @@ wssConversationRelay.on("connection", (ws) => {
     }
 
     const t = String(msg?.type || "");
+    crLog("ws message", { type: t });
     if (t === "setup") {
       callSid = String(msg?.callSid || "");
       const cp = msg?.customParameters || {};
@@ -2009,6 +2035,16 @@ wssConversationRelay.on("connection", (ws) => {
         try {
           createOrGetCall(db, { callSid, phone, persona });
         } catch {}
+      }
+
+      // Send greeting immediately after setup (instead of TwiML welcomeGreeting).
+      // This also doubles as a health check that TTS is working at all.
+      const greeting = sanitizeSayText(String(cp?.greeting || "").trim());
+      if (!greetingSent && greeting) {
+        greetingSent = true;
+        const lang = primaryLangTag(CR_LANGUAGE) || "he";
+        wsSendJson(ws, { type: "text", token: greeting, lang, last: true, interruptible: true, preemptible: true });
+        crLog("sent greeting token", { callSid, chars: greeting.length });
       }
       return;
     }
