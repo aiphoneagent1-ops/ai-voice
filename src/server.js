@@ -181,10 +181,6 @@ function normalizeTextTokenLang(raw) {
 }
 
 function langForTextTokens() {
-  // Hebrew + ElevenLabs: omit lang to avoid Twilio mapping to he-IL TTS (64106).
-  if (String(CR_TTS_PROVIDER || "").toLowerCase() === "elevenlabs" && startsWithLang(CR_LANGUAGE, "he")) {
-    return "";
-  }
   // Optional override: CR_TEXT_LANG
   const explicit = normalizeTextTokenLang(process.env.CR_TEXT_LANG);
   if (explicit) return explicit;
@@ -220,11 +216,11 @@ function normalizeConversationRelaySettings() {
   // - Twilio may reject ElevenLabs + language="he-IL" AND may not have TTS settings for he-IL (64106).
   // Workaround:
   // - omit language attribute (avoid validation)
-  // - set a supported ttsLanguage that Twilio *does* have TTS settings for (e.g. en-US)
-  // - do NOT send 'lang' in text tokens (so Twilio doesn't try to map to he-IL).
+  // - use a nested <Language code="he-IL" .../> mapping for TTS
   if (ttsProviderLower === "elevenlabs" && startsWithLang(CR_LANGUAGE, "he")) {
     languageAttr = "";
-    if (!ttsLanguageAttr) ttsLanguageAttr = "en-US";
+    // Let Twilio use the nested <Language> mapping; don't force ttsLanguage.
+    if (!ttsLanguageAttr) ttsLanguageAttr = "";
   }
 
   // --- STT rules ---
@@ -286,12 +282,31 @@ function buildConversationRelayTwiML({
   interruptible,
   interruptSensitivity,
   debug,
-  customParameters = {}
+  customParameters = {},
+  languageElements = []
 }) {
   const paramsXml = Object.entries(customParameters)
     .filter(([k, val]) => k && val != null && String(val).length)
     .map(([k, val]) => `<Parameter name="${escapeXmlAttr(k)}" value="${escapeXmlAttr(val)}" />`)
     .join("");
+
+  const languagesXml = Array.isArray(languageElements)
+    ? languageElements
+        .filter((x) => x && x.code)
+        .map((x) => {
+          const attrs = [
+            `code="${escapeXmlAttr(x.code)}"`,
+            x.ttsProvider ? `ttsProvider="${escapeXmlAttr(x.ttsProvider)}"` : "",
+            x.voice ? `voice="${escapeXmlAttr(x.voice)}"` : "",
+            x.transcriptionProvider ? `transcriptionProvider="${escapeXmlAttr(x.transcriptionProvider)}"` : "",
+            x.speechModel ? `speechModel="${escapeXmlAttr(x.speechModel)}"` : ""
+          ]
+            .filter(Boolean)
+            .join(" ");
+          return `<Language ${attrs} />`;
+        })
+        .join("")
+    : "";
 
   const attrs = [
     `url="${escapeXmlAttr(wsUrl)}"`,
@@ -314,7 +329,7 @@ function buildConversationRelayTwiML({
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <ConversationRelay ${attrs}>${paramsXml}</ConversationRelay>
+    <ConversationRelay ${attrs}>${paramsXml}${languagesXml}</ConversationRelay>
   </Connect>
 </Response>`;
 }
@@ -1520,7 +1535,17 @@ app.all("/twilio/voice", async (req, res) => {
           phone,
           persona,
           greeting
-        }
+        },
+        languageElements:
+          String(CR_TTS_PROVIDER).toLowerCase() === "elevenlabs" && startsWithLang(CR_LANGUAGE, "he")
+            ? [
+                {
+                  code: "he-IL",
+                  ttsProvider: "ElevenLabs",
+                  voice: CR_VOICE
+                }
+              ]
+            : []
       });
 
       // Breadcrumb for correlating Twilio /twilio/voice request with WS logs.
