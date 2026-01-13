@@ -119,6 +119,15 @@ const ELEVENLABS_STYLE = Number(process.env.ELEVENLABS_STYLE || 0); // 0..1 (opt
 const ELEVENLABS_SPEAKER_BOOST =
   process.env.ELEVENLABS_SPEAKER_BOOST === "1" || process.env.ELEVENLABS_SPEAKER_BOOST === "true";
 
+// Force a deterministic MP3 output (helps Twilio playback quality; avoids VBR surprises).
+// ElevenLabs docs: codec_sample_rate_bitrate (e.g. mp3_44100_128, mp3_22050_32, etc.)
+const ELEVENLABS_OUTPUT_FORMAT = String(process.env.ELEVENLABS_OUTPUT_FORMAT || "mp3_44100_128").trim();
+// ISO 639-1 (e.g. "he"). Enforces language + normalization.
+const ELEVENLABS_LANGUAGE_CODE = String(process.env.ELEVENLABS_LANGUAGE_CODE || "he").trim();
+
+// Product requirement: agent voice is always male. We still adapt grammar to the callee's gender.
+const AGENT_VOICE_PERSONA = "male";
+
 const MAX_TURNS = Number(process.env.MAX_TURNS || 6); // 6 סבבים ~ 2 דק' בשיחה קצרה
 
 const db = openDb({ dbPath: DB_PATH });
@@ -188,9 +197,9 @@ const DEFAULT_KNOWLEDGE_BASE = `
 - אם יש עניין: להעביר ללשכה לרישום (ולסיים את השיחה).
 `.trim();
 
-// הקול של הסוכנת הוא נשי. גם כשמתקשרים לגבר, הדיבור בלשון נקבה.
-const DEFAULT_OPENING_MALE = `שלום אחי, מדברת ממשרד הקהילה בחדרה. רציתי להזמין אותך לשיעור תורה קרוב—יש לך דקה?`;
-const DEFAULT_OPENING_FEMALE = `שלום יקרה, מדברת ממשרד הקהילה בחדרה. רציתי להזמין אותך להפרשת חלה קרובה—יש לך דקה?`;
+// הסוכן תמיד בקול גברי; הדקדוק ללקוח/ה מותאם לפי המין שלהם/שלה.
+const DEFAULT_OPENING_MALE = `שלום אחי, מדבר ממשרד הקהילה בחדרה. רציתי להזמין אותך לשיעור תורה קרוב—יש לך דקה?`;
+const DEFAULT_OPENING_FEMALE = `שלום יקרה, מדבר ממשרד הקהילה בחדרה. רציתי להזמין אותך להפרשת חלה קרובה—יש לך דקה?`;
 
 const DEFAULT_MIDDLE_MALE = `
 מטרת האמצע: להבין מהר אם יש עניין, לענות קצר, ולהציע לבוא פעם אחת לנסות.
@@ -200,10 +209,10 @@ const DEFAULT_MIDDLE_MALE = `
 - "בדרך כלל זה 45–60 דקות, יש כיבוד קל, ואפשר לבוא פעם אחת רק לנסות. אם תרצה—הלשכה תתן שעה/מקום מדויק."
 
 אם שואלים "מי זה?/מאיפה יש לכם את המספר?"
-- "אני ממשרד הקהילה בחדרה. המספר אצלנו ברשימה של אנשים שאישרו לקבל עדכון. אם לא מתאים—אני מורידה אותך."
+- "אני ממשרד הקהילה בחדרה. המספר אצלנו ברשימה של אנשים שאישרו לקבל עדכון. אם לא מתאים—אני מוריד אותך."
 
 אם אומרים "אין לי זמן"
-- "מבינה. זה קצר ונעים. רוצה לנסות פעם אחת, רק לראות אם זה מתאים?"
+- "מבין. זה קצר ונעים. רוצה לנסות פעם אחת, רק לראות אם זה מתאים?"
 
 אם אומרים "אני לא דתי"
 - "הכל טוב אחי, זה פתוח לכולם. באים לשמוע ולהתחזק קצת, בלי התחייבות."
@@ -212,10 +221,10 @@ const DEFAULT_MIDDLE_MALE = `
 - "הפרטים המדויקים אצל הלשכה—אני יכולה להעביר אותך לרישום והם יגידו שעה וכתובת."
 
 אם יש הסכמה/עניין
-- "מעולה. אז אני מעבירה עכשיו את הפרטים שלך ללשכה שלנו לרישום ופרטים, בסדר?"
+- "מעולה. אז אני מעביר עכשיו את הפרטים שלך ללשכה שלנו לרישום ופרטים, בסדר?"
 
 אם מבקשים להסיר/לא להתקשר
-- "בטח, מורידה אותך עכשיו. תודה רבה ויום טוב."
+- "בטח, מוריד אותך עכשיו. תודה רבה ויום טוב."
 `.trim();
 
 const DEFAULT_MIDDLE_FEMALE = `
@@ -226,7 +235,7 @@ const DEFAULT_MIDDLE_FEMALE = `
 - "בדרך כלל זה בערך שעה–שעה וחצי, יש אווירה משפחתית וקצת כיבוד. אם תרצי—הלשכה תתן שעה/מקום מדויק."
 
 אם שואלים "מי זה?/מאיפה יש לכם את המספר?"
-- "אני ממשרד הקהילה בחדרה. המספר אצלנו ברשימה של אנשים שאישרו לקבל עדכון. אם לא מתאים—אני מורידה אותך."
+- "אני ממשרד הקהילה בחדרה. המספר אצלנו ברשימה של אנשים שאישרו לקבל עדכון. אם לא מתאים—אני מוריד אותך."
 
 אם שואלים "מה זה הפרשת חלה?"
 - "מפגש נשים בחדרה, קצת חיזוק, הפרשת חלה ותפילה קצרה. אווירה טובה, באמת."
@@ -235,7 +244,7 @@ const DEFAULT_MIDDLE_FEMALE = `
 - "זה בסדר גמור, זה פתוח לכולן. באות נשים מכל הסוגים."
 
 אם אומרים "אין לי זמן"
-- "מבינה. זה לא ארוך. ואם תרצי—תבואי פעם אחת רק לראות."
+- "מבין. זה לא ארוך. ואם תרצי—תבואי פעם אחת רק לראות."
 
 אם שואלים "איפה/מתי?/כמה עולה?"
 - "אני לא רוצה להמציא. הלשכה נותנת את כל הפרטים בהרשמה—שעה, כתובת ואם יש עלות."
@@ -244,12 +253,12 @@ const DEFAULT_MIDDLE_FEMALE = `
 - "מעולה יקרה. אז להעביר אותך עכשיו ללשכה שלנו לרישום?"
 
 אם מבקשים להסיר/לא להתקשר
-- "בטח, מורידה אותך עכשיו. תודה רבה ויום טוב."
+- "בטח, מוריד אותך עכשיו. תודה רבה ויום טוב."
 `.trim();
 
 const DEFAULT_CLOSING_MALE = `
 אם הבן אדם רוצה/מסכים:
-- "מעולה אחי. אני מעבירה עכשיו את הפרטים שלך ללשכה שלנו לרישום ופרטים, והם יחזרו אליך. תודה רבה!"
+- "מעולה אחי. אני מעביר עכשיו את הפרטים שלך ללשכה שלנו לרישום ופרטים, והם יחזרו אליך. תודה רבה!"
 - ואז לסיים שיחה.
 
 אם הבן אדם לא רוצה:
@@ -259,7 +268,7 @@ const DEFAULT_CLOSING_MALE = `
 
 const DEFAULT_CLOSING_FEMALE = `
 אם היא רוצה/מסכימה:
-- "מדהים יקרה. אני מעבירה אותך עכשיו ללשכה שלנו לרישום ופרטים. תודה רבה!"
+- "מדהים יקרה. אני מעביר עכשיו את הפרטים שלך ללשכה שלנו לרישום ופרטים, והם יחזרו אלייך. תודה רבה!"
 - ואז לסיים שיחה.
 
 אם היא לא רוצה:
@@ -319,11 +328,11 @@ function sanitizeSayText(text) {
 async function respondWithPlayAndMaybeHangup(req, res, { text, persona, hangup = true, retry = 0 }) {
   const safe = sanitizeSayText(text);
   const provider = TTS_PROVIDER || "openai";
-  const key = computeTtsCacheKey({ provider, text: safe, persona });
+  const key = computeTtsCacheKey({ provider, text: safe, persona: AGENT_VOICE_PERSONA });
   const cached = findCachedAudioByKey(key);
 
   if (!cached) {
-    kickoffTtsGeneration({ provider, text: safe, persona }).catch(() => {});
+    kickoffTtsGeneration({ provider, text: safe, persona: AGENT_VOICE_PERSONA }).catch(() => {});
     const redirectUrl = toAbsoluteUrl(
       req,
       `${hangup ? "/twilio/play_end" : "/twilio/play"}?k=${encodeURIComponent(key)}&a=0${
@@ -466,14 +475,14 @@ function quickReplyByRules({ speech, persona }) {
     faq.repeat || (faq.hasQWord && (faq.who || faq.what || faq.where || faq.when || faq.cost || faq.howLong));
   if (!shouldUse) return null;
 
-  // כל התשובות בלשון נקבה (הקול נשי)
+  // תשובות קצרות וקבועות. הסוכן תמיד מדבר בלשון זכר; הדקדוק ללקוח/ה לפי persona.
   if (faq.repeat) {
-    return { text: "ברור, אני מסבירה שוב בקצרה. יש לך דקה רגע?", end: false };
+    return { text: "ברור, אני מסביר שוב בקצרה. יש לך דקה רגע?", end: false };
   }
   if (faq.who) {
     return {
       text:
-        "אני מהלשכה של הקהילה בחדרה. המספר אצלנו ברשימה של אנשים שאישרו לקבל עדכון. אם לא מתאים לך—אני מורידה אותך מיד, בסדר?",
+        "אני מהלשכה של הקהילה בחדרה. המספר אצלנו ברשימה של אנשים שאישרו לקבל עדכון. אם לא מתאים לך—אני מוריד אותך מיד, בסדר?",
       end: false
     };
   }
@@ -492,9 +501,10 @@ function quickReplyByRules({ speech, persona }) {
     };
   }
   if (faq.where || faq.when || faq.cost || faq.howLong) {
+    const toYou = persona === "female" ? "אלייך" : "אליך";
     return {
       text:
-        "את הפרטים המדויקים—שעה, מקום ואם יש עלות—הלשכה נותנת בהרשמה. רוצה שאעביר עכשיו את הפרטים שלך ללשכה שלנו שיחזרו אליך?",
+        `את הפרטים המדויקים—שעה, מקום ואם יש עלות—הלשכה נותנת בהרשמה. רוצה שאעביר עכשיו את הפרטים שלך ללשכה שלנו שיחזרו ${toYou}?`,
       end: false
     };
   }
@@ -646,7 +656,10 @@ async function elevenlabsTtsToFile({ text, persona }) {
   // ה-URL הציבורי נבנה מה-request בפועל, לכן כאן נחזיר path יחסי.
   if (fs.existsSync(outPath)) return `/tts/${filename}`;
 
-  const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${encodeURIComponent(
+    ELEVENLABS_OUTPUT_FORMAT || "mp3_44100_128"
+  )}`;
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "xi-api-key": ELEVENLABS_API_KEY,
@@ -656,6 +669,7 @@ async function elevenlabsTtsToFile({ text, persona }) {
     body: JSON.stringify({
       text,
       model_id: ELEVENLABS_MODEL_ID,
+      ...(ELEVENLABS_LANGUAGE_CODE ? { language_code: ELEVENLABS_LANGUAGE_CODE } : {}),
       voice_settings: {
         stability: Number.isFinite(ELEVENLABS_STABILITY) ? ELEVENLABS_STABILITY : 0.4,
         similarity_boost: Number.isFinite(ELEVENLABS_SIMILARITY_BOOST) ? ELEVENLABS_SIMILARITY_BOOST : 0.8,
@@ -761,6 +775,8 @@ function computeTtsCacheKey({ provider, text, persona }) {
     // Include model + settings so changing env doesn't keep serving stale cached audio.
     const settingsSig = [
       ELEVENLABS_MODEL_ID,
+      ELEVENLABS_OUTPUT_FORMAT || "",
+      ELEVENLABS_LANGUAGE_CODE || "",
       Number.isFinite(ELEVENLABS_STABILITY) ? ELEVENLABS_STABILITY : "",
       Number.isFinite(ELEVENLABS_SIMILARITY_BOOST) ? ELEVENLABS_SIMILARITY_BOOST : "",
       Number.isFinite(ELEVENLABS_STYLE) ? ELEVENLABS_STYLE : "",
@@ -1183,10 +1199,10 @@ async function handleTwilioVoice(req, res) {
   // אבל גם חשוב שהשיחה *תמיד* תתחיל בפתיח (ולא רק beep+הקלטה).
   // לכן נשתמש באותו polling endpoint (/twilio/play) כמו בתשובות באמצע שיחה.
   const provider = TTS_PROVIDER || "openai";
-  const key = computeTtsCacheKey({ provider, text: greeting, persona });
+  const key = computeTtsCacheKey({ provider, text: greeting, persona: AGENT_VOICE_PERSONA });
   const cached = findCachedAudioByKey(key);
   if (!cached) {
-    kickoffTtsGeneration({ provider, text: greeting, persona }).catch(() => {});
+    kickoffTtsGeneration({ provider, text: greeting, persona: AGENT_VOICE_PERSONA }).catch(() => {});
     const redirectUrl = toAbsoluteUrl(
       req,
       `/twilio/play?callSid=${encodeURIComponent(callSid)}&k=${encodeURIComponent(key)}&a=0`
@@ -1245,7 +1261,7 @@ app.all("/twilio/record", async (req, res) => {
       // Don't hang up immediately if the user is still speaking / recording failed.
       if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
         await respondWithPlayAndMaybeHangup(req, res, {
-          text: "לא שמעתי אותך טוב. אפשר להגיד שוב? אני מקשיבה.",
+          text: "לא שמעתי אותך טוב. אפשר להגיד שוב? אני מקשיב.",
           persona,
           hangup: false,
           retry: retry + 1
@@ -1316,7 +1332,7 @@ app.all("/twilio/record", async (req, res) => {
     if (!speech) {
       if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
         await respondWithPlayAndMaybeHangup(req, res, {
-          text: "לא הבנתי אותך טוב. אפשר לחזור שוב במשפט שלם? אני מקשיבה.",
+          text: "לא הבנתי אותך טוב. אפשר לחזור שוב במשפט שלם? אני מקשיב.",
           persona,
           hangup: false,
           retry: retry + 1
@@ -1367,10 +1383,10 @@ app.all("/twilio/record", async (req, res) => {
         addMessage(db, { callSid, role: "assistant", content: safe });
 
         const provider = TTS_PROVIDER || "openai";
-        const key = computeTtsCacheKey({ provider, text: safe, persona });
+        const key = computeTtsCacheKey({ provider, text: safe, persona: AGENT_VOICE_PERSONA });
         const cached = findCachedAudioByKey(key);
         if (!cached) {
-          kickoffTtsGeneration({ provider, text: safe, persona }).catch(() => {});
+          kickoffTtsGeneration({ provider, text: safe, persona: AGENT_VOICE_PERSONA }).catch(() => {});
           const redirectUrl = toAbsoluteUrl(
             req,
             `/twilio/play?callSid=${encodeURIComponent(callSid)}&k=${encodeURIComponent(key)}&a=0`
@@ -1403,17 +1419,18 @@ app.all("/twilio/record", async (req, res) => {
       try {
         upsertLead(db, { phone, status: interested ? "won" : "lost", callSid, persona });
       } catch {}
+      const toYou = persona === "female" ? "אלייך" : "אליך";
       const picked =
         (interested
-          ? "מעולה. אני מעבירה עכשיו את הפרטים שלך ללשכה שלנו, והם יחזרו אליך בהקדם עם רישום ופרטים. תודה רבה!"
+          ? `מעולה. אני מעביר עכשיו את הפרטים שלך ללשכה שלנו, והם יחזרו ${toYou} בהקדם עם רישום ופרטים. תודה רבה!`
           : "הבנתי, אין בעיה. תודה על הזמן, יום טוב.");
       const safe = sanitizeSayText(picked);
 
       const provider = TTS_PROVIDER || "openai";
-      const key = computeTtsCacheKey({ provider, text: safe, persona });
+      const key = computeTtsCacheKey({ provider, text: safe, persona: AGENT_VOICE_PERSONA });
       const cached = findCachedAudioByKey(key);
       if (!cached) {
-        kickoffTtsGeneration({ provider, text: safe, persona }).catch(() => {});
+        kickoffTtsGeneration({ provider, text: safe, persona: AGENT_VOICE_PERSONA }).catch(() => {});
         const redirectUrl = toAbsoluteUrl(req, `/twilio/play_end?k=${encodeURIComponent(key)}&a=0`);
         const response = new twilio.twiml.VoiceResponse();
         response.pause({ length: TTS_POLL_WAIT_SECONDS });
@@ -1448,10 +1465,12 @@ app.all("/twilio/record", async (req, res) => {
     }
 
     // לא נחכה ל-TTS בתוך webhook של Twilio. נשתמש בקאש אם קיים, אחרת נתחיל יצירה ברקע ונעשה poll.
-    const key = computeTtsCacheKey({ provider: TTS_PROVIDER || "openai", text: answer, persona });
+    const key = computeTtsCacheKey({ provider: TTS_PROVIDER || "openai", text: answer, persona: AGENT_VOICE_PERSONA });
     const cached = findCachedAudioByKey(key);
     if (!cached) {
-      kickoffTtsGeneration({ provider: TTS_PROVIDER || "openai", text: answer, persona }).catch(() => {});
+      kickoffTtsGeneration({ provider: TTS_PROVIDER || "openai", text: answer, persona: AGENT_VOICE_PERSONA }).catch(
+        () => {}
+      );
       const redirectUrl = toAbsoluteUrl(
         req,
         `/twilio/play?callSid=${encodeURIComponent(callSid)}&k=${encodeURIComponent(key)}&a=0`
@@ -1625,8 +1644,9 @@ app.listen(PORT, HOST, () => {
       const maleGreeting = sanitizeSayText(buildGreeting({ persona: "male" }));
       const femaleGreeting = sanitizeSayText(buildGreeting({ persona: "female" }));
       await Promise.all([
-        ttsToPath({ text: maleGreeting, persona: "male" }),
-        ttsToPath({ text: femaleGreeting, persona: "female" })
+        // Prewarm both greeting variants, but always in the agent's (male) voice.
+        ttsToPath({ text: maleGreeting, persona: AGENT_VOICE_PERSONA }),
+        ttsToPath({ text: femaleGreeting, persona: AGENT_VOICE_PERSONA })
       ]);
       if (DEBUG_TTS) console.log("[tts] prewarm complete");
     } catch (e) {
