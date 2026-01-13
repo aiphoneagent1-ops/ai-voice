@@ -93,7 +93,12 @@ const GEMINI_TTS_TIMEOUT_MS = Number(process.env.GEMINI_TTS_TIMEOUT_MS || 8000);
 const USE_FAQ_RULES = process.env.USE_FAQ_RULES === "1";
 const TTS_POLL_MAX = Number(process.env.TTS_POLL_MAX || 20);
 const TTS_POLL_WAIT_SECONDS = Number(process.env.TTS_POLL_WAIT_SECONDS || 1);
-const REALTIME_MODE = process.env.REALTIME_MODE === "1";
+// Realtime modes:
+// - "1": Twilio ConversationRelay (text in/out; Twilio handles STT/TTS)
+// - "2": Twilio Media Streams (audio in/out; our server handles STT+LLM+TTS)
+const REALTIME_MODE = String(process.env.REALTIME_MODE || "0").trim();
+const CR_MODE = REALTIME_MODE === "1";
+const MS_MODE = REALTIME_MODE === "2";
 // Twilio <Record> max length per utterance. If too small, callers get cut mid-sentence.
 // We enforce a sane minimum; override by setting a larger value.
 const RECORD_MAX_LENGTH_SECONDS = Math.max(6, Number(process.env.RECORD_MAX_LENGTH_SECONDS || 6));
@@ -144,7 +149,7 @@ const ELEVENLABS_LANGUAGE_CODE = String(process.env.ELEVENLABS_LANGUAGE_CODE || 
 const AGENT_VOICE_PERSONA = "male";
 
 // ConversationRelay (Realtime voice via Twilio)
-const CR_ENABLED = REALTIME_MODE;
+const CR_ENABLED = CR_MODE;
 const CR_LANGUAGE = String(process.env.CR_LANGUAGE || "he-IL").trim();
 const CR_TTS_PROVIDER = String(process.env.CR_TTS_PROVIDER || "Google").trim(); // Google | Amazon | ElevenLabs
 const CR_VOICE = String(process.env.CR_VOICE || "he-IL-Wavenet-D").trim(); // default: male Hebrew (Google)
@@ -164,6 +169,13 @@ const CR_INTERRUPT_SENSITIVITY = String(process.env.CR_INTERRUPT_SENSITIVITY || 
 const CR_DEBUG = String(process.env.CR_DEBUG || "").trim(); // e.g. "debugging speaker-events tokens-played"
 // Twilio ConversationRelay: ElevenLabs-only option. Values: on|auto|off
 const CR_ELEVENLABS_TEXT_NORMALIZATION = String(process.env.CR_ELEVENLABS_TEXT_NORMALIZATION || "").trim();
+
+// Media Streams (Realtime audio in/out)
+const MS_DEBUG = process.env.MS_DEBUG === "1" || process.env.MS_DEBUG === "true";
+const MS_VAD_THRESHOLD = Number(process.env.MS_VAD_THRESHOLD || 550); // 0..~8000
+const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 700);
+const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 400);
+const ELEVENLABS_STREAM_OUTPUT_FORMAT = String(process.env.ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000").trim();
 
 function primaryLangTag(code) {
   const s = String(code || "").trim();
@@ -209,6 +221,126 @@ function wsSendText(ws, payload) {
   wsSendJson(ws, msg);
 }
 
+function buildMediaStreamTwiML({ wsUrl, customParameters = {} }) {
+  const paramsXml = Object.entries(customParameters)
+    .filter(([k, val]) => k && val != null && String(val).length)
+    .map(([k, val]) => `<Parameter name="${escapeXmlAttr(k)}" value="${escapeXmlAttr(val)}" />`)
+    .join("");
+
+  // Bidirectional Media Stream (audio in/out): <Connect><Stream>
+  // Note: for bidirectional streams, Twilio only sends inbound_track to us,
+  // but we can send outbound audio back as "media" events.
+  const attrs = [`url="${escapeXmlAttr(wsUrl)}"`, `track="inbound_track"`].join(" ");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream ${attrs}>${paramsXml}</Stream>
+  </Connect>
+</Response>`;
+}
+
+// μ-law decode (G.711) to 16-bit PCM
+function mulawToPcmSample(u) {
+  // u: 0..255
+  const MULAW_BIAS = 0x84;
+  u = (~u) & 0xff;
+  const sign = u & 0x80;
+  let exponent = (u >> 4) & 0x07;
+  let mantissa = u & 0x0f;
+  let sample = ((mantissa << 4) + MULAW_BIAS) << (exponent + 3);
+  sample -= MULAW_BIAS;
+  return sign ? -sample : sample;
+}
+
+function ulawBufferToPcm16(ulawBuf) {
+  const out = new Int16Array(ulawBuf.length);
+  for (let i = 0; i < ulawBuf.length; i++) out[i] = mulawToPcmSample(ulawBuf[i]);
+  return out;
+}
+
+function rmsFromPcm16(pcm) {
+  let sum = 0;
+  for (let i = 0; i < pcm.length; i++) {
+    const v = pcm[i];
+    sum += v * v;
+  }
+  return Math.sqrt(sum / Math.max(1, pcm.length));
+}
+
+function upsample8kTo16k(pcm8k) {
+  // simple linear interpolation (2x)
+  const out = new Int16Array(pcm8k.length * 2);
+  for (let i = 0; i < pcm8k.length; i++) {
+    const s0 = pcm8k[i];
+    const s1 = i + 1 < pcm8k.length ? pcm8k[i + 1] : s0;
+    out[i * 2] = s0;
+    out[i * 2 + 1] = (s0 + s1) >> 1;
+  }
+  return out;
+}
+
+function pcm16ToWavBuffer(pcm16, sampleRate) {
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  const dataSize = pcm16.length * 2;
+  const buf = Buffer.alloc(44 + dataSize);
+  let o = 0;
+  buf.write("RIFF", o); o += 4;
+  buf.writeUInt32LE(36 + dataSize, o); o += 4;
+  buf.write("WAVE", o); o += 4;
+  buf.write("fmt ", o); o += 4;
+  buf.writeUInt32LE(16, o); o += 4; // PCM
+  buf.writeUInt16LE(1, o); o += 2; // format
+  buf.writeUInt16LE(numChannels, o); o += 2;
+  buf.writeUInt32LE(sampleRate, o); o += 4;
+  buf.writeUInt32LE(byteRate, o); o += 4;
+  buf.writeUInt16LE(blockAlign, o); o += 2;
+  buf.writeUInt16LE(bitsPerSample, o); o += 2;
+  buf.write("data", o); o += 4;
+  buf.writeUInt32LE(dataSize, o); o += 4;
+  for (let i = 0; i < pcm16.length; i++, o += 2) buf.writeInt16LE(pcm16[i], o);
+  return buf;
+}
+
+async function elevenlabsTtsToUlaw8000({ text, persona }) {
+  if (!ELEVENLABS_API_KEY) return null;
+  const voiceId =
+    (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
+  if (!voiceId) return null;
+
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${encodeURIComponent(
+    ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000"
+  )}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "xi-api-key": ELEVENLABS_API_KEY,
+      "Content-Type": "application/json",
+      Accept: "audio/x-mulaw"
+    },
+    body: JSON.stringify({
+      text,
+      model_id: ELEVENLABS_MODEL_ID,
+      ...(ELEVENLABS_LANGUAGE_CODE ? { language_code: ELEVENLABS_LANGUAGE_CODE } : {}),
+      voice_settings: IS_ELEVEN_V3
+        ? { stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)) }
+        : {
+            stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)),
+            similarity_boost: Math.max(0, Math.min(1, ELEVENLABS_SIMILARITY_BOOST)),
+            ...(Number.isFinite(ELEVENLABS_STYLE) ? { style: Math.max(0, Math.min(1, ELEVENLABS_STYLE)) } : {}),
+            ...(ELEVENLABS_SPEAKER_BOOST ? { use_speaker_boost: true } : {})
+          }
+    })
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    console.warn("ElevenLabs ulaw TTS failed:", res.status, errText);
+    return null;
+  }
+  return Buffer.from(await res.arrayBuffer()); // raw mulaw/8000, no headers
+}
 function startsWithLang(code, prefix) {
   return new RegExp(`^${String(prefix).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-|$)`, "i").test(String(code || ""));
 }
@@ -1495,6 +1627,50 @@ async function handleTwilioVoice(req, res) {
 // נקודת התחלה לשיחה (משמשת גם ב-url של calls.create)
 app.all("/twilio/voice", async (req, res) => {
   try {
+    if (MS_MODE) {
+      const callSid = String(getParam(req, "CallSid") || "");
+      const phone = getConversationPhone(req);
+      const contact = getContactByPhone(db, phone);
+      if (contact?.do_not_call) {
+        await respondWithPlayAndMaybeHangup(req, res, { text: "בסדר גמור. יום טוב.", persona: "female", hangup: true });
+        return;
+      }
+
+      const persona = pickPersona(contact);
+      createOrGetCall(db, { callSid, phone, persona });
+
+      const { openingScript, openingScriptMale, openingScriptFemale } = settingsSnapshot();
+      const personaOpening =
+        persona === "female" ? (openingScriptFemale || openingScript) : (openingScriptMale || openingScript);
+      const greeting = sanitizeSayText(String(personaOpening || "").trim() || buildGreeting({ persona }));
+
+      // Save greeting once so the LLM won't repeat it.
+      try {
+        const c = db.prepare(`SELECT COUNT(1) AS c FROM call_messages WHERE call_sid = ?`).get(callSid)?.c ?? 0;
+        if (Number(c) === 0) addMessage(db, { callSid, role: "assistant", content: greeting });
+      } catch {}
+
+      const httpBase = getPublicBaseUrl(req);
+      const wsBase = toWsUrlFromHttpBase(httpBase);
+      const wsUrl = `${wsBase}/twilio/mediastream`;
+
+      const xml = buildMediaStreamTwiML({
+        wsUrl,
+        customParameters: {
+          callSid,
+          phone,
+          persona,
+          greeting
+        }
+      });
+
+      if (MS_DEBUG) {
+        console.log("[ms] twiml served", { callSid, wsUrl });
+      }
+      res.type("text/xml").send(xml);
+      return;
+    }
+
     if (CR_ENABLED) {
       const callSid = String(getParam(req, "CallSid") || "");
       const phone = getConversationPhone(req);
@@ -2085,6 +2261,17 @@ server.on("upgrade", (req) => {
           ""
       });
     }
+    if (u.includes("/twilio/mediastream") && MS_DEBUG) {
+      console.log("[ms] ws upgrade", {
+        url: u,
+        ua: req?.headers?.["user-agent"],
+        ip:
+          req?.headers?.["x-forwarded-for"] ||
+          req?.headers?.["cf-connecting-ip"] ||
+          req?.socket?.remoteAddress ||
+          ""
+      });
+    }
   } catch {}
 });
 
@@ -2215,6 +2402,292 @@ wssConversationRelay.on("connection", (ws, req) => {
         wsSendJson(ws, { type: "text", token: "סליחה, הייתה תקלה קטנה. אפשר להגיד שוב?", last: true });
         if (DEBUG_TTS) console.warn("[cr] handler error:", e?.message || e);
       });
+    }
+  });
+});
+
+// Media Streams WebSocket server (used when REALTIME_MODE=2)
+const wssMediaStream = new WebSocketServer({ server, path: "/twilio/mediastream" });
+wssMediaStream.on("error", (e) => {
+  console.warn("[ms] wss error", e?.message || e);
+});
+wssMediaStream.on("connection", (ws, req) => {
+  let streamSid = "";
+  let callSid = "";
+  let phone = "";
+  let persona = "male";
+  let greeting = "";
+  let closed = false;
+
+  // Outbound playback state
+  let playTimer = null;
+  let playing = false;
+
+  // Inbound VAD / utterance state
+  let speechActive = false;
+  let lastVoiceAt = 0;
+  /** @type {Int16Array[]} */
+  let utterancePcm8kChunks = [];
+  let utteranceStartAt = 0;
+  let inFlight = null; // Promise
+
+  function msLog(...args) {
+    if (MS_DEBUG) console.log("[ms]", ...args);
+  }
+
+  function wsSendToTwilio(obj) {
+    if (closed) return;
+    try {
+      ws.send(JSON.stringify(obj));
+    } catch {}
+  }
+
+  function stopPlayback({ clear = false } = {}) {
+    if (playTimer) clearInterval(playTimer);
+    playTimer = null;
+    playing = false;
+    if (clear && streamSid) {
+      wsSendToTwilio({ event: "clear", streamSid });
+    }
+  }
+
+  async function playUlaw(ulawBuf) {
+    if (!ulawBuf || !ulawBuf.length || !streamSid) return;
+    stopPlayback({ clear: true });
+    playing = true;
+    const CHUNK_BYTES = 160; // 20ms @ 8kHz, 1 byte/sample (mulaw)
+    let offset = 0;
+    playTimer = setInterval(() => {
+      if (closed || !streamSid || ws.readyState !== ws.OPEN) {
+        stopPlayback({ clear: false });
+        return;
+      }
+      const end = Math.min(offset + CHUNK_BYTES, ulawBuf.length);
+      const chunk = ulawBuf.subarray(offset, end);
+      offset = end;
+      wsSendToTwilio({
+        event: "media",
+        streamSid,
+        media: { payload: Buffer.from(chunk).toString("base64") }
+      });
+      if (offset >= ulawBuf.length) {
+        wsSendToTwilio({ event: "mark", streamSid, mark: { name: `tts_done_${Date.now()}` } });
+        stopPlayback({ clear: false });
+      }
+    }, 20);
+  }
+
+  async function sayText(text) {
+    const safe = sanitizeSayText(String(text || "").trim());
+    if (!safe) return;
+    const ulaw = await elevenlabsTtsToUlaw8000({ text: safe, persona: AGENT_VOICE_PERSONA });
+    if (!ulaw) return;
+    await playUlaw(ulaw);
+  }
+
+  async function transcribeAndRespond(pcm8kAll) {
+    if (!openai) return;
+    if (!pcm8kAll || !pcm8kAll.length) return;
+
+    // Convert to 16k wav for Whisper (better quality than 8k).
+    const pcm16k = upsample8kTo16k(pcm8kAll);
+    const wav = pcm16ToWavBuffer(pcm16k, 16000);
+    const tmpDir = path.resolve(DATA_DIR, "recordings");
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+    const tmpPath = path.join(tmpDir, `ms-${callSid || "call"}-${Date.now()}.wav`);
+    fs.writeFileSync(tmpPath, wav);
+
+    let speech = "";
+    try {
+      const transcription = await openai.audio.transcriptions.create({
+        model: OPENAI_STT_MODEL,
+        file: fs.createReadStream(tmpPath),
+        language: "he",
+        prompt: OPENAI_STT_PROMPT
+      });
+      speech = String(transcription.text || "").trim();
+    } catch (e) {
+      console.warn("[ms] transcription failed", e?.message || e);
+    }
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {}
+
+    if (!speech) return;
+    msLog("stt", { callSid, chars: speech.length });
+
+    // Barge-in: if caller starts talking mid-playback, we already clear buffered audio.
+    // Now handle business logic + LLM response.
+    try {
+      if (callSid && phone) addMessage(db, { callSid, role: "user", content: speech });
+    } catch {}
+
+    // Lead tracking (only when explicit)
+    try {
+      const interested = detectInterested(speech) && !detectNotInterested(speech);
+      const notInterested = detectNotInterested(speech) && !interested;
+      if (callSid && phone && (interested || notInterested)) {
+        upsertLead(db, { phone, status: interested ? "won" : "lost", callSid, persona });
+      }
+    } catch {}
+
+    // Opt-out fast path
+    if (detectOptOut(speech)) {
+      try {
+        if (phone) markDoNotCall(db, phone);
+      } catch {}
+      await sayText("אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב.");
+      return;
+    }
+
+    // LLM
+    let answer = "תודה רבה, יום טוב.";
+    try {
+      const knowledgeForThisTurn = getSetting(db, "knowledgeBase", "");
+      const system = buildSystemPrompt({ persona, knowledgeBase: knowledgeForThisTurn });
+      const history = callSid ? getMessages(db, callSid, { limit: 10 }) : [];
+      const messages = [{ role: "system", content: system }, ...history, { role: "user", content: speech }];
+      const completion = await openai.chat.completions.create({
+        model: OPENAI_MODEL,
+        messages,
+        temperature: 0.3,
+        max_tokens: 140
+      });
+      answer = sanitizeSayText((completion.choices?.[0]?.message?.content || "").trim() || answer);
+    } catch (e) {
+      console.warn("[ms] LLM failed", e?.message || e);
+      answer = "סליחה, הייתה תקלה קטנה. אפשר להגיד שוב?";
+    }
+
+    try {
+      if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: answer });
+    } catch {}
+
+    await sayText(answer);
+  }
+
+  msLog("ws connected", {
+    path: req?.url,
+    ua: req?.headers?.["user-agent"],
+    ip:
+      req?.headers?.["x-forwarded-for"] ||
+      req?.headers?.["cf-connecting-ip"] ||
+      req?.socket?.remoteAddress ||
+      ""
+  });
+
+  ws.on("close", () => {
+    closed = true;
+    stopPlayback({ clear: false });
+    msLog("ws closed", { callSid, streamSid, phone });
+  });
+
+  ws.on("error", (e) => {
+    msLog("ws error", e?.message || e);
+  });
+
+  ws.on("message", (data) => {
+    if (closed) return;
+    let msg = null;
+    try {
+      msg = JSON.parse(String(data || ""));
+    } catch {
+      return;
+    }
+
+    const ev = String(msg?.event || "");
+    if (ev === "connected") {
+      msLog("connected", { protocol: msg?.protocol, version: msg?.version });
+      return;
+    }
+
+    if (ev === "start") {
+      streamSid = String(msg?.start?.streamSid || msg?.streamSid || "");
+      callSid = String(msg?.start?.callSid || "");
+      const cp = msg?.start?.customParameters || {};
+      phone = String(cp?.phone || "");
+      persona = String(cp?.persona || "male");
+      greeting = String(cp?.greeting || "");
+      msLog("start", { callSid, streamSid, phone });
+
+      try {
+        if (callSid && phone) createOrGetCall(db, { callSid, phone, persona });
+      } catch {}
+
+      // Speak greeting immediately
+      if (greeting) {
+        inFlight = (async () => {
+          await sayText(greeting);
+        })().catch(() => {});
+      }
+      return;
+    }
+
+    if (ev === "media") {
+      const track = String(msg?.media?.track || "");
+      if (track && track !== "inbound") return;
+      const b64 = String(msg?.media?.payload || "");
+      if (!b64) return;
+
+      const ulawBuf = Buffer.from(b64, "base64");
+      const pcm16 = ulawBufferToPcm16(ulawBuf);
+      const rms = rmsFromPcm16(pcm16);
+      const now = Date.now();
+
+      const voiced = rms >= MS_VAD_THRESHOLD;
+      if (voiced) {
+        lastVoiceAt = now;
+        if (!speechActive) {
+          speechActive = true;
+          utterancePcm8kChunks = [];
+          utteranceStartAt = now;
+        }
+        utterancePcm8kChunks.push(pcm16);
+
+        // Barge-in: if caller speaks while we're playing, stop and clear Twilio buffer.
+        if (playing) stopPlayback({ clear: true });
+      } else if (speechActive) {
+        // Keep short trailing silence to help Whisper; but don't grow unbounded.
+        if (utterancePcm8kChunks.length < 400) utterancePcm8kChunks.push(pcm16);
+      }
+
+      if (speechActive && lastVoiceAt && now - lastVoiceAt >= MS_END_SILENCE_MS) {
+        const durMs = now - utteranceStartAt;
+        const chunks = utterancePcm8kChunks;
+        speechActive = false;
+        utterancePcm8kChunks = [];
+        utteranceStartAt = 0;
+        lastVoiceAt = 0;
+
+        if (durMs < MS_MIN_UTTERANCE_MS) return;
+
+        // Concatenate
+        let total = 0;
+        for (const c of chunks) total += c.length;
+        const pcmAll = new Int16Array(total);
+        let o = 0;
+        for (const c of chunks) {
+          pcmAll.set(c, o);
+          o += c.length;
+        }
+
+        // Only one pipeline at a time; newer utterances can wait.
+        inFlight = (inFlight || Promise.resolve())
+          .then(() => transcribeAndRespond(pcmAll))
+          .catch(() => {});
+      }
+      return;
+    }
+
+    if (ev === "stop") {
+      msLog("stop", { callSid, streamSid });
+      return;
+    }
+
+    if (ev === "mark") {
+      // Twilio acks our marks; useful for debugging audio playback completion.
+      msLog("mark", { name: msg?.mark?.name || "" });
+      return;
     }
   });
 });
