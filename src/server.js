@@ -172,6 +172,7 @@ const CR_ELEVENLABS_TEXT_NORMALIZATION = String(process.env.CR_ELEVENLABS_TEXT_N
 
 // Media Streams (Realtime audio in/out)
 const MS_DEBUG = process.env.MS_DEBUG === "1" || process.env.MS_DEBUG === "true";
+const MS_LOG_EVERY_FRAME = process.env.MS_LOG_EVERY_FRAME === "1" || process.env.MS_LOG_EVERY_FRAME === "true";
 const MS_VAD_THRESHOLD = Number(process.env.MS_VAD_THRESHOLD || 550); // 0..~8000
 const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 700);
 const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 400);
@@ -2533,6 +2534,14 @@ wssMediaStream.on("connection", (ws, req) => {
           media: { payload: Buffer.from(chunk).toString("base64") }
         });
         sent++;
+        if (MS_LOG_EVERY_FRAME) {
+          msLog("frame", {
+            label,
+            chunk: sent,
+            offset,
+            end: offset >= ulawBuf.length
+          });
+        }
         if (sent === 1) msLog("sent first audio chunk", { callSid, streamSid, label, bytes: ulawBuf.length });
         if (sent % 25 === 0) msLog("sent audio chunks", { label, chunks: sent });
 
