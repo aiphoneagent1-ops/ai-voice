@@ -8,7 +8,7 @@ import { WebSocketServer } from "ws";
 import { OpenAI } from "openai";
 import twilio from "twilio";
 import multer from "multer";
-import xlsx from "xlsx";
+import ExcelJS from "exceljs";
 import { parse as csvParse } from "csv-parse/sync";
 
 import {
@@ -1102,21 +1102,55 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
     return;
   }
 
-  const wb = xlsx.read(req.file.buffer, { type: "buffer" });
-  const sheetName = wb.SheetNames[0];
-  if (!sheetName) return res.status(400).json({ error: "no sheets found" });
-  const sheet = wb.Sheets[sheetName];
-  const rows = xlsx.utils.sheet_to_json(sheet, { defval: "" });
+  // NOTE: We intentionally do NOT use the `xlsx` package due to unresolved security advisories.
+  // ExcelJS parses XLSX safely enough for our use-case (simple header row + scalar values).
+  (async () => {
+    function normalizeCellValue(v) {
+      if (v == null) return "";
+      if (v instanceof Date) return v.toISOString();
+      if (typeof v === "object") {
+        // ExcelJS can return rich objects for formulas, hyperlinks, etc.
+        if ("text" in v && typeof v.text === "string") return v.text;
+        if ("richText" in v && Array.isArray(v.richText)) return v.richText.map((p) => p?.text || "").join("");
+        if ("result" in v) return normalizeCellValue(v.result);
+        if ("hyperlink" in v && typeof v.hyperlink === "string") return v.hyperlink;
+        if ("formula" in v && "result" in v) return normalizeCellValue(v.result);
+      }
+      return String(v);
+    }
 
-  for (const r of rows) {
-    const phone = String(r.phone || r.Phone || r.PHONE || "").trim();
-    if (!phone) continue;
-    const gender = parseGender(r.gender || r.Gender || r.GENDER || "");
-    const firstName = String(r.first_name || r.firstName || r.name || r.Name || "").trim() || null;
-    upsertContact(db, { phone, gender, firstName });
-    imported++;
-  }
-  res.json({ ok: true, imported, type: "xlsx" });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(req.file.buffer);
+    const ws = wb.worksheets[0];
+    if (!ws) return res.status(400).json({ error: "no sheets found" });
+
+    const headerRow = ws.getRow(1);
+    const headers = (headerRow?.values || []).slice(1).map((h) => String(h || "").trim());
+    if (!headers.some(Boolean)) return res.status(400).json({ error: "missing header row" });
+
+    for (let i = 2; i <= ws.rowCount; i++) {
+      const row = ws.getRow(i);
+      if (!row || !row.hasValues) continue;
+      const r = {};
+      for (let c = 0; c < headers.length; c++) {
+        const key = headers[c];
+        if (!key) continue;
+        r[key] = normalizeCellValue(row.getCell(c + 1).value);
+      }
+
+      const phone = String(r.phone || r.Phone || r.PHONE || "").trim();
+      if (!phone) continue;
+      const gender = parseGender(r.gender || r.Gender || r.GENDER || "");
+      const firstName = String(r.first_name || r.firstName || r.name || r.Name || "").trim() || null;
+      upsertContact(db, { phone, gender, firstName });
+      imported++;
+    }
+
+    res.json({ ok: true, imported, type: "xlsx" });
+  })().catch((err) => {
+    console.error("[import-xlsx] failed:", err);
+    res.status(400).json({ error: "failed to parse xlsx" });
+  });
 });
 
 function toGoogleCsvUrl(url) {
