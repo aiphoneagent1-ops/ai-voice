@@ -2494,6 +2494,17 @@ wssMediaStream.on("connection", (ws, req) => {
   }
 
   function stopPlayback({ clear = false } = {}) {
+    if (MS_DEBUG && currentPlay) {
+      // Snapshot where we stopped (proves whether we streamed multiple frames or only 1).
+      const meta = currentPlay?.meta || {};
+      msLog("play stop", {
+        label: currentPlay?.label || "",
+        reason: clear ? "clear" : "stop",
+        framesSent: Number(meta.framesSent || 0),
+        offset: Number(meta.offset || 0),
+        totalBytes: Number(meta.totalBytes || 0)
+      });
+    }
     if (playTimer) clearInterval(playTimer);
     playTimer = null;
     playing = false;
@@ -2520,7 +2531,12 @@ wssMediaStream.on("connection", (ws, req) => {
     const myId = ++playId;
 
     return new Promise((resolve) => {
-      currentPlay = { id: myId, resolve, label };
+      currentPlay = {
+        id: myId,
+        resolve,
+        label,
+        meta: { framesSent: 0, offset: 0, totalBytes: ulawBuf.length }
+      };
       msLog("play start", { callSid, streamSid, label, bytes: ulawBuf.length });
 
       const tick = () => {
@@ -2541,6 +2557,12 @@ wssMediaStream.on("connection", (ws, req) => {
           media: { payload: Buffer.from(chunk).toString("base64") }
         });
         sent++;
+        // update stop/diagnostic snapshot
+        if (currentPlay?.meta) {
+          currentPlay.meta.framesSent = sent;
+          currentPlay.meta.offset = offset;
+          currentPlay.meta.totalBytes = ulawBuf.length;
+        }
         if (MS_LOG_EVERY_FRAME) {
           msLog("frame", {
             label,
