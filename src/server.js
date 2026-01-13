@@ -2516,7 +2516,7 @@ wssMediaStream.on("connection", (ws, req) => {
       currentPlay = { id: myId, resolve, label };
       msLog("play start", { callSid, streamSid, label, bytes: ulawBuf.length });
 
-      playTimer = setInterval(() => {
+      const tick = () => {
         if (closed || !streamSid || ws.readyState !== ws.OPEN) {
           // This will resolve via stopPlayback().
           stopPlayback({ clear: false });
@@ -2557,7 +2557,14 @@ wssMediaStream.on("connection", (ws, req) => {
             resolve({ ok: true, label, bytes: ulawBuf.length, chunks: sent });
           } catch {}
         }
-      }, 20);
+      };
+
+      // Send the first frame immediately (do not wait 20ms) so short calls still hear something.
+      tick();
+      if (!currentPlay || currentPlay.id !== myId) return;
+      if (offset >= ulawBuf.length) return;
+
+      playTimer = setInterval(tick, 20);
     });
   }
 
