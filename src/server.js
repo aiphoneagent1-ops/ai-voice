@@ -3,6 +3,8 @@ import express from "express";
 import crypto from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
+import http from "node:http";
+import { WebSocketServer } from "ws";
 import { OpenAI } from "openai";
 import twilio from "twilio";
 import multer from "multer";
@@ -91,6 +93,7 @@ const GEMINI_TTS_TIMEOUT_MS = Number(process.env.GEMINI_TTS_TIMEOUT_MS || 8000);
 const USE_FAQ_RULES = process.env.USE_FAQ_RULES === "1";
 const TTS_POLL_MAX = Number(process.env.TTS_POLL_MAX || 20);
 const TTS_POLL_WAIT_SECONDS = Number(process.env.TTS_POLL_WAIT_SECONDS || 1);
+const REALTIME_MODE = process.env.REALTIME_MODE === "1";
 // Twilio <Record> max length per utterance. If too small, callers get cut mid-sentence.
 // We enforce a sane minimum; override by setting a larger value.
 const RECORD_MAX_LENGTH_SECONDS = Math.max(6, Number(process.env.RECORD_MAX_LENGTH_SECONDS || 6));
@@ -139,6 +142,69 @@ const ELEVENLABS_LANGUAGE_CODE = String(process.env.ELEVENLABS_LANGUAGE_CODE || 
 
 // Product requirement: agent voice is always male. We still adapt grammar to the callee's gender.
 const AGENT_VOICE_PERSONA = "male";
+
+// ConversationRelay (Realtime voice via Twilio)
+const CR_ENABLED = REALTIME_MODE;
+const CR_LANGUAGE = String(process.env.CR_LANGUAGE || "he-IL").trim();
+const CR_TTS_PROVIDER = String(process.env.CR_TTS_PROVIDER || "Google").trim(); // Google | Amazon | ElevenLabs
+const CR_VOICE = String(process.env.CR_VOICE || "he-IL-Wavenet-D").trim(); // default: male Hebrew (Google)
+const CR_INTERRUPTIBLE = String(process.env.CR_INTERRUPTIBLE || "speech").trim(); // none|dtmf|speech|any
+const CR_INTERRUPT_SENSITIVITY = String(process.env.CR_INTERRUPT_SENSITIVITY || "high").trim(); // low|medium|high
+const CR_DEBUG = String(process.env.CR_DEBUG || "").trim(); // e.g. "debugging speaker-events tokens-played"
+
+function toWsUrlFromHttpBase(baseHttp) {
+  const b = String(baseHttp || "").trim();
+  if (b.startsWith("https://")) return `wss://${b.slice("https://".length)}`;
+  if (b.startsWith("http://")) return `ws://${b.slice("http://".length)}`;
+  return b;
+}
+
+function escapeXmlAttr(v) {
+  return String(v ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function buildConversationRelayTwiML({
+  wsUrl,
+  language,
+  ttsProvider,
+  voice,
+  welcomeGreeting,
+  welcomeGreetingInterruptible,
+  interruptible,
+  interruptSensitivity,
+  debug,
+  customParameters = {}
+}) {
+  const paramsXml = Object.entries(customParameters)
+    .filter(([k, val]) => k && val != null && String(val).length)
+    .map(([k, val]) => `<Parameter name="${escapeXmlAttr(k)}" value="${escapeXmlAttr(val)}" />`)
+    .join("");
+
+  const attrs = [
+    `url="${escapeXmlAttr(wsUrl)}"`,
+    language ? `language="${escapeXmlAttr(language)}"` : "",
+    ttsProvider ? `ttsProvider="${escapeXmlAttr(ttsProvider)}"` : "",
+    voice ? `voice="${escapeXmlAttr(voice)}"` : "",
+    welcomeGreeting ? `welcomeGreeting="${escapeXmlAttr(welcomeGreeting)}"` : "",
+    welcomeGreetingInterruptible ? `welcomeGreetingInterruptible="${escapeXmlAttr(welcomeGreetingInterruptible)}"` : "",
+    interruptible ? `interruptible="${escapeXmlAttr(interruptible)}"` : "",
+    interruptSensitivity ? `interruptSensitivity="${escapeXmlAttr(interruptSensitivity)}"` : "",
+    debug ? `debug="${escapeXmlAttr(debug)}"` : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <ConversationRelay ${attrs}>${paramsXml}</ConversationRelay>
+  </Connect>
+</Response>`;
+}
 
 const MAX_TURNS = Number(process.env.MAX_TURNS || 6); // 6 סבבים ~ 2 דק' בשיחה קצרה
 
@@ -1251,6 +1317,54 @@ async function handleTwilioVoice(req, res) {
 // נקודת התחלה לשיחה (משמשת גם ב-url של calls.create)
 app.all("/twilio/voice", async (req, res) => {
   try {
+    if (CR_ENABLED) {
+      const callSid = String(getParam(req, "CallSid") || "");
+      const phone = getConversationPhone(req);
+      const contact = getContactByPhone(db, phone);
+      if (contact?.do_not_call) {
+        await respondWithPlayAndMaybeHangup(req, res, { text: "בסדר גמור. יום טוב.", persona: "female", hangup: true });
+        return;
+      }
+
+      const persona = pickPersona(contact);
+      createOrGetCall(db, { callSid, phone, persona });
+
+      const { openingScript, openingScriptMale, openingScriptFemale } = settingsSnapshot();
+      const personaOpening =
+        persona === "female" ? (openingScriptFemale || openingScript) : (openingScriptMale || openingScript);
+      const greeting = sanitizeSayText(String(personaOpening || "").trim() || buildGreeting({ persona }));
+
+      // Save greeting once so the LLM won't repeat it.
+      try {
+        const c = db.prepare(`SELECT COUNT(1) AS c FROM call_messages WHERE call_sid = ?`).get(callSid)?.c ?? 0;
+        if (Number(c) === 0) addMessage(db, { callSid, role: "assistant", content: greeting });
+      } catch {}
+
+      const httpBase = getPublicBaseUrl(req);
+      const wsBase = toWsUrlFromHttpBase(httpBase);
+      const wsUrl = `${wsBase}/twilio/conversationrelay`;
+
+      const xml = buildConversationRelayTwiML({
+        wsUrl,
+        language: CR_LANGUAGE,
+        ttsProvider: CR_TTS_PROVIDER,
+        voice: CR_VOICE,
+        welcomeGreeting: greeting,
+        welcomeGreetingInterruptible: CR_INTERRUPTIBLE,
+        interruptible: CR_INTERRUPTIBLE,
+        interruptSensitivity: CR_INTERRUPT_SENSITIVITY,
+        debug: CR_DEBUG,
+        customParameters: {
+          callSid,
+          phone,
+          persona
+        }
+      });
+
+      res.type("text/xml").send(xml);
+      return;
+    }
+
     await handleTwilioVoice(req, res);
   } catch (err) {
     console.error(err);
@@ -1652,10 +1766,160 @@ app.all("/twilio/play_end", async (req, res) => {
   }
 });
 
+// ---------------------------
+// ConversationRelay WebSocket (Realtime mode)
+// ---------------------------
+
+function extractCalleePhoneFromSetup(msg) {
+  // Setup message includes from/to and direction.
+  const direction = String(msg?.direction || "").toLowerCase();
+  const to = normalizePhoneE164IL(msg?.to || "");
+  const from = normalizePhoneE164IL(msg?.from || "");
+  // Inbound: caller is "from". Outbound: callee is "to".
+  return direction === "inbound" ? from : to;
+}
+
+function wsSendJson(ws, obj) {
+  try {
+    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
+  } catch {}
+}
+
+async function streamAssistantToConversationRelay({
+  ws,
+  callSid,
+  persona,
+  userText
+}) {
+  if (!openai) {
+    wsSendJson(ws, { type: "text", token: "בשביל להמשיך את השיחה החכמה צריך להגדיר מפתח מערכת.", last: true });
+    return;
+  }
+
+  const { knowledgeBase } = settingsSnapshot();
+  const knowledgeForThisTurn = selectRelevantKnowledge({ knowledgeBase, query: userText });
+  const system = buildSystemPrompt({ persona, knowledgeBase: knowledgeForThisTurn });
+
+  // Persist user message
+  addMessage(db, { callSid, role: "user", content: userText });
+
+  const history = getMessages(db, callSid, { limit: 10 });
+  const messages = [{ role: "system", content: system }, ...history];
+
+  // Stream tokens to Twilio as soon as they arrive.
+  const stream = await openai.chat.completions.create({
+    model: OPENAI_MODEL,
+    messages,
+    temperature: 0.3,
+    max_tokens: 180,
+    stream: true
+  });
+
+  let full = "";
+  let pending = "";
+  for await (const chunk of stream) {
+    const delta = chunk?.choices?.[0]?.delta?.content ?? "";
+    if (!delta) continue;
+    full += delta;
+    // Hold back one token chunk so we can mark the last chunk with last:true.
+    if (pending) {
+      wsSendJson(ws, { type: "text", token: pending, last: false, interruptible: true, preemptible: true });
+    }
+    pending = delta;
+  }
+
+  if (!pending && !full) {
+    pending = "תודה רבה, יום טוב.";
+    full = pending;
+  }
+
+  wsSendJson(ws, { type: "text", token: pending, last: true, interruptible: true, preemptible: true });
+
+  const answer = sanitizeSayText(full.trim());
+  addMessage(db, { callSid, role: "assistant", content: answer });
+}
+
 // Render (וגם רוב ספקי ה-hosting) דורשים bind ל-0.0.0.0 כדי שה-Service יהיה נגיש מבחוץ.
 // בלוקאלי אפשר להישאר על 127.0.0.1.
 const HOST = process.env.HOST || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
-app.listen(PORT, HOST, () => {
+
+const server = http.createServer(app);
+
+// ConversationRelay WebSocket server (only used when REALTIME_MODE=1)
+const wssConversationRelay = new WebSocketServer({ server, path: "/twilio/conversationrelay" });
+wssConversationRelay.on("connection", (ws) => {
+  // Session state per socket
+  let callSid = "";
+  let phone = "";
+  let persona = "male";
+  let inFlight = null; // Promise
+  let closed = false;
+
+  ws.on("close", () => {
+    closed = true;
+  });
+
+  ws.on("message", (data) => {
+    if (closed) return;
+    let msg = null;
+    try {
+      msg = JSON.parse(String(data || ""));
+    } catch {
+      wsSendJson(ws, { type: "error", description: "Invalid JSON" });
+      return;
+    }
+
+    const t = String(msg?.type || "");
+    if (t === "setup") {
+      callSid = String(msg?.callSid || "");
+      const cp = msg?.customParameters || {};
+      persona = String(cp?.persona || "male");
+      phone = String(cp?.phone || "") || extractCalleePhoneFromSetup(msg) || "";
+      if (callSid && phone) {
+        try {
+          createOrGetCall(db, { callSid, phone, persona });
+        } catch {}
+      }
+      return;
+    }
+
+    // Prompt: caller speech (may arrive as partials with last=false).
+    if (t === "prompt") {
+      const last = !!msg?.last;
+      const voicePrompt = String(msg?.voicePrompt || "").trim();
+      if (!voicePrompt) return;
+      if (!last) return;
+      if (!callSid) callSid = String(msg?.callSid || "");
+
+      // Barge-in behavior: if we are still streaming a response, we let Twilio interrupt playback,
+      // and we simply start generating a new response.
+      inFlight = (async () => {
+        // Update lead table deterministically when explicit.
+        try {
+          const interested = detectInterested(voicePrompt) && !detectNotInterested(voicePrompt);
+          const notInterested = detectNotInterested(voicePrompt) && !interested;
+          if (callSid && phone && (interested || notInterested)) {
+            upsertLead(db, { phone, status: interested ? "won" : "lost", callSid, persona });
+          }
+        } catch {}
+
+        // Handle opt-out early
+        if (detectOptOut(voicePrompt)) {
+          if (phone) markDoNotCall(db, phone);
+          wsSendJson(ws, { type: "text", token: "אין בעיה, הסרתי אותך. יום טוב.", last: true, interruptible: true });
+          return;
+        }
+
+        await streamAssistantToConversationRelay({ ws, callSid, persona, userText: voicePrompt });
+      })().catch((e) => {
+        wsSendJson(ws, { type: "text", token: "סליחה, הייתה תקלה קטנה. אפשר להגיד שוב?", last: true });
+        if (DEBUG_TTS) console.warn("[cr] handler error:", e?.message || e);
+      });
+    }
+  });
+});
+
+server.listen(PORT, HOST, () => {
   console.log(`Server listening on ${HOST}:${PORT}`);
 
   // Pre-warm common TTS outputs to avoid a long first-call silence.
