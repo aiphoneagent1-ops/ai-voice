@@ -3,6 +3,7 @@ node_modules/
 # Env / secrets
 .env
 .env.*
+.env example
 
 # App data (DB, recordings, TTS cache)
 data/
