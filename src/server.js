@@ -22,6 +22,9 @@ import {
   getKnowledge,
   setKnowledge,
   upsertContact,
+  upsertLead,
+  listLeads,
+  deleteLead,
   fetchNextContactsToDial,
   queueContactForDial,
   markDialResult
@@ -104,8 +107,14 @@ function recordTimeoutSeconds() {
 }
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
+// If you have one cloned voice for everything, set ELEVENLABS_VOICE_ID.
+// If you want different voices per persona, set ELEVENLABS_VOICE_MALE / ELEVENLABS_VOICE_FEMALE.
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || process.env.ELEVENLABS_VOICE || "";
 const ELEVENLABS_VOICE_MALE = process.env.ELEVENLABS_VOICE_MALE || "";
 const ELEVENLABS_VOICE_FEMALE = process.env.ELEVENLABS_VOICE_FEMALE || "";
+const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
+const ELEVENLABS_STABILITY = Number(process.env.ELEVENLABS_STABILITY || 0.4);
+const ELEVENLABS_SIMILARITY_BOOST = Number(process.env.ELEVENLABS_SIMILARITY_BOOST || 0.8);
 
 const MAX_TURNS = Number(process.env.MAX_TURNS || 6); // 6 סבבים ~ 2 דק' בשיחה קצרה
 
@@ -623,7 +632,8 @@ function settingsSnapshot() {
 
 async function elevenlabsTtsToFile({ text, persona }) {
   if (!ELEVENLABS_API_KEY) return null;
-  const voiceId = persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE;
+  const voiceId =
+    (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
   if (!voiceId) return null;
 
   const key = crypto
@@ -644,8 +654,11 @@ async function elevenlabsTtsToFile({ text, persona }) {
     },
     body: JSON.stringify({
       text,
-      model_id: "eleven_multilingual_v2",
-      voice_settings: { stability: 0.4, similarity_boost: 0.8 }
+      model_id: ELEVENLABS_MODEL_ID,
+      voice_settings: {
+        stability: Number.isFinite(ELEVENLABS_STABILITY) ? ELEVENLABS_STABILITY : 0.4,
+        similarity_boost: Number.isFinite(ELEVENLABS_SIMILARITY_BOOST) ? ELEVENLABS_SIMILARITY_BOOST : 0.8
+      }
     })
   });
 
@@ -739,7 +752,8 @@ function computeTtsCacheKey({ provider, text, persona }) {
       .digest("hex");
   }
   if (p === "elevenlabs") {
-    const voiceId = persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE;
+    const voiceId =
+      (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
     return crypto.createHash("sha256").update(`${voiceId}::${text}`).digest("hex");
   }
   // openai
@@ -1045,6 +1059,22 @@ app.get("/api/contacts/list", (req, res) => {
   res.json({ rows, limit, offset });
 });
 
+// Leads (won/lost)
+app.get("/api/leads/list", (req, res) => {
+  const status = String(req.query.status || "all");
+  const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 200)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
+  const out = listLeads(db, { status, limit, offset });
+  res.json(out);
+});
+
+app.post("/api/leads/delete", (req, res) => {
+  const rawPhone = String(req.body?.phone ?? "").trim();
+  if (!rawPhone) return res.status(400).json({ error: "missing phone" });
+  const out = deleteLead(db, rawPhone);
+  res.json({ ok: true, ...out });
+});
+
 // Add single contact (used by admin "test dial" modal)
 app.post("/api/contacts/add", (req, res) => {
   const firstName = String(req.body?.first_name ?? req.body?.firstName ?? req.body?.name ?? "").trim();
@@ -1287,6 +1317,10 @@ app.all("/twilio/record", async (req, res) => {
 
     if (detectOptOut(speech)) {
       markDoNotCall(db, phone);
+      // Track as "lost" lead (they explicitly asked to stop).
+      try {
+        upsertLead(db, { phone, status: "lost", callSid, persona });
+      } catch {}
       await respondWithPlayAndMaybeHangup(req, res, {
         text: "אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב.",
         persona,
@@ -1354,6 +1388,9 @@ app.all("/twilio/record", async (req, res) => {
     const interested = detectInterested(speech) && !detectNotInterested(speech);
     const notInterested = detectNotInterested(speech) && !interested;
     if (interested || notInterested) {
+      try {
+        upsertLead(db, { phone, status: interested ? "won" : "lost", callSid, persona });
+      } catch {}
       const picked =
         (interested
           ? "מעולה. אני מעבירה עכשיו את הפרטים שלך ללשכה שלנו, והם יחזרו אליך בהקדם עם רישום ופרטים. תודה רבה!"

@@ -20,12 +20,19 @@ npm install
 צור קובץ `.env` לפי `config.example.env`.
 
 #### (אופציונלי) קול טבעי יותר עם ElevenLabs
-אם אתה רוצה קול ממש “אנושי”, הוסף ב-`.env`:
-- `ELEVENLABS_API_KEY`
-- `ELEVENLABS_VOICE_MALE`
-- `ELEVENLABS_VOICE_FEMALE`
+אם אתה רוצה קול ממש “אנושי” (כולל אפשרות **Voice Clone**), מומלץ להשתמש ב‑ElevenLabs:
 
-בלי ElevenLabs המערכת תשתמש ב-Twilio `<Say>` (זול יותר ומהיר להרים, אבל פחות “אנושי”).
+ב-`.env` / Render env:
+- `TTS_PROVIDER=elevenlabs`
+- `ELEVENLABS_API_KEY`
+
+ואז אחד מהשניים:
+- **קול אחד לכל המערכת**: `ELEVENLABS_VOICE_ID=<voiceId>`
+- **קולות שונים לפי פרסונה**: `ELEVENLABS_VOICE_MALE=<voiceId>` ו‑`ELEVENLABS_VOICE_FEMALE=<voiceId>`
+
+> חשוב: Voice Clone דורש **אישור מפורש** מהאדם שמקליטים.
+
+בלי ElevenLabs המערכת תשתמש ב‑Gemini/OpenAI/Google לפי `TTS_PROVIDER` (או fallback פנימי), אבל ElevenLabs בדרך כלל נשמע הכי “אנושי”.
 
 ### הפעלה מקומית
 ```bash

@@ -63,6 +63,18 @@ export function openDb({ dbPath }) {
       enabled INTEGER NOT NULL DEFAULT 1,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS leads (
+      id INTEGER PRIMARY KEY,
+      phone TEXT UNIQUE NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('won','lost')),
+      call_sid TEXT NULL,
+      persona TEXT NULL CHECK(persona IN ('male','female')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
   `);
 
   // Add dialing columns if missing (migration)
@@ -76,6 +88,61 @@ export function openDb({ dbPath }) {
   // No default knowledge seeding: controlled from the admin scripts.
 
   return db;
+}
+
+export function upsertLead(db, { phone, status, callSid = null, persona = null } = {}) {
+  const normalized = normalizePhoneE164IL(phone);
+  if (!normalized) return;
+  const st = status === "won" ? "won" : "lost";
+  db.prepare(
+    `
+    INSERT INTO leads (phone, status, call_sid, persona, created_at, updated_at)
+    VALUES (@phone, @status, @callSid, @persona, datetime('now'), datetime('now'))
+    ON CONFLICT(phone) DO UPDATE SET
+      status = excluded.status,
+      call_sid = COALESCE(excluded.call_sid, leads.call_sid),
+      persona = COALESCE(excluded.persona, leads.persona),
+      updated_at = datetime('now')
+  `
+  ).run({ phone: normalized, status: st, callSid: callSid || null, persona: persona || null });
+}
+
+export function deleteLead(db, phone) {
+  const normalized = normalizePhoneE164IL(phone);
+  if (!normalized) return { deleted: 0 };
+  const info = db.prepare(`DELETE FROM leads WHERE phone = ?`).run(normalized);
+  return { deleted: Number(info?.changes || 0) };
+}
+
+export function listLeads(db, { status = "all", limit = 200, offset = 0 } = {}) {
+  const lim = Math.max(1, Math.min(1000, Number(limit || 200)));
+  const off = Math.max(0, Number(offset || 0));
+  const st = String(status || "all").toLowerCase();
+  const where = st === "won" || st === "lost" ? "WHERE l.status = ?" : "";
+  const params = st === "won" || st === "lost" ? [st, lim, off] : [lim, off];
+
+  const rows = db
+    .prepare(
+      `
+      SELECT
+        l.id,
+        l.phone,
+        l.status,
+        l.call_sid AS callSid,
+        l.persona,
+        l.created_at AS createdAt,
+        l.updated_at AS updatedAt,
+        COALESCE(c.first_name, '') AS firstName
+      FROM leads l
+      LEFT JOIN contacts c ON c.phone = l.phone
+      ${where}
+      ORDER BY l.updated_at DESC
+      LIMIT ? OFFSET ?
+    `
+    )
+    .all(...params);
+
+  return { rows, limit: lim, offset: off };
 }
 
 export function upsertContact(db, { phone, gender, firstName }) {

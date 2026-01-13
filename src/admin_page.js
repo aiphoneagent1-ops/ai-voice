@@ -165,6 +165,7 @@ export function renderAdminPage() {
             <div class="row" style="gap:8px;">
               <button class="secondary" id="addTestBtn">הוסף מספר בדיקה</button>
               <button class="secondary" id="showListBtn">לרשימה המלאה</button>
+              <button class="secondary" id="showLeadsBtn">לידים</button>
             </div>
           </div>
           <div id="listSection" style="display:none; margin-top:12px;">
@@ -190,6 +191,35 @@ export function renderAdminPage() {
                   </tr>
                 </thead>
                 <tbody id="contactsBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div id="leadsSection" style="display:none; margin-top:12px;">
+            <div class="row" style="justify-content:space-between;">
+              <div class="row" style="gap:8px; align-items:center;">
+                <select id="leadsFilter" style="max-width:220px;">
+                  <option value="all">הכל</option>
+                  <option value="won">נסגר</option>
+                  <option value="lost">לא נסגר</option>
+                </select>
+                <button class="secondary" id="refreshLeadsBtn">רענון</button>
+              </div>
+              <span class="status" id="leadsStatus"></span>
+            </div>
+            <div style="height:10px;"></div>
+            <div class="tableWrap">
+              <table style="min-width: 760px;">
+                <thead>
+                  <tr>
+                    <th>פעולות</th>
+                    <th>שם</th>
+                    <th>טלפון</th>
+                    <th>סטטוס</th>
+                    <th>עודכן</th>
+                  </tr>
+                </thead>
+                <tbody id="leadsBody"></tbody>
               </table>
             </div>
           </div>
@@ -554,6 +584,38 @@ export function renderAdminPage() {
         }
       }
 
+      async function loadLeads(){
+        try{
+          const status = $("leadsFilter").value || "all";
+          const out = await api("/api/leads/list?limit=500&offset=0&status=" + encodeURIComponent(status));
+          const rows = out.rows || [];
+          const body = $("leadsBody");
+          body.innerHTML = "";
+          for(const r of rows){
+            const tr = document.createElement("tr");
+            const st = r.status === "won"
+              ? '<span class="badge good">נסגר</span>'
+              : '<span class="badge bad">לא נסגר</span>';
+            const delBtn =
+              '<button class="iconBtn leadDelBtn" data-phone="'+(r.phone||"")+'" title="מחק ליד">' +
+              '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+              '<path d="M9 3h6m-8 4h10m-9 0 1 14h6l1-14M10 11v7M14 11v7" stroke="rgba(255,255,255,.9)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+              '</svg></button>';
+            const when = r.updatedAt ? String(r.updatedAt).replace("T"," ").replace("Z","") : "—";
+            tr.innerHTML =
+              '<td><div class="row" style="gap:6px;">'+ delBtn +'</div></td>' +
+              '<td><strong>'+(r.firstName || "—")+'</strong></td>' +
+              '<td>'+ (r.phone || "—") +'</td>' +
+              '<td>'+ st +'</td>' +
+              '<td>'+ when +'</td>';
+            body.appendChild(tr);
+          }
+          setStatus($("leadsStatus"), "מוצגים " + rows.length + " לידים", true);
+        }catch(e){
+          setStatus($("leadsStatus"), "שגיאה: " + e.message, false);
+        }
+      }
+
       // Test modal open/close
       const testModal = $("testModal");
       function openTestModal(){
@@ -628,6 +690,25 @@ export function renderAdminPage() {
         }
       });
 
+      $("leadsBody").addEventListener("click", async (e) => {
+        const del = e.target.closest?.(".leadDelBtn");
+        if(!del) return;
+        const phone = del.getAttribute("data-phone");
+        if(!phone) return;
+        const ok = window.confirm("למחוק את הליד הזה? (" + phone + ")");
+        if(!ok) return;
+        del.disabled = true;
+        try{
+          const out = await api("/api/leads/delete", { method:"POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ phone }) });
+          toast("נמחק", "נמחקו " + (out.deleted ?? 0) + " רשומות", true);
+          if($("leadsSection").style.display !== "none") await loadLeads();
+        }catch(err){
+          toast("שגיאת מחיקה", err.message || String(err), false);
+        } finally {
+          del.disabled = false;
+        }
+      });
+
       $("showListBtn").addEventListener("click", async () => {
         const sec = $("listSection");
         sec.style.display = sec.style.display === "none" ? "block" : "none";
@@ -635,6 +716,14 @@ export function renderAdminPage() {
       });
       $("refreshListBtn").addEventListener("click", loadContacts);
       $("search").addEventListener("input", () => { if($("listSection").style.display !== "none") loadContacts(); });
+
+      $("showLeadsBtn").addEventListener("click", async () => {
+        const sec = $("leadsSection");
+        sec.style.display = sec.style.display === "none" ? "block" : "none";
+        if(sec.style.display === "block") await loadLeads();
+      });
+      $("refreshLeadsBtn").addEventListener("click", loadLeads);
+      $("leadsFilter").addEventListener("change", () => { if($("leadsSection").style.display !== "none") loadLeads(); });
 
       loadAll();
     </script>
