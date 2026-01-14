@@ -31,7 +31,7 @@ import {
   queueContactForDial,
   markDialResult
 } from "./db.js";
-import { buildSystemPrompt, buildGreeting } from "./prompts.js";
+import { buildSystemPrompt, buildGreeting, buildSalesAgentSystemPrompt } from "./prompts.js";
 import { buildPlayAndHangup, buildRecordTwiML, buildSayAndHangup } from "./twiml.js";
 import { geminiTtsToFile } from "./gemini_tts.js";
 import { renderAdminPage } from "./admin_page.js";
@@ -2579,6 +2579,10 @@ wssMediaStream.on("connection", (ws, req) => {
   let utteranceStartAt = 0;
   let inFlight = null; // Promise
 
+  // Sales/flow state (kept per call connection)
+  /** @type {"CHECK_INTEREST"|"PITCH"|"CLOSE"|"HANDLE_OBJECTION"|"END"} */
+  let conversationState = "CHECK_INTEREST";
+
   function msLog(...args) {
     if (MS_DEBUG) console.log("[ms]", ...args);
   }
@@ -2753,14 +2757,8 @@ wssMediaStream.on("connection", (ws, req) => {
       if (callSid && phone) addMessage(db, { callSid, role: "user", content: speech });
     } catch {}
 
-    // Lead tracking (only when explicit)
-    try {
-      const interested = detectInterested(speech) && !detectNotInterested(speech);
-      const notInterested = detectNotInterested(speech) && !interested;
-      if (callSid && phone && (interested || notInterested)) {
-        upsertLead(db, { phone, status: interested ? "won" : "lost", callSid, persona });
-      }
-    } catch {}
+    // Lead tracking is handled by the LLM structured decision (outcome).
+    // We avoid heuristic writes here because short/partial transcriptions can flip-flop status.
 
     // Opt-out fast path
     if (detectOptOut(speech)) {
@@ -2776,16 +2774,86 @@ wssMediaStream.on("connection", (ws, req) => {
     try {
       const knowledgeBase = getSetting(db, "knowledgeBase", "");
       const knowledgeForThisTurn = selectRelevantKnowledge({ knowledgeBase, query: speech });
-      const system = buildSystemPrompt({ persona, knowledgeBase: knowledgeForThisTurn });
+      const system = buildSalesAgentSystemPrompt({
+        persona,
+        knowledgeBase: knowledgeForThisTurn,
+        state: conversationState
+      });
       const history = callSid ? getMessages(db, callSid, { limit: 10 }) : [];
-      const messages = [{ role: "system", content: system }, ...history, { role: "user", content: speech }];
+      const messages = [
+        { role: "system", content: system },
+        ...history,
+        { role: "user", content: speech }
+      ];
+
+      // Force a structured decision so the agent keeps a stable flow and updates lead outcomes.
       const completion = await openai.chat.completions.create({
         model: OPENAI_MODEL,
         messages,
-        temperature: 0.3,
-        max_tokens: 140
+        temperature: 0.2,
+        max_tokens: 220,
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "sales_agent_turn",
+            strict: true,
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                reply: { type: "string" },
+                nextState: {
+                  type: "string",
+                  enum: ["CHECK_INTEREST", "PITCH", "CLOSE", "HANDLE_OBJECTION", "END"]
+                },
+                outcome: { type: "string", enum: ["none", "interested", "not_interested", "do_not_call"] },
+                shouldEnd: { type: "boolean" }
+              },
+              required: ["reply", "nextState", "outcome", "shouldEnd"]
+            }
+          }
+        }
       });
-      answer = sanitizeSayText((completion.choices?.[0]?.message?.content || "").trim() || answer);
+
+      const raw = String(completion.choices?.[0]?.message?.content || "").trim();
+      let parsed = null;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = null;
+      }
+
+      if (parsed && typeof parsed === "object") {
+        const replyText = sanitizeSayText(String(parsed.reply || "").trim());
+        const ns = String(parsed.nextState || "").trim();
+        const outcome = String(parsed.outcome || "none").trim();
+        const shouldEnd = Boolean(parsed.shouldEnd);
+
+        if (ns === "CHECK_INTEREST" || ns === "PITCH" || ns === "CLOSE" || ns === "HANDLE_OBJECTION" || ns === "END") {
+          conversationState = ns;
+        }
+
+        // Apply outcomes (leads + DNC) based on the agent decision.
+        try {
+          if (outcome === "do_not_call") {
+            if (phone) markDoNotCall(db, phone);
+            if (callSid && phone) upsertLead(db, { phone, status: "lost", callSid, persona });
+            conversationState = "END";
+          } else if (outcome === "interested") {
+            if (callSid && phone) upsertLead(db, { phone, status: "won", callSid, persona });
+          } else if (outcome === "not_interested") {
+            if (callSid && phone) upsertLead(db, { phone, status: "lost", callSid, persona });
+          }
+        } catch {}
+
+        answer = replyText || answer;
+
+        // If the model says to end, steer the state to END (but we still speak the final line).
+        if (shouldEnd) conversationState = "END";
+      } else {
+        // Fallback: if JSON parsing fails, just use plain text.
+        answer = sanitizeSayText(raw || answer);
+      }
     } catch (e) {
       console.warn("[ms] LLM failed", e?.message || e);
       answer = "סליחה, הייתה תקלה קטנה. אפשר להגיד שוב?";
@@ -2881,6 +2949,19 @@ wssMediaStream.on("connection", (ws, req) => {
           }
         } catch {}
         if (!g) g = sanitizeSayText(buildGreeting({ persona }));
+
+        // Persist greeting as the first assistant message once per callSid.
+        // This prevents the LLM from "restarting" the call and repeating the intro later.
+        try {
+          if (callSid) {
+            const existing = db
+              .prepare(
+                `SELECT id FROM call_messages WHERE call_sid = ? AND role = 'assistant' ORDER BY id ASC LIMIT 1`
+              )
+              .get(callSid);
+            if (!existing && g) addMessage(db, { callSid, role: "assistant", content: g });
+          }
+        } catch {}
         msLog("greeting", { chars: g.length });
         await sayText(g, { label: "greeting" });
         msLog("greeting sent (awaiting mark to enable listening)");
