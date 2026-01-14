@@ -194,6 +194,11 @@ const MS_FORCE_FINALIZE_PAUSE_MS = Number(process.env.MS_FORCE_FINALIZE_PAUSE_MS
 // Safety: cap utterance length so we don't buffer indefinitely.
 const MS_MAX_UTTERANCE_MS = Number(process.env.MS_MAX_UTTERANCE_MS || 2500);
 const ELEVENLABS_STREAM_OUTPUT_FORMAT = String(process.env.ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000").trim();
+const ELEVENLABS_OPTIMIZE_STREAMING_LATENCY = clampInt(process.env.ELEVENLABS_OPTIMIZE_STREAMING_LATENCY, {
+  min: 0,
+  max: 4,
+  fallback: 3
+});
 const MS_TEST_TONE = process.env.MS_TEST_TONE === "1" || process.env.MS_TEST_TONE === "true";
 // Barge-in tuning: avoid clearing agent speech on line noise/echo.
 const MS_BARGE_IN_FRAMES = Number(process.env.MS_BARGE_IN_FRAMES || 15); // 15 frames * 20ms = 300ms
@@ -432,7 +437,7 @@ async function elevenlabsTtsToUlaw8000({ text, persona }) {
 
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${encodeURIComponent(
     ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000"
-  )}`;
+  )}&optimize_streaming_latency=${encodeURIComponent(String(ELEVENLABS_OPTIMIZE_STREAMING_LATENCY))}`;
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -946,6 +951,21 @@ function detectNotInterested(text) {
   return patterns.some((p) => t.includes(p));
 }
 
+function detectWaitRequest(text) {
+  const t = String(text || "").toLowerCase();
+  const patterns = ["תמתין", "תמתין רגע", "רגע", "שנייה", "שניה", "דקה", "חכה", "חכי", "רק רגע"];
+  return patterns.some((p) => t.includes(p));
+}
+
+function limitPhoneReply(text, maxChars = 180) {
+  const s = sanitizeSayText(String(text || "").trim());
+  if (!s) return "";
+  if (s.length <= maxChars) return s;
+  const cut = s.slice(0, maxChars);
+  const lastPunct = Math.max(cut.lastIndexOf("."), cut.lastIndexOf("!"), cut.lastIndexOf("?"), cut.lastIndexOf("…"));
+  return sanitizeSayText((lastPunct > 40 ? cut.slice(0, lastPunct + 1) : cut).trim());
+}
+
 function detectTransferConsent(text) {
   const t = String(text || "").toLowerCase();
   const patterns = [
@@ -1047,13 +1067,13 @@ function quickReplyByRules({ speech, persona }) {
     if (persona === "female") {
       return {
         text:
-          "זה מפגש נשים נעים בחדרה: כמה דקות חיזוק, הפרשת חלה ותפילה קצרה. אווירה טובה ומכבדת. רוצה שאעביר את הפרטים שלך ללשכה שיחזרו אלייך עם שעה ומקום?",
+          "זה מפגש נשים נעים בחדרה: כמה דקות חיזוק, הפרשת חלה ותפילה קצרה. אווירה טובה ומכבדת. תרצי שאסביר עוד דקה, או שנעביר ללשכה שיחזרו אלייך עם כל הפרטים?",
         end: false
       };
     }
     return {
       text:
-        "זה שיעור תורה קצר וברור בחדרה, באווירה טובה, עם זמן לשאלות. לא צריך ידע קודם. רוצה שאעביר את הפרטים שלך ללשכה שיחזרו אליך עם שעה ומקום?",
+        "זה שיעור תורה קצר וברור בחדרה, באווירה טובה, עם זמן לשאלות. לא צריך ידע קודם. תרצה שאסביר עוד דקה, או שנעביר ללשכה שיחזרו אליך עם כל הפרטים?",
       end: false
     };
   }
@@ -1061,7 +1081,7 @@ function quickReplyByRules({ speech, persona }) {
     const toYou = persona === "female" ? "אלייך" : "אליך";
     return {
       text:
-        `את הפרטים המדויקים—שעה, מקום ואם יש עלות—הלשכה נותנת בהרשמה. רוצה שאעביר עכשיו את הפרטים שלך ללשכה שלנו שיחזרו ${toYou}?`,
+        `את הפרטים המדויקים—שעה, מקום ואם יש עלות—הלשכה נותנת בהרשמה. רוצה שאסביר עוד משהו פה, או שנעביר ללשכה שיחזרו ${toYou} עם כל הפרטים?`,
       end: false
     };
   }
@@ -2824,6 +2844,16 @@ wssMediaStream.on("connection", (ws, req) => {
     }
     msLog("stt", { callSid, chars: speech.length });
 
+    // If caller asks us to wait, don't end the call. Keep it natural.
+    if (detectWaitRequest(speech)) {
+      const waitText = "ברור, אני איתך. תגיד לי מתי נוח.";
+      try {
+        if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: waitText });
+      } catch {}
+      await sayText(waitText, { label: "reply" });
+      return;
+    }
+
     // Post-close: if user says "no/thanks", end politely and hang up after playback finishes.
     if (conversationState === "POST_CLOSE" && detectNoMoreHelp(speech)) {
       const finalText = "סבבה לגמרי. יום טוב ובשורות טובות.";
@@ -2907,7 +2937,7 @@ wssMediaStream.on("connection", (ws, req) => {
         model: OPENAI_MODEL,
         messages,
         temperature: 0.2,
-        max_tokens: 220,
+        max_tokens: 140,
         response_format: {
           type: "json_schema",
           json_schema: {
@@ -2970,13 +3000,13 @@ wssMediaStream.on("connection", (ws, req) => {
           }
         } catch {}
 
-        answer = replyText || answer;
+        answer = limitPhoneReply(replyText || answer);
 
         // If the model says to end, steer the state to END (but we still speak the final line).
         if (shouldEnd) conversationState = "END";
       } else {
         // Fallback: if JSON parsing fails, just use plain text.
-        answer = sanitizeSayText(raw || answer);
+        answer = limitPhoneReply(raw || answer);
       }
     } catch (e) {
       console.warn("[ms] LLM failed", e?.message || e);
