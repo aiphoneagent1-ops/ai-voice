@@ -173,22 +173,23 @@ const CR_ELEVENLABS_TEXT_NORMALIZATION = String(process.env.CR_ELEVENLABS_TEXT_N
 // Media Streams (Realtime audio in/out)
 const MS_DEBUG = process.env.MS_DEBUG === "1" || process.env.MS_DEBUG === "true";
 const MS_LOG_EVERY_FRAME = process.env.MS_LOG_EVERY_FRAME === "1" || process.env.MS_LOG_EVERY_FRAME === "true";
-// VAD sensitivity: if too high, we never detect user speech; if too low, noise triggers.
-// We'll default a bit lower than before to better catch quiet callers, and log RMS so we can tune.
-const MS_VAD_THRESHOLD = Number(process.env.MS_VAD_THRESHOLD || 350); // 0..~8000
+// VAD sensitivity (RMS on decoded PCM16 @ 8k). We'll default to a moderate value and tune via logs.
+const MS_VAD_THRESHOLD = Number(process.env.MS_VAD_THRESHOLD || 700); // 0..~8000
 // Latency tuning: lower silence threshold -> faster "turn taking"
 const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 350);
 const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 250);
 // Fallback: if user pauses briefly, don't wait forever—force finalize after this (once we see a pause).
-const MS_FORCE_FINALIZE_AFTER_MS = Number(process.env.MS_FORCE_FINALIZE_AFTER_MS || 1500);
-const MS_FORCE_FINALIZE_PAUSE_MS = Number(process.env.MS_FORCE_FINALIZE_PAUSE_MS || 150);
+const MS_FORCE_FINALIZE_AFTER_MS = Number(process.env.MS_FORCE_FINALIZE_AFTER_MS || 900);
+const MS_FORCE_FINALIZE_PAUSE_MS = Number(process.env.MS_FORCE_FINALIZE_PAUSE_MS || 120);
 // Safety: cap utterance length so we don't buffer indefinitely.
-const MS_MAX_UTTERANCE_MS = Number(process.env.MS_MAX_UTTERANCE_MS || 8000);
+const MS_MAX_UTTERANCE_MS = Number(process.env.MS_MAX_UTTERANCE_MS || 2500);
 const ELEVENLABS_STREAM_OUTPUT_FORMAT = String(process.env.ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000").trim();
 const MS_TEST_TONE = process.env.MS_TEST_TONE === "1" || process.env.MS_TEST_TONE === "true";
 // Barge-in tuning: avoid clearing agent speech on line noise/echo.
 const MS_BARGE_IN_FRAMES = Number(process.env.MS_BARGE_IN_FRAMES || 15); // 15 frames * 20ms = 300ms
 const MS_BARGE_IN_GRACE_MS = Number(process.env.MS_BARGE_IN_GRACE_MS || 400); // don't barge-in instantly after agent starts
+// Default: turn-taking like a normal call (no interruptions). You can enable barge-in later.
+const MS_ENABLE_BARGE_IN = process.env.MS_ENABLE_BARGE_IN === "1" || process.env.MS_ENABLE_BARGE_IN === "true";
 
 // Cache for ElevenLabs ulaw outputs:
 // - Memory cache helps within a single process lifetime.
@@ -2546,6 +2547,10 @@ wssMediaStream.on("connection", (ws, req) => {
   // We always CAPTURE inbound audio, but only TRANSCRIBE/RESPOND after the greeting is done.
   let allowListen = false; // "process speech" (STT+LLM+TTS)
   let allowBargeIn = false; // interrupt agent speech
+  // Echo-safe turn-taking: while agent audio is playing, ignore inbound audio entirely.
+  let agentSpeaking = false;
+  let pendingEnableListenOnMark = false;
+  let lastMarkName = "";
 
   // Outbound playback state
   let playTimer = null;
@@ -2610,6 +2615,7 @@ wssMediaStream.on("connection", (ws, req) => {
     stopPlayback({ clear: true });
     playing = true;
     playingSince = Date.now();
+    agentSpeaking = true;
     const CHUNK_BYTES = 160; // 20ms @ 8kHz, 1 byte/sample (mulaw)
     let offset = 0;
     let sent = 0;
@@ -2660,7 +2666,9 @@ wssMediaStream.on("connection", (ws, req) => {
         if (sent % 25 === 0) msLog("sent audio chunks", { label, chunks: sent });
 
         if (offset >= ulawBuf.length) {
-          wsSendToTwilio({ event: "mark", streamSid, mark: { name: `tts_done_${Date.now()}` } });
+          const markName = `done_${label}_${myId}_${Date.now()}`;
+          lastMarkName = markName;
+          wsSendToTwilio({ event: "mark", streamSid, mark: { name: markName } });
           // Resolve before stopPlayback clears currentPlay.
           const done = currentPlay;
           currentPlay = null;
@@ -2668,7 +2676,7 @@ wssMediaStream.on("connection", (ws, req) => {
           if (playTimer) clearInterval(playTimer);
           playTimer = null;
           try {
-            resolve({ ok: true, label, bytes: ulawBuf.length, chunks: sent });
+            resolve({ ok: true, label, bytes: ulawBuf.length, chunks: sent, markName });
           } catch {}
         }
       };
@@ -2828,8 +2836,10 @@ wssMediaStream.on("connection", (ws, req) => {
       // Speak greeting immediately
       inFlight = (async () => {
         // During greeting: do NOT listen and do NOT barge-in (prevents echo/noise from cutting speech).
+        // We will enable listening only after Twilio confirms playback finished via the mark ack.
         allowListen = false;
         allowBargeIn = false;
+        pendingEnableListenOnMark = true;
 
         // Debug: prove audio-out works even without ElevenLabs/OpenAI (beep tone)
         if (MS_TEST_TONE) {
@@ -2858,11 +2868,7 @@ wssMediaStream.on("connection", (ws, req) => {
         if (!g) g = sanitizeSayText(buildGreeting({ persona }));
         msLog("greeting", { chars: g.length });
         await sayText(g, { label: "greeting" });
-
-        // Now we can listen + allow barge-in for the rest of the call.
-        allowListen = true;
-        allowBargeIn = true;
-        msLog("listening enabled");
+        msLog("greeting sent (awaiting mark to enable listening)");
 
         // If the user already spoke during greeting, and we're already past end-of-speech,
         // finalize immediately (so they don't wait).
@@ -2895,7 +2901,8 @@ wssMediaStream.on("connection", (ws, req) => {
         console.warn("[ms] greeting failed", e?.message || e);
         // Fail-open: if greeting fails, still allow the call to proceed.
         allowListen = true;
-        allowBargeIn = true;
+        allowBargeIn = false;
+        agentSpeaking = false;
         msLog("listening enabled (after greeting failure)");
       });
       return;
@@ -2907,8 +2914,9 @@ wssMediaStream.on("connection", (ws, req) => {
       const b64 = String(msg?.media?.payload || "");
       if (!b64) return;
 
-      // We keep capturing inbound audio even during greeting, but we will only transcribe/respond
-      // after allowListen=true. This prevents missing the user's "כן" said during the greeting.
+      // Echo-safe: while agent is speaking (Twilio still playing our audio), ignore inbound.
+      // This prevents echo from being treated as "user speech" and causing 6–8s waits.
+      if (agentSpeaking) return;
 
       const ulawBuf = Buffer.from(b64, "base64");
       const pcm16 = ulawBufferToPcm16(ulawBuf);
@@ -2930,9 +2938,8 @@ wssMediaStream.on("connection", (ws, req) => {
         }
         utterancePcm8kChunks.push(pcm16);
 
-        // Barge-in (debounced): only interrupt after sustained voiced frames,
-        // and not immediately after agent starts (prevents noise/echo causing silence).
-        if (playing && allowBargeIn) {
+        // Optional barge-in (disabled by default)
+        if (MS_ENABLE_BARGE_IN && playing && allowBargeIn) {
           const inGrace = playingSince && now - playingSince < MS_BARGE_IN_GRACE_MS;
           if (!inGrace) {
             bargeInFrames++;
@@ -3060,6 +3067,14 @@ wssMediaStream.on("connection", (ws, req) => {
     if (ev === "mark") {
       // Twilio acks our marks; useful for debugging audio playback completion.
       msLog("mark", { name: msg?.mark?.name || "" });
+      const name = String(msg?.mark?.name || "");
+      if (pendingEnableListenOnMark && name && name === lastMarkName) {
+        pendingEnableListenOnMark = false;
+        agentSpeaking = false;
+        allowListen = true;
+        allowBargeIn = MS_ENABLE_BARGE_IN;
+        msLog("listening enabled");
+      }
       return;
     }
   });
