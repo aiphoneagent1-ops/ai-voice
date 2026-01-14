@@ -117,8 +117,26 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
     // Avoid passing temperature for GPT-5 unless we explicitly control reasoning settings.
     void temperature;
     void stream;
-    const resp = await openai.responses.create(payload);
-    return { api: "responses", rawText: String(extractTextFromResponses(resp) || "").trim(), resp };
+    try {
+      const resp = await openai.responses.create(payload);
+      return { api: "responses", rawText: String(extractTextFromResponses(resp) || "").trim(), resp };
+    } catch (e) {
+      // Fail-safe: if Responses rejects the structured format (or changes requirements),
+      // retry once with explicit plain_text output so the call can continue.
+      const msg = String(e?.message || e || "");
+      console.warn("[llm] responses.create failed; retrying with plain_text", { model: m, err: msg });
+      try {
+        const resp2 = await openai.responses.create({
+          model: m,
+          input: messages,
+          text: { format: { name: "plain_text" } },
+          ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {})
+        });
+        return { api: "responses_retry_plain", rawText: String(extractTextFromResponses(resp2) || "").trim(), resp: resp2 };
+      } catch {
+        throw e;
+      }
+    }
   }
 
   // Chat Completions (legacy + still fine for many models).
