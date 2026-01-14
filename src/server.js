@@ -180,6 +180,11 @@ const MS_VAD_MIN_RMS = Number(process.env.MS_VAD_MIN_RMS || 700);
 const MS_VAD_NOISE_MULT = Number(process.env.MS_VAD_NOISE_MULT || 1.8);
 const MS_VAD_NOISE_MARGIN = Number(process.env.MS_VAD_NOISE_MARGIN || 250);
 const MS_NOISE_CALIBRATION_MS = Number(process.env.MS_NOISE_CALIBRATION_MS || 300);
+// Greeting latency: keep the pickup snappy (avoid 4–6s intros).
+const MS_GREETING_MAX_CHARS = Number(process.env.MS_GREETING_MAX_CHARS || 70);
+const MS_FORCE_SHORT_GREETING = process.env.MS_FORCE_SHORT_GREETING === "1" || process.env.MS_FORCE_SHORT_GREETING === "true";
+// Auto-hangup after final line (after mark ack)
+const MS_AUTO_HANGUP = process.env.MS_AUTO_HANGUP !== "0" && process.env.MS_AUTO_HANGUP !== "false";
 // Latency tuning: lower silence threshold -> faster "turn taking"
 const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 350);
 const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 250);
@@ -939,6 +944,50 @@ function detectNotInterested(text) {
     "אולי אחר כך"
   ];
   return patterns.some((p) => t.includes(p));
+}
+
+function detectTransferConsent(text) {
+  const t = String(text || "").toLowerCase();
+  const patterns = [
+    "תעביר את הפרטים",
+    "תעביר פרטים",
+    "תעבירו את הפרטים",
+    "תעבירו פרטים",
+    "תעביר ללשכה",
+    "תעבירו ללשכה",
+    "מאשר להעביר",
+    "מאשרת להעביר",
+    "כן תעביר",
+    "כן תעבירו",
+    "סבבה תעביר",
+    "אוקיי תעביר",
+    "תרשום אותי",
+    "תרשמי אותי",
+    "אני מאשר",
+    "אני מאשרת"
+  ];
+  return patterns.some((p) => t.includes(p));
+}
+
+function detectNoMoreHelp(text) {
+  const t = String(text || "").toLowerCase().trim();
+  const patterns = ["לא", "לא תודה", "זהו", "זה הכל", "אין", "אין עוד", "לא צריך", "סיימנו"];
+  return patterns.some((p) => t === p || t.includes(p));
+}
+
+function shortGreetingByPersona(persona) {
+  if (persona === "female") {
+    return "היי, מדבר ממשרד הקהילה בחדרה. הפרשת חלה לנשים—זה רלוונטי לך?";
+  }
+  return "היי, מדבר ממשרד הקהילה בחדרה. שיעור תורה קצר—זה רלוונטי לך?";
+}
+
+function normalizeGreetingForLatency({ greeting, persona }) {
+  const g = sanitizeSayText(String(greeting || "").trim());
+  if (!g) return sanitizeSayText(buildGreeting({ persona }));
+  if (MS_FORCE_SHORT_GREETING) return sanitizeSayText(shortGreetingByPersona(persona));
+  if (g.length > MS_GREETING_MAX_CHARS) return sanitizeSayText(shortGreetingByPersona(persona));
+  return g;
 }
 
 function extractClosingLine(script, { interested }) {
@@ -1796,7 +1845,10 @@ app.all("/twilio/voice", async (req, res) => {
       const { openingScript, openingScriptMale, openingScriptFemale } = settingsSnapshot();
       const personaOpening =
         persona === "female" ? (openingScriptFemale || openingScript) : (openingScriptMale || openingScript);
-      const greeting = sanitizeSayText(String(personaOpening || "").trim() || buildGreeting({ persona }));
+      const greeting = normalizeGreetingForLatency({
+        greeting: String(personaOpening || "").trim() || buildGreeting({ persona }),
+        persona
+      });
 
       // Save greeting once so the LLM won't repeat it.
       try {
@@ -2580,8 +2632,25 @@ wssMediaStream.on("connection", (ws, req) => {
   let inFlight = null; // Promise
 
   // Sales/flow state (kept per call connection)
-  /** @type {"CHECK_INTEREST"|"PITCH"|"CLOSE"|"HANDLE_OBJECTION"|"END"} */
+  /** @type {"CHECK_INTEREST"|"PITCH"|"CLOSE"|"POST_CLOSE"|"HANDLE_OBJECTION"|"END"} */
   let conversationState = "CHECK_INTEREST";
+
+  // Hangup control (only after Twilio acks playback completion via mark)
+  let pendingHangupOnMark = false;
+  let hangupMarkName = "";
+
+  async function hangupCallNow() {
+    if (!MS_AUTO_HANGUP) return;
+    if (!callSid) return;
+    if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return;
+    try {
+      const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+      await client.calls(callSid).update({ status: "completed" });
+      msLog("hangup requested", { callSid });
+    } catch (e) {
+      msLog("hangup failed", e?.message || e);
+    }
+  }
 
   function msLog(...args) {
     if (MS_DEBUG) console.log("[ms]", ...args);
@@ -2712,7 +2781,7 @@ wssMediaStream.on("connection", (ws, req) => {
     if (!safe) return;
     const ulaw = await elevenlabsTtsToUlaw8000({ text: safe, persona: AGENT_VOICE_PERSONA });
     if (!ulaw) return;
-    await playUlaw(ulaw, { label });
+    return await playUlaw(ulaw, { label });
   }
 
   async function transcribeAndRespond(pcm8kAll) {
@@ -2751,11 +2820,45 @@ wssMediaStream.on("connection", (ws, req) => {
     }
     msLog("stt", { callSid, chars: speech.length });
 
+    // Post-close: if user says "no/thanks", end politely and hang up after playback finishes.
+    if (conversationState === "POST_CLOSE" && detectNoMoreHelp(speech)) {
+      const finalText = "סבבה לגמרי. יום טוב ובשורות טובות.";
+      try {
+        if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: finalText });
+      } catch {}
+      const r = await sayText(finalText, { label: "reply" });
+      if (r?.markName) {
+        pendingHangupOnMark = true;
+        hangupMarkName = String(r.markName || "");
+      } else {
+        await hangupCallNow();
+      }
+      conversationState = "END";
+      return;
+    }
+
     // Barge-in: if caller starts talking mid-playback, we already clear buffered audio.
     // Now handle business logic + LLM response.
     try {
       if (callSid && phone) addMessage(db, { callSid, role: "user", content: speech });
     } catch {}
+
+    // Deterministic close: explicit approval to transfer details => don't ask again.
+    if (detectTransferConsent(speech)) {
+      try {
+        if (callSid && phone) upsertLead(db, { phone, status: "won", callSid, persona });
+      } catch {}
+      conversationState = "POST_CLOSE";
+      const closeText =
+        persona === "female"
+          ? "מעולה. אני מעביר את הפרטים שלך ללשכה שלנו והם יחזרו אלייך עם שעה ומקום. יש עוד משהו שאפשר לעזור?"
+          : "מעולה. אני מעביר את הפרטים שלך ללשכה שלנו והם יחזרו אליך עם שעה ומקום. יש עוד משהו שאפשר לעזור?";
+      try {
+        if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: closeText });
+      } catch {}
+      await sayText(closeText, { label: "reply" });
+      return;
+    }
 
     // Lead tracking is handled by the LLM structured decision (outcome).
     // We avoid heuristic writes here because short/partial transcriptions can flip-flop status.
@@ -2766,6 +2869,12 @@ wssMediaStream.on("connection", (ws, req) => {
         if (phone) markDoNotCall(db, phone);
       } catch {}
       await sayText("אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב.");
+      return;
+    }
+
+    // STT noise gating: if Whisper returns something tiny, ignore it unless we are in a closing phase.
+    if (speech.length < 4 && !(conversationState === "CLOSE" || conversationState === "POST_CLOSE")) {
+      msLog("stt gated (too short)", { callSid, chars: speech.length, state: conversationState });
       return;
     }
 
@@ -2804,7 +2913,7 @@ wssMediaStream.on("connection", (ws, req) => {
                 reply: { type: "string" },
                 nextState: {
                   type: "string",
-                  enum: ["CHECK_INTEREST", "PITCH", "CLOSE", "HANDLE_OBJECTION", "END"]
+                  enum: ["CHECK_INTEREST", "PITCH", "CLOSE", "POST_CLOSE", "HANDLE_OBJECTION", "END"]
                 },
                 outcome: { type: "string", enum: ["none", "interested", "not_interested", "do_not_call"] },
                 shouldEnd: { type: "boolean" }
@@ -2829,7 +2938,14 @@ wssMediaStream.on("connection", (ws, req) => {
         const outcome = String(parsed.outcome || "none").trim();
         const shouldEnd = Boolean(parsed.shouldEnd);
 
-        if (ns === "CHECK_INTEREST" || ns === "PITCH" || ns === "CLOSE" || ns === "HANDLE_OBJECTION" || ns === "END") {
+        if (
+          ns === "CHECK_INTEREST" ||
+          ns === "PITCH" ||
+          ns === "CLOSE" ||
+          ns === "POST_CLOSE" ||
+          ns === "HANDLE_OBJECTION" ||
+          ns === "END"
+        ) {
           conversationState = ns;
         }
 
@@ -2865,7 +2981,16 @@ wssMediaStream.on("connection", (ws, req) => {
     } catch {}
 
     if (closed) return;
-    await sayText(answer, { label: "reply" });
+    const pr = await sayText(answer, { label: "reply" });
+    // Auto-hangup after the final line, but only after Twilio confirms playback finished.
+    if (conversationState === "END") {
+      if (pr?.markName) {
+        pendingHangupOnMark = true;
+        hangupMarkName = String(pr.markName || "");
+      } else {
+        await hangupCallNow();
+      }
+    }
   }
 
   msLog("ws connected", {
@@ -3181,6 +3306,11 @@ wssMediaStream.on("connection", (ws, req) => {
         allowBargeIn = MS_ENABLE_BARGE_IN;
         calibrateUntil = Date.now() + MS_NOISE_CALIBRATION_MS;
         msLog("listening enabled");
+      }
+      if (pendingHangupOnMark && name && name === hangupMarkName) {
+        pendingHangupOnMark = false;
+        hangupMarkName = "";
+        hangupCallNow().catch(() => {});
       }
       return;
     }
