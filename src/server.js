@@ -88,7 +88,8 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
     const payload = {
       model: m,
       input: messages,
-      ...(response_format ? { response_format } : {}),
+      // NOTE: In the Responses API, `response_format` moved to `text.format`.
+      ...(response_format ? { text: { format: response_format } } : {}),
       ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {})
     };
     // Avoid passing temperature for GPT-5 unless we explicitly control reasoning settings.
@@ -2789,6 +2790,38 @@ wssMediaStream.on("connection", (ws, req) => {
   let thinkingTimer = null;
   let awaitingReply = false;
   let lastUtteranceEndAt = 0;
+  let thinkingPlayed = false;
+
+  function clearThinkingTimer() {
+    if (thinkingTimer) {
+      try { clearTimeout(thinkingTimer); } catch {}
+      thinkingTimer = null;
+    }
+  }
+
+  function scheduleThinkingOnce() {
+    if (closed) return;
+    if (!awaitingReply) return;
+    if (thinkingPlayed) return;
+    if (!(MS_THINKING_DELAY_MS > 0)) return;
+    clearThinkingTimer();
+    thinkingTimer = setTimeout(() => {
+      if (closed) return;
+      if (!awaitingReply) return;
+      if (thinkingPlayed) return;
+      if (agentSpeaking || playing) return;
+      const think = sanitizeSayText(getThinkingText());
+      if (!think) return;
+      // Mark as played immediately to prevent duplicates even if TTS is slow.
+      thinkingPlayed = true;
+      elevenlabsTtsToUlaw8000({ text: think, persona: AGENT_VOICE_PERSONA })
+        .then((ulaw) => {
+          if (!awaitingReply) return;
+          if (ulaw) playUlaw(ulaw, { label: "thinking" });
+        })
+        .catch(() => {});
+    }, MS_THINKING_DELAY_MS);
+  }
 
   async function hangupCallNow() {
     if (!MS_AUTO_HANGUP) return;
@@ -3207,7 +3240,9 @@ wssMediaStream.on("connection", (ws, req) => {
             ? "מעולה. מעביר ללשכה שיחזרו אלייך עם הפרטים."
             : "מעולה. מעביר ללשכה שיחזרו אליך עם הפרטים.";
       } else {
-        answer = "שנייה רגע.";
+        // Important: "שנייה רגע" is reserved for the instant backchannel.
+        // If the LLM fails, ask to repeat instead of looping the backchannel as the main reply.
+        answer = "סליחה, לא קלטתי. אפשר לחזור על זה?";
       }
     }
     msLog("llm answer", { callSid, chars: answer.length });
@@ -3413,6 +3448,11 @@ wssMediaStream.on("connection", (ws, req) => {
         inboundVoicedFrames++;
         lastVoiceAt = now;
         if (!speechActive) {
+          // New user utterance begins: cancel any pending "thinking" (it means our end-of-speech detection was early)
+          // and reset awaiting flags for the new turn.
+          awaitingReply = false;
+          thinkingPlayed = false;
+          clearThinkingTimer();
           speechActive = true;
           utterancePcm8kChunks = [];
           utteranceStartAt = now;
@@ -3475,28 +3515,6 @@ wssMediaStream.on("connection", (ws, req) => {
         now - lastVoiceAt >= MS_FAST_END_SILENCE_MS;
       const normalSilenceOk = lastVoiceAt && now - lastVoiceAt >= MS_END_SILENCE_MS;
       if (allowListen && speechActive && (fastSilenceOk || normalSilenceOk)) {
-        // mark end-of-speech moment for latency measurement + conditional backchannel
-        lastUtteranceEndAt = Date.now();
-        awaitingReply = true;
-        if (thinkingTimer) {
-          try { clearTimeout(thinkingTimer); } catch {}
-          thinkingTimer = null;
-        }
-        thinkingTimer = setTimeout(() => {
-          if (closed) return;
-          if (!awaitingReply) return;
-          if (agentSpeaking || playing) return;
-          const think = sanitizeSayText(getThinkingText());
-          if (!think) return;
-          // Cached/prewarmed: should start fast. If it isn't cached, the retry/fallback still prevents silence.
-          elevenlabsTtsToUlaw8000({ text: think, persona: AGENT_VOICE_PERSONA })
-            .then((ulaw) => {
-              if (!awaitingReply) return;
-              if (ulaw) playUlaw(ulaw, { label: "thinking" });
-            })
-            .catch(() => {});
-        }, MS_THINKING_DELAY_MS);
-
         const durMs = now - utteranceStartAt;
         const chunks = utterancePcm8kChunks;
         speechActive = false;
@@ -3505,6 +3523,11 @@ wssMediaStream.on("connection", (ws, req) => {
         lastVoiceAt = 0;
 
         if (durMs < MS_MIN_UTTERANCE_MS) return;
+        // mark end-of-speech moment for latency measurement + conditional backchannel
+        lastUtteranceEndAt = Date.now();
+        awaitingReply = true;
+        thinkingPlayed = false;
+        scheduleThinkingOnce();
         msLog("utterance end", { callSid, ms: durMs });
 
         // Concatenate
@@ -3548,6 +3571,10 @@ wssMediaStream.on("connection", (ws, req) => {
             o += c.length;
           }
           msLog("utterance force finalize", { callSid, ms: durMs });
+          lastUtteranceEndAt = Date.now();
+          awaitingReply = true;
+          thinkingPlayed = false;
+          scheduleThinkingOnce();
           inFlight = (inFlight || Promise.resolve())
             .then(() => transcribeAndRespond(pcmAll))
             .catch(() => {});
@@ -3557,6 +3584,7 @@ wssMediaStream.on("connection", (ws, req) => {
       // Safety: cap utterance length.
       if (allowListen && speechActive && utteranceStartAt && now - utteranceStartAt >= MS_MAX_UTTERANCE_MS) {
         const durMs = now - utteranceStartAt;
+        if (durMs < MS_MIN_UTTERANCE_MS) return;
         const chunks = utterancePcm8kChunks;
         speechActive = false;
         utterancePcm8kChunks = [];
@@ -3571,6 +3599,10 @@ wssMediaStream.on("connection", (ws, req) => {
           o += c.length;
         }
         msLog("utterance max finalize", { callSid, ms: durMs });
+        lastUtteranceEndAt = Date.now();
+        awaitingReply = true;
+        thinkingPlayed = false;
+        scheduleThinkingOnce();
         inFlight = (inFlight || Promise.resolve())
           .then(() => transcribeAndRespond(pcmAll))
           .catch(() => {});
