@@ -67,7 +67,7 @@ export function openDb({ dbPath }) {
     CREATE TABLE IF NOT EXISTS leads (
       id INTEGER PRIMARY KEY,
       phone TEXT UNIQUE NOT NULL,
-      status TEXT NOT NULL CHECK(status IN ('won','lost')),
+      status TEXT NOT NULL CHECK(status IN ('waiting','not_interested')),
       call_sid TEXT NULL,
       persona TEXT NULL CHECK(persona IN ('male','female')),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -76,6 +76,46 @@ export function openDb({ dbPath }) {
 
     CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
   `);
+
+  // Migration: old leads status values were ('won','lost'). New: ('waiting','not_interested').
+  // We migrate in-place by rebuilding the table (SQLite can't ALTER CHECK constraints).
+  try {
+    const row = db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='leads' LIMIT 1`)
+      .get();
+    const sql = String(row?.sql || "");
+    if (sql.includes("status IN ('won','lost')")) {
+      db.exec(`
+        BEGIN;
+        DROP INDEX IF EXISTS idx_leads_status;
+        CREATE TABLE IF NOT EXISTS leads_new (
+          id INTEGER PRIMARY KEY,
+          phone TEXT UNIQUE NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('waiting','not_interested')),
+          call_sid TEXT NULL,
+          persona TEXT NULL CHECK(persona IN ('male','female')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO leads_new (id, phone, status, call_sid, persona, created_at, updated_at)
+        SELECT
+          id,
+          phone,
+          CASE status WHEN 'won' THEN 'waiting' ELSE 'not_interested' END,
+          call_sid,
+          persona,
+          created_at,
+          updated_at
+        FROM leads;
+        DROP TABLE leads;
+        ALTER TABLE leads_new RENAME TO leads;
+        CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
+        COMMIT;
+      `);
+    }
+  } catch {
+    // Fail-open: if migration fails, app still boots. (Worst case: leads table keeps old values.)
+  }
 
   // Add dialing columns if missing (migration)
   ensureColumns(db, "contacts", [
@@ -93,7 +133,11 @@ export function openDb({ dbPath }) {
 export function upsertLead(db, { phone, status, callSid = null, persona = null } = {}) {
   const normalized = normalizePhoneE164IL(phone);
   if (!normalized) return;
-  const st = status === "won" ? "won" : "lost";
+  // Backward-compatible mapping:
+  // - won -> waiting
+  // - lost -> not_interested
+  const s = String(status || "").toLowerCase();
+  const st = s === "waiting" || s === "won" ? "waiting" : "not_interested";
   db.prepare(
     `
     INSERT INTO leads (phone, status, call_sid, persona, created_at, updated_at)
@@ -118,8 +162,8 @@ export function listLeads(db, { status = "all", limit = 200, offset = 0 } = {}) 
   const lim = Math.max(1, Math.min(1000, Number(limit || 200)));
   const off = Math.max(0, Number(offset || 0));
   const st = String(status || "all").toLowerCase();
-  const where = st === "won" || st === "lost" ? "WHERE l.status = ?" : "";
-  const params = st === "won" || st === "lost" ? [st, lim, off] : [lim, off];
+  const where = st === "waiting" || st === "not_interested" ? "WHERE l.status = ?" : "";
+  const params = st === "waiting" || st === "not_interested" ? [st, lim, off] : [lim, off];
 
   const rows = db
     .prepare(

@@ -200,8 +200,8 @@ export function renderAdminPage() {
               <div class="row" style="gap:8px; align-items:center;">
                 <select id="leadsFilter" style="max-width:220px;">
                   <option value="all">הכל</option>
-                  <option value="won">נסגר</option>
-                  <option value="lost">לא נסגר</option>
+                  <option value="waiting">מחכה לשיחה</option>
+                  <option value="not_interested">לא מעוניין</option>
                 </select>
                 <button class="secondary" id="refreshLeadsBtn">רענון</button>
               </div>
@@ -593,9 +593,9 @@ export function renderAdminPage() {
           body.innerHTML = "";
           for(const r of rows){
             const tr = document.createElement("tr");
-            const st = r.status === "won"
-              ? '<span class="badge good">נסגר</span>'
-              : '<span class="badge bad">לא נסגר</span>';
+            const st = r.status === "waiting"
+              ? '<span class="badge good">מחכה לשיחה</span>'
+              : '<span class="badge bad">לא מעוניין</span>';
             const delBtn =
               '<button class="iconBtn leadDelBtn" data-phone="'+(r.phone||"")+'" title="מחק ליד">' +
               '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +

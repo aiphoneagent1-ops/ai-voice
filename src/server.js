@@ -1687,7 +1687,7 @@ app.get("/api/contacts/list", (req, res) => {
   res.json({ rows, limit, offset });
 });
 
-// Leads (won/lost)
+// Leads (waiting/not_interested)
 app.get("/api/leads/list", (req, res) => {
   const status = String(req.query.status || "all");
   const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 200)));
@@ -2071,9 +2071,9 @@ app.all("/twilio/record", async (req, res) => {
 
     if (detectOptOut(speech)) {
       markDoNotCall(db, phone);
-      // Track as "lost" lead (they explicitly asked to stop).
+      // Track as "not_interested" lead (they explicitly asked to stop).
       try {
-        upsertLead(db, { phone, status: "lost", callSid, persona });
+        upsertLead(db, { phone, status: "not_interested", callSid, persona });
       } catch {}
       await respondWithPlayAndMaybeHangup(req, res, {
         text: "אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב.",
@@ -2143,7 +2143,7 @@ app.all("/twilio/record", async (req, res) => {
     const notInterested = detectNotInterested(speech) && !interested;
     if (interested || notInterested) {
       try {
-        upsertLead(db, { phone, status: interested ? "won" : "lost", callSid, persona });
+        upsertLead(db, { phone, status: interested ? "waiting" : "not_interested", callSid, persona });
       } catch {}
       const toYou = persona === "female" ? "אלייך" : "אליך";
       const picked =
@@ -2565,7 +2565,7 @@ wssConversationRelay.on("connection", (ws, req) => {
           const interested = detectInterested(voicePrompt) && !detectNotInterested(voicePrompt);
           const notInterested = detectNotInterested(voicePrompt) && !interested;
           if (callSid && phone && (interested || notInterested)) {
-            upsertLead(db, { phone, status: interested ? "won" : "lost", callSid, persona });
+            upsertLead(db, { phone, status: interested ? "waiting" : "not_interested", callSid, persona });
           }
         } catch {}
 
@@ -2597,6 +2597,7 @@ wssMediaStream.on("connection", (ws, req) => {
   let persona = "male";
   let greeting = "";
   let closed = false;
+  let leadWaiting = false;
 
   // We want a "normal call":
   // - Greeting plays fully (no barge-in, no listening)
@@ -2846,7 +2847,8 @@ wssMediaStream.on("connection", (ws, req) => {
     // Deterministic close: explicit approval to transfer details => don't ask again.
     if (detectTransferConsent(speech)) {
       try {
-        if (callSid && phone) upsertLead(db, { phone, status: "won", callSid, persona });
+        if (callSid && phone) upsertLead(db, { phone, status: "waiting", callSid, persona });
+        leadWaiting = true;
       } catch {}
       conversationState = "POST_CLOSE";
       const closeText =
@@ -2953,12 +2955,12 @@ wssMediaStream.on("connection", (ws, req) => {
         try {
           if (outcome === "do_not_call") {
             if (phone) markDoNotCall(db, phone);
-            if (callSid && phone) upsertLead(db, { phone, status: "lost", callSid, persona });
+            if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
             conversationState = "END";
           } else if (outcome === "interested") {
-            if (callSid && phone) upsertLead(db, { phone, status: "won", callSid, persona });
+            if (callSid && phone) upsertLead(db, { phone, status: "waiting", callSid, persona });
           } else if (outcome === "not_interested") {
-            if (callSid && phone) upsertLead(db, { phone, status: "lost", callSid, persona });
+            if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
           }
         } catch {}
 
@@ -3006,6 +3008,13 @@ wssMediaStream.on("connection", (ws, req) => {
   ws.on("close", () => {
     closed = true;
     stopPlayback({ clear: false });
+    // If the call ended (hangup mid-call) and we never got explicit consent,
+    // mark it as not_interested per product requirement.
+    try {
+      if (callSid && phone && !leadWaiting) {
+        upsertLead(db, { phone, status: "not_interested", callSid, persona });
+      }
+    } catch {}
     msLog("ws closed", { callSid, streamSid, phone });
   });
 
