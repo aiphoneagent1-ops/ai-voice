@@ -2599,6 +2599,8 @@ wssMediaStream.on("connection", (ws, req) => {
     playTimer = null;
     playing = false;
     playingSince = 0;
+    agentSpeaking = false;
+    pendingEnableListenOnMark = false;
     if (currentPlay?.resolve) {
       try {
         currentPlay.resolve({ ok: false, reason: "stopped", label: currentPlay.label });
@@ -2616,6 +2618,9 @@ wssMediaStream.on("connection", (ws, req) => {
     playing = true;
     playingSince = Date.now();
     agentSpeaking = true;
+    pendingEnableListenOnMark = true;
+    // While we are speaking, do not listen (echo will look like "speech").
+    allowListen = false;
     const CHUNK_BYTES = 160; // 20ms @ 8kHz, 1 byte/sample (mulaw)
     let offset = 0;
     let sent = 0;
@@ -2668,6 +2673,7 @@ wssMediaStream.on("connection", (ws, req) => {
         if (offset >= ulawBuf.length) {
           const markName = `done_${label}_${myId}_${Date.now()}`;
           lastMarkName = markName;
+          msLog("tx mark", { name: markName });
           wsSendToTwilio({ event: "mark", streamSid, mark: { name: markName } });
           // Resolve before stopPlayback clears currentPlay.
           const done = currentPlay;
@@ -3065,9 +3071,9 @@ wssMediaStream.on("connection", (ws, req) => {
     }
 
     if (ev === "mark") {
-      // Twilio acks our marks; useful for debugging audio playback completion.
-      msLog("mark", { name: msg?.mark?.name || "" });
+      // Twilio acks our marks; this is the moment playback is complete.
       const name = String(msg?.mark?.name || "");
+      msLog("rx mark", { name });
       if (pendingEnableListenOnMark && name && name === lastMarkName) {
         pendingEnableListenOnMark = false;
         agentSpeaking = false;
