@@ -106,11 +106,12 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
       textFormat = undefined;
     }
 
+    // Responses API appears to require `text.format.name` even for plain text output.
+    // So we always send a default plain-text format unless we override with json_schema.
     const payload = {
       model: m,
       input: messages,
-      // NOTE: In the Responses API, `response_format` moved to `text.format`.
-      ...(textFormat ? { text: { format: textFormat } } : {}),
+      text: { format: textFormat || { name: "plain_text" } },
       ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {})
     };
     // Avoid passing temperature for GPT-5 unless we explicitly control reasoning settings.
