@@ -173,15 +173,47 @@ const CR_ELEVENLABS_TEXT_NORMALIZATION = String(process.env.CR_ELEVENLABS_TEXT_N
 // Media Streams (Realtime audio in/out)
 const MS_DEBUG = process.env.MS_DEBUG === "1" || process.env.MS_DEBUG === "true";
 const MS_LOG_EVERY_FRAME = process.env.MS_LOG_EVERY_FRAME === "1" || process.env.MS_LOG_EVERY_FRAME === "true";
-const MS_VAD_THRESHOLD = Number(process.env.MS_VAD_THRESHOLD || 550); // 0..~8000
+// VAD sensitivity: if too high, we never detect user speech; if too low, noise triggers.
+// We'll default a bit lower than before to better catch quiet callers, and log RMS so we can tune.
+const MS_VAD_THRESHOLD = Number(process.env.MS_VAD_THRESHOLD || 350); // 0..~8000
 // Latency tuning: lower silence threshold -> faster "turn taking"
 const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 350);
 const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 250);
+// Fallback: if user pauses briefly, don't wait forever—force finalize after this (once we see a pause).
+const MS_FORCE_FINALIZE_AFTER_MS = Number(process.env.MS_FORCE_FINALIZE_AFTER_MS || 1500);
+const MS_FORCE_FINALIZE_PAUSE_MS = Number(process.env.MS_FORCE_FINALIZE_PAUSE_MS || 150);
+// Safety: cap utterance length so we don't buffer indefinitely.
+const MS_MAX_UTTERANCE_MS = Number(process.env.MS_MAX_UTTERANCE_MS || 8000);
 const ELEVENLABS_STREAM_OUTPUT_FORMAT = String(process.env.ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000").trim();
 const MS_TEST_TONE = process.env.MS_TEST_TONE === "1" || process.env.MS_TEST_TONE === "true";
 // Barge-in tuning: avoid clearing agent speech on line noise/echo.
 const MS_BARGE_IN_FRAMES = Number(process.env.MS_BARGE_IN_FRAMES || 15); // 15 frames * 20ms = 300ms
 const MS_BARGE_IN_GRACE_MS = Number(process.env.MS_BARGE_IN_GRACE_MS || 400); // don't barge-in instantly after agent starts
+
+// In-memory cache for ElevenLabs ulaw outputs (avoids ~2-4s latency on repeated greetings).
+const _ulawMemCache = new Map(); // key -> Buffer
+
+function computeElevenUlawCacheKey({ text, persona }) {
+  const voiceId =
+    (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
+  return crypto
+    .createHash("sha256")
+    .update(
+      [
+        "elevenlabs_ulaw",
+        ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000",
+        voiceId || "",
+        ELEVENLABS_MODEL_ID || "",
+        String(ELEVENLABS_LANGUAGE_CODE || ""),
+        String(ELEVENLABS_STABILITY),
+        String(ELEVENLABS_SIMILARITY_BOOST),
+        String(ELEVENLABS_STYLE),
+        String(ELEVENLABS_SPEAKER_BOOST ? "1" : "0"),
+        String(text || "")
+      ].join("::")
+    )
+    .digest("hex");
+}
 
 function primaryLangTag(code) {
   const s = String(code || "").trim();
@@ -349,6 +381,11 @@ async function elevenlabsTtsToUlaw8000({ text, persona }) {
     (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
   if (!voiceId) return null;
 
+  // Hot-path cache (memory)
+  const cacheKey = computeElevenUlawCacheKey({ text, persona });
+  const cached = _ulawMemCache.get(cacheKey);
+  if (cached) return cached;
+
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${encodeURIComponent(
     ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000"
   )}`;
@@ -413,6 +450,7 @@ async function elevenlabsTtsToUlaw8000({ text, persona }) {
     return null;
   }
 
+  _ulawMemCache.set(cacheKey, buf);
   return buf; // raw mulaw/8000 bytes
 }
 function startsWithLang(code, prefix) {
@@ -2485,6 +2523,9 @@ wssMediaStream.on("connection", (ws, req) => {
   let speechActive = false;
   let lastVoiceAt = 0;
   let bargeInFrames = 0;
+  let inboundFrames = 0;
+  let inboundVoicedFrames = 0;
+  let inboundMaxRms = 0;
   /** @type {Int16Array[]} */
   let utterancePcm8kChunks = [];
   let utteranceStartAt = 0;
@@ -2838,13 +2879,18 @@ wssMediaStream.on("connection", (ws, req) => {
       const rms = rmsFromPcm16(pcm16);
       const now = Date.now();
 
+      inboundFrames++;
+      if (rms > inboundMaxRms) inboundMaxRms = rms;
+
       const voiced = rms >= MS_VAD_THRESHOLD;
       if (voiced) {
+        inboundVoicedFrames++;
         lastVoiceAt = now;
         if (!speechActive) {
           speechActive = true;
           utterancePcm8kChunks = [];
           utteranceStartAt = now;
+          msLog("speech start", { callSid, rms: Math.round(rms) });
         }
         utterancePcm8kChunks.push(pcm16);
 
@@ -2876,6 +2922,18 @@ wssMediaStream.on("connection", (ws, req) => {
         bargeInFrames = Math.max(0, bargeInFrames - 1);
       }
 
+      if (MS_DEBUG && inboundFrames % 100 === 0) {
+        msLog("inbound stats", {
+          frames: inboundFrames,
+          voiced: inboundVoicedFrames,
+          maxRms: Math.round(inboundMaxRms),
+          threshold: MS_VAD_THRESHOLD,
+          allowListen
+        });
+        // decay max rms so log stays meaningful over time
+        inboundMaxRms = 0;
+      }
+
       if (allowListen && speechActive && lastVoiceAt && now - lastVoiceAt >= MS_END_SILENCE_MS) {
         const durMs = now - utteranceStartAt;
         const chunks = utterancePcm8kChunks;
@@ -2898,6 +2956,59 @@ wssMediaStream.on("connection", (ws, req) => {
         }
 
         // Only one pipeline at a time; newer utterances can wait.
+        inFlight = (inFlight || Promise.resolve())
+          .then(() => transcribeAndRespond(pcmAll))
+          .catch(() => {});
+      }
+
+      // Fallback: if we have a long utterance and a short pause, force-finalize for faster turn-taking.
+      if (
+        allowListen &&
+        speechActive &&
+        utteranceStartAt &&
+        now - utteranceStartAt >= MS_FORCE_FINALIZE_AFTER_MS &&
+        lastVoiceAt &&
+        now - lastVoiceAt >= MS_FORCE_FINALIZE_PAUSE_MS
+      ) {
+        const durMs = now - utteranceStartAt;
+        if (durMs >= MS_MIN_UTTERANCE_MS) {
+          const chunks = utterancePcm8kChunks;
+          speechActive = false;
+          utterancePcm8kChunks = [];
+          utteranceStartAt = 0;
+          lastVoiceAt = 0;
+          let total = 0;
+          for (const c of chunks) total += c.length;
+          const pcmAll = new Int16Array(total);
+          let o = 0;
+          for (const c of chunks) {
+            pcmAll.set(c, o);
+            o += c.length;
+          }
+          msLog("utterance force finalize", { callSid, ms: durMs });
+          inFlight = (inFlight || Promise.resolve())
+            .then(() => transcribeAndRespond(pcmAll))
+            .catch(() => {});
+        }
+      }
+
+      // Safety: cap utterance length.
+      if (allowListen && speechActive && utteranceStartAt && now - utteranceStartAt >= MS_MAX_UTTERANCE_MS) {
+        const durMs = now - utteranceStartAt;
+        const chunks = utterancePcm8kChunks;
+        speechActive = false;
+        utterancePcm8kChunks = [];
+        utteranceStartAt = 0;
+        lastVoiceAt = 0;
+        let total = 0;
+        for (const c of chunks) total += c.length;
+        const pcmAll = new Int16Array(total);
+        let o = 0;
+        for (const c of chunks) {
+          pcmAll.set(c, o);
+          o += c.length;
+        }
+        msLog("utterance max finalize", { callSid, ms: durMs });
         inFlight = (inFlight || Promise.resolve())
           .then(() => transcribeAndRespond(pcmAll))
           .catch(() => {});
@@ -2988,6 +3099,24 @@ server.listen(PORT, HOST, () => {
       if (DEBUG_TTS) console.log("[tts] prewarm complete");
     } catch (e) {
       console.warn("[tts] prewarm failed:", e?.message || e);
+    }
+  })();
+
+  // Prewarm ElevenLabs ulaw greeting (Media Streams) to reduce first-call latency after deploy.
+  (async () => {
+    try {
+      const { openingScript, openingScriptMale, openingScriptFemale } = settingsSnapshot();
+      const gMale = sanitizeSayText(String(openingScriptMale || openingScript || "").trim() || buildGreeting({ persona: "male" }));
+      const gFemale = sanitizeSayText(
+        String(openingScriptFemale || openingScript || "").trim() || buildGreeting({ persona: "female" })
+      );
+      await Promise.all([
+        elevenlabsTtsToUlaw8000({ text: gMale, persona: AGENT_VOICE_PERSONA }),
+        elevenlabsTtsToUlaw8000({ text: gFemale, persona: AGENT_VOICE_PERSONA })
+      ]);
+      if (MS_DEBUG) console.log("[ms] ulaw prewarm complete");
+    } catch (e) {
+      if (MS_DEBUG) console.warn("[ms] ulaw prewarm failed:", e?.message || e);
     }
   })();
 
