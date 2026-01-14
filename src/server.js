@@ -1067,11 +1067,24 @@ function detectOptOut(text) {
   return patterns.some((p) => t.includes(p));
 }
 
+function normalizeIntentText(text) {
+  // Normalize STT output so "כן." / "כן," / "מעוניים" typos don't break intent detection.
+  // - lower
+  // - strip punctuation/symbols
+  // - collapse whitespace
+  const s = String(text || "").toLowerCase();
+  // Keep letters/numbers/spaces only (Unicode-aware)
+  const cleaned = s.replace(/[^\p{L}\p{N}\s]+/gu, " ");
+  return cleaned.replace(/\s+/g, " ").trim();
+}
+
 function detectInterested(text) {
-  const t = String(text || "").toLowerCase();
+  const t = normalizeIntentText(text);
   const patterns = [
     "מעוניין",
     "מעוניינת",
+    "מעונין",
+    "מעונינת",
     "רוצה לבוא",
     "רוצה להגיע",
     "אני רוצה לבוא",
@@ -1085,15 +1098,20 @@ function detectInterested(text) {
     "תעבירי ללשכה",
     "תעבירו ללשכה"
   ];
-  return patterns.some((p) => t.includes(p));
+  if (patterns.some((p) => t.includes(p))) return true;
+  // Extra tolerance for common partials/typos like "מעוניים"
+  if (/(^|\s)מעונ[א-ת]*($|\s)/.test(t)) return true;
+  return false;
 }
 
 function detectNotInterested(text) {
-  const t = String(text || "").toLowerCase();
+  const t = normalizeIntentText(text);
   const patterns = [
     "לא רוצה",
     "לא מעוניין",
     "לא מעוניינת",
+    "לא מעונין",
+    "לא מעונינת",
     "לא מתאים",
     "לא תודה",
     "עזוב",
@@ -1106,7 +1124,7 @@ function detectNotInterested(text) {
 }
 
 function detectWaitRequest(text) {
-  const t = String(text || "").toLowerCase();
+  const t = normalizeIntentText(text);
   const patterns = ["תמתין", "תמתין רגע", "רגע", "שנייה", "שניה", "דקה", "חכה", "חכי", "רק רגע"];
   return patterns.some((p) => t.includes(p));
 }
@@ -1125,13 +1143,13 @@ function limitPhoneReply(text, maxChars = 70) {
 }
 
 function detectAffirmativeShort(text) {
-  const t = String(text || "").toLowerCase().trim();
+  const t = normalizeIntentText(text);
   const patterns = ["כן", "כן כן", "בטח", "ברור", "אוקיי", "אוקי", "סבבה", "בהחלט", "יאללה", "תעביר", "תעבירו"];
   return patterns.some((p) => t === p || t.startsWith(p + " "));
 }
 
 function detectTransferConsent(text) {
-  const t = String(text || "").toLowerCase();
+  const t = normalizeIntentText(text);
   const patterns = [
     "תעביר את הפרטים",
     "תעביר פרטים",
@@ -3313,6 +3331,20 @@ wssMediaStream.on("connection", (ws, req) => {
       }
     }
     msLog("llm answer", { callSid, chars: answer.length });
+
+    // Final guardrail: if user intent was affirmative/interested, never say a goodbye.
+    // This prevents the "שנייה אני איתך... תודה רבה יום טוב" failure mode.
+    if ((detectAffirmativeShort(speech) || detectInterested(speech)) && !detectNotInterested(speech)) {
+      const looksLikeGoodbye = /יום טוב|תודה רבה/i.test(answer);
+      const alreadyClosing = /להעביר|לשכה|פרטים/i.test(answer) || conversationState === "CLOSE" || conversationState === "POST_CLOSE";
+      if (looksLikeGoodbye && !alreadyClosing) {
+        conversationState = "CLOSE";
+        answer =
+          persona === "female"
+            ? "מעולה. להעביר ללשכה שיחזרו אלייך עם הפרטים?"
+            : "מעולה. להעביר ללשכה שיחזרו אליך עם הפרטים?";
+      }
+    }
 
     try {
       if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: answer });
