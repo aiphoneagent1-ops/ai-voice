@@ -190,8 +190,35 @@ const MS_TEST_TONE = process.env.MS_TEST_TONE === "1" || process.env.MS_TEST_TON
 const MS_BARGE_IN_FRAMES = Number(process.env.MS_BARGE_IN_FRAMES || 15); // 15 frames * 20ms = 300ms
 const MS_BARGE_IN_GRACE_MS = Number(process.env.MS_BARGE_IN_GRACE_MS || 400); // don't barge-in instantly after agent starts
 
-// In-memory cache for ElevenLabs ulaw outputs (avoids ~2-4s latency on repeated greetings).
+// Cache for ElevenLabs ulaw outputs:
+// - Memory cache helps within a single process lifetime.
+// - Disk cache (Render persistent disk) makes greeting fast even after cold starts/deploys.
 const _ulawMemCache = new Map(); // key -> Buffer
+const _ulawDiskCacheDir = path.resolve(DATA_DIR, "ulaw-cache");
+function ensureUlawCacheDir() {
+  try {
+    if (!fs.existsSync(_ulawDiskCacheDir)) fs.mkdirSync(_ulawDiskCacheDir, { recursive: true });
+  } catch {}
+}
+function ulawDiskPath(key) {
+  return path.join(_ulawDiskCacheDir, `${key}.ulaw`);
+}
+function getUlawFromDisk(key) {
+  try {
+    const p = ulawDiskPath(key);
+    if (!fs.existsSync(p)) return null;
+    const buf = fs.readFileSync(p);
+    return buf && buf.length ? buf : null;
+  } catch {
+    return null;
+  }
+}
+function putUlawToDisk(key, buf) {
+  try {
+    ensureUlawCacheDir();
+    fs.writeFileSync(ulawDiskPath(key), buf);
+  } catch {}
+}
 
 function computeElevenUlawCacheKey({ text, persona }) {
   const voiceId =
@@ -385,6 +412,12 @@ async function elevenlabsTtsToUlaw8000({ text, persona }) {
   const cacheKey = computeElevenUlawCacheKey({ text, persona });
   const cached = _ulawMemCache.get(cacheKey);
   if (cached) return cached;
+  // Warm-path cache (disk)
+  const disk = getUlawFromDisk(cacheKey);
+  if (disk) {
+    _ulawMemCache.set(cacheKey, disk);
+    return disk;
+  }
 
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${encodeURIComponent(
     ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000"
@@ -438,6 +471,8 @@ async function elevenlabsTtsToUlaw8000({ text, persona }) {
       if (tag === "data" && dataStart + size <= buf.length) {
         const raw = buf.subarray(dataStart, dataStart + size);
         if (MS_DEBUG) console.log("[ms] stripped wav header", { rawBytes: raw.length });
+        _ulawMemCache.set(cacheKey, raw);
+        putUlawToDisk(cacheKey, raw);
         return raw;
       }
       i = dataStart + size;
@@ -451,6 +486,7 @@ async function elevenlabsTtsToUlaw8000({ text, persona }) {
   }
 
   _ulawMemCache.set(cacheKey, buf);
+  putUlawToDisk(cacheKey, buf);
   return buf; // raw mulaw/8000 bytes
 }
 function startsWithLang(code, prefix) {
