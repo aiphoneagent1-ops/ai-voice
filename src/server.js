@@ -1144,8 +1144,11 @@ function limitPhoneReply(text, maxChars = 70) {
 
 function detectAffirmativeShort(text) {
   const t = normalizeIntentText(text);
-  const patterns = ["כן", "כן כן", "בטח", "ברור", "אוקיי", "אוקי", "סבבה", "בהחלט", "יאללה", "תעביר", "תעבירו"];
-  return patterns.some((p) => t === p || t.startsWith(p + " "));
+  if (!t) return false;
+  // Most common: "כן", "כן אחי", "כן יאללה", etc.
+  if (t === "כן" || t.startsWith("כן ")) return true;
+  const patterns = ["כן כן", "בטח", "ברור", "אוקיי", "אוקי", "סבבה", "בהחלט", "יאללה", "תעביר", "תעבירו"];
+  return patterns.some((p) => t === p || t.startsWith(p + " ") || t.includes(" " + p + " "));
 }
 
 function detectTransferConsent(text) {
@@ -3090,6 +3093,13 @@ wssMediaStream.on("connection", (ws, req) => {
       return;
     }
     msLog("stt", { callSid, chars: speech.length });
+    // Debug: show what Whisper heard (helps diagnose why "כן/מעוניין" isn't triggering deterministic logic).
+    msLog("stt text", {
+      callSid,
+      text: String(speech || "").slice(0, 120),
+      norm: normalizeIntentText(speech).slice(0, 120),
+      state: conversationState
+    });
 
     // If caller said a short "yes" early, respond deterministically (no LLM) to avoid loops.
     // This makes the agent feel "logical" like a human, not prompt-y.
