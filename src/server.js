@@ -2192,14 +2192,14 @@ app.all("/twilio/record", async (req, res) => {
       // Don't hang up immediately if the user is still speaking / recording failed.
       if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
         await respondWithPlayAndMaybeHangup(req, res, {
-          text: "לא שמעתי אותך טוב. אפשר להגיד שוב? אני מקשיב.",
+          text: "סבבה — זה רלוונטי לך? כן או לא?",
           persona,
           hangup: false,
           retry: retry + 1
         });
         return;
       }
-      await respondWithPlayAndMaybeHangup(req, res, { text: "לא שמעתי אותך טוב. תודה רבה ויום טוב.", persona, hangup: true });
+      await respondWithPlayAndMaybeHangup(req, res, { text: "סבבה, נסיים כאן. יום טוב ובשורות טובות.", persona, hangup: true });
       return;
     }
 
@@ -2234,14 +2234,14 @@ app.all("/twilio/record", async (req, res) => {
     if (!recRes.ok) {
       if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
         await respondWithPlayAndMaybeHangup(req, res, {
-          text: "סליחה, לא הצלחתי לשמוע אותך. אפשר להגיד שוב?",
+          text: "סבבה — זה רלוונטי לך? כן או לא?",
           persona,
           hangup: false,
           retry: retry + 1
         });
         return;
       }
-      await respondWithPlayAndMaybeHangup(req, res, { text: "סליחה, לא הצלחתי לשמוע אותך. יום טוב.", persona, hangup: true });
+      await respondWithPlayAndMaybeHangup(req, res, { text: "סבבה, נסיים כאן. יום טוב ובשורות טובות.", persona, hangup: true });
       return;
     }
     fs.writeFileSync(tmpPath, Buffer.from(await recRes.arrayBuffer()));
@@ -2263,14 +2263,14 @@ app.all("/twilio/record", async (req, res) => {
     if (!speech) {
       if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
         await respondWithPlayAndMaybeHangup(req, res, {
-          text: "לא הבנתי אותך טוב. אפשר לחזור שוב במשפט שלם? אני מקשיב.",
+          text: "סבבה — זה רלוונטי לך? כן או לא?",
           persona,
           hangup: false,
           retry: retry + 1
         });
         return;
       }
-      await respondWithPlayAndMaybeHangup(req, res, { text: "לא שמעתי אותך טוב. תודה רבה ויום טוב.", persona, hangup: true });
+      await respondWithPlayAndMaybeHangup(req, res, { text: "סבבה, נסיים כאן. יום טוב ובשורות טובות.", persona, hangup: true });
       return;
     }
 
@@ -2480,7 +2480,7 @@ app.all("/twilio/play", async (req, res) => {
       if (attempt >= TTS_POLL_MAX) {
         // Never leave the caller in silence. Fallback to Twilio <Say> (Polly.Carmit) and continue.
         const xml = buildRecordTwiML({
-          sayText: "רגע אחד, אני בודקת... אפשר להגיד שוב?",
+          sayText: "סבבה — זה רלוונטי לך? כן או לא?",
           playUrl: null,
           actionUrl: recordActionUrl(req, 0),
           playBeep: false,
@@ -2515,7 +2515,7 @@ app.all("/twilio/play", async (req, res) => {
     console.error(err);
     // Safety: never return "nothing". Continue the conversation even on errors.
     const xml = buildRecordTwiML({
-      sayText: "סליחה, הייתה תקלה קטנה. אפשר להגיד שוב?",
+      sayText: "סבבה — זה רלוונטי לך? כן או לא?",
       playUrl: null,
       actionUrl: recordActionUrl(req, 0),
       playBeep: false,
@@ -2596,7 +2596,7 @@ async function streamAssistantToConversationRelay({
   userText
 }) {
   if (!openai) {
-    wsSendText(ws, { type: "text", token: "בשביל להמשיך את השיחה החכמה צריך להגדיר מפתח מערכת.", last: true });
+    wsSendText(ws, { type: "text", token: "סבבה — רוצה שאעביר פרטים ללשכה? כן או לא?", last: true });
     return;
   }
 
@@ -2784,7 +2784,7 @@ wssConversationRelay.on("connection", (ws, req) => {
 
         await streamAssistantToConversationRelay({ ws, callSid, persona, userText: voicePrompt });
       })().catch((e) => {
-        wsSendJson(ws, { type: "text", token: "סליחה, הייתה תקלה קטנה. אפשר להגיד שוב?", last: true });
+        wsSendJson(ws, { type: "text", token: "סבבה — זה רלוונטי לך? כן או לא?", last: true });
         if (DEBUG_TTS) console.warn("[cr] handler error:", e?.message || e);
       });
     }
@@ -2841,6 +2841,50 @@ wssMediaStream.on("connection", (ws, req) => {
   // Sales/flow state (kept per call connection)
   /** @type {"CHECK_INTEREST"|"PITCH"|"CLOSE"|"POST_CLOSE"|"HANDLE_OBJECTION"|"END"} */
   let conversationState = "CHECK_INTEREST";
+  // Reprompt control: never loop "repeat yourself" style prompts.
+  let confirmCount = 0;
+
+  function confirmQuestionText() {
+    // No-apology mode: never say "לא שמעתי/לא קלטתי/תחזור".
+    if (conversationState === "CLOSE" || conversationState === "POST_CLOSE") {
+      return persona === "female"
+        ? "סבבה — להעביר פרטים ללשכה? כן או לא?"
+        : "סבבה — להעביר פרטים ללשכה? כן או לא?";
+    }
+    return persona === "female" ? "סבבה — זה רלוונטי לך? כן או לא?" : "סבבה — זה רלוונטי לך? כן או לא?";
+  }
+
+  async function handleUnclearOrEmptySpeech(reason) {
+    if (closed) return;
+    // Only allow one confirm question; then end politely to avoid loops.
+    if (confirmCount >= 1) {
+      const finalText = "סבבה, נסיים כאן. יום טוב ובשורות טובות.";
+      try {
+        if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: finalText });
+      } catch {}
+      const r = await sayText(finalText, { label: "reply" });
+      if (MS_DEBUG) msLog("confirm->end", { callSid, reason, confirmCount });
+      if (r?.markName) {
+        pendingHangupOnMark = true;
+        hangupMarkName = String(r.markName || "");
+      } else {
+        await hangupCallNow();
+      }
+      conversationState = "END";
+      lastOutcome = "not_interested";
+      try {
+        if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
+      } catch {}
+      return;
+    }
+    confirmCount++;
+    const q = confirmQuestionText();
+    try {
+      if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
+    } catch {}
+    if (MS_DEBUG) msLog("confirm question", { callSid, reason, confirmCount, state: conversationState });
+    await sayText(q, { label: "reply" });
+  }
 
   // Hangup control (only after Twilio acks playback completion via mark)
   let pendingHangupOnMark = false;
@@ -3090,6 +3134,7 @@ wssMediaStream.on("connection", (ws, req) => {
 
     if (!speech) {
       msLog("stt empty", { callSid });
+      await handleUnclearOrEmptySpeech("stt_empty");
       return;
     }
     msLog("stt", { callSid, chars: speech.length });
@@ -3104,6 +3149,7 @@ wssMediaStream.on("connection", (ws, req) => {
     // If caller said a short "yes" early, respond deterministically (no LLM) to avoid loops.
     // This makes the agent feel "logical" like a human, not prompt-y.
     if (detectAffirmativeShort(speech) && (conversationState === "CHECK_INTEREST" || conversationState === "PITCH")) {
+      confirmCount = 0;
       conversationState = "CLOSE";
       const pitch =
         persona === "female"
@@ -3119,6 +3165,7 @@ wssMediaStream.on("connection", (ws, req) => {
     // Deterministic interest: "אני מעוניין/ת" should NEVER lead to "תודה רבה יום טוב".
     // If caller expresses interest (but didn't explicitly consent to transfer yet), move to CLOSE and ask permission.
     if (detectInterested(speech) && !detectNotInterested(speech) && conversationState !== "POST_CLOSE") {
+      confirmCount = 0;
       conversationState = "CLOSE";
       const pitch =
         persona === "female"
@@ -3133,6 +3180,7 @@ wssMediaStream.on("connection", (ws, req) => {
 
     // If caller asks us to wait, don't end the call. Keep it natural.
     if (detectWaitRequest(speech)) {
+      confirmCount = 0;
       const waitText = "ברור, אני איתך. תגיד לי מתי נוח.";
       try {
         if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: waitText });
@@ -3143,6 +3191,7 @@ wssMediaStream.on("connection", (ws, req) => {
 
     // Post-close: if user says "no/thanks", end politely and hang up after playback finishes.
     if (conversationState === "POST_CLOSE" && detectNoMoreHelp(speech)) {
+      confirmCount = 0;
       const finalText = "סבבה לגמרי. יום טוב ובשורות טובות.";
       try {
         if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: finalText });
@@ -3167,6 +3216,7 @@ wssMediaStream.on("connection", (ws, req) => {
     // Deterministic close: explicit approval to transfer details => don't ask again.
     // Also accept short affirmations (e.g. "כן") when we're already in CLOSE.
     if (detectTransferConsent(speech) || (conversationState === "CLOSE" && detectAffirmativeShort(speech))) {
+      confirmCount = 0;
       try {
         if (callSid && phone) upsertLead(db, { phone, status: "waiting", callSid, persona });
         leadWaiting = true;
@@ -3188,6 +3238,7 @@ wssMediaStream.on("connection", (ws, req) => {
 
     // Opt-out fast path
     if (detectOptOut(speech)) {
+      confirmCount = 0;
       try {
         if (phone) markDoNotCall(db, phone);
         if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
@@ -3199,17 +3250,18 @@ wssMediaStream.on("connection", (ws, req) => {
     // STT noise gating: if Whisper returns something tiny, ignore it unless we are in a closing phase.
     if (speech.length < 4 && !(conversationState === "CLOSE" || conversationState === "POST_CLOSE")) {
       msLog("stt gated (too short)", { callSid, chars: speech.length, state: conversationState });
+      await handleUnclearOrEmptySpeech("stt_too_short");
       return;
     }
 
     // LLM
-    // Default should never prematurely end the call when the user is interested.
+    // Default should never be an apology / "repeat yourself" prompt.
     let answer =
       conversationState === "CLOSE"
         ? (persona === "female"
             ? "מעולה. להעביר ללשכה שיחזרו אלייך עם הפרטים?"
             : "מעולה. להעביר ללשכה שיחזרו אליך עם הפרטים?")
-        : "אפשר להגיד שוב? לא הייתי בטוח ששמעתי.";
+        : confirmQuestionText();
     try {
       const tLlm0 = Date.now();
       const knowledgeBase = getSetting(db, "knowledgeBase", "");
@@ -3328,16 +3380,14 @@ wssMediaStream.on("connection", (ws, req) => {
       }
     } catch (e) {
       console.warn("[ms] LLM failed", e?.message || e);
-      // Fail-soft: don't loop "תקלה" endlessly. Use deterministic short reply based on state.
+      // Fail-soft: never apologize/ask to repeat. Ask a closed question instead.
       if (conversationState === "CLOSE") {
         answer =
           persona === "female"
             ? "מעולה. מעביר ללשכה שיחזרו אלייך עם הפרטים."
             : "מעולה. מעביר ללשכה שיחזרו אליך עם הפרטים.";
       } else {
-        // Important: "שנייה רגע" is reserved for the instant backchannel.
-        // If the LLM fails, ask to repeat instead of looping the backchannel as the main reply.
-        answer = "סליחה, לא קלטתי. אפשר לחזור על זה?";
+        answer = confirmQuestionText();
       }
     }
     msLog("llm answer", { callSid, chars: answer.length });
