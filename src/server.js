@@ -39,6 +39,89 @@ import { normalizePhoneE164IL } from "./phone.js";
 
 const PORT = Number(process.env.PORT || 3000);
 
+function normalizeOpenAIModel(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  const low = s.toLowerCase();
+  // Accept common human-entered variants from Render/.env UI
+  // Examples: "GPT-5.2 Mini", "gpt 5 mini", "gpt-5-mini"
+  if (/gpt\s*[-_ ]?\s*5(\.2)?\s*[-_ ]?\s*mini/.test(low)) return "gpt-5-mini";
+  if (/gpt\s*[-_ ]?\s*4\.1\b/.test(low)) return "gpt-4.1";
+  return s;
+}
+
+function isGpt5Family(model) {
+  return /^gpt-5\b/i.test(String(model || "").trim());
+}
+
+function extractTextFromResponses(resp) {
+  // The OpenAI Node SDK exposes either `output_text` or an `output[]` structure.
+  try {
+    const direct = resp?.output_text;
+    if (direct && typeof direct === "string") return direct;
+  } catch {}
+  try {
+    const out = resp?.output;
+    if (!Array.isArray(out)) return "";
+    let acc = "";
+    for (const item of out) {
+      const content = item?.content;
+      if (!Array.isArray(content)) continue;
+      for (const part of content) {
+        const t = part?.text;
+        if (typeof t === "string" && t) acc += t;
+      }
+    }
+    return acc;
+  } catch {
+    return "";
+  }
+}
+
+async function createLlmText({ model, messages, temperature, maxTokens, response_format, stream }) {
+  if (!openai) throw new Error("OpenAI client not initialized");
+  const m = String(model || "").trim();
+
+  // Prefer Responses API for GPT-5 family models (best compatibility).
+  // For streaming, we currently fall back to non-streaming and send one chunk.
+  if (isGpt5Family(m) && openai?.responses?.create) {
+    const payload = {
+      model: m,
+      input: messages,
+      ...(response_format ? { response_format } : {}),
+      ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {})
+    };
+    // Avoid passing temperature for GPT-5 unless we explicitly control reasoning settings.
+    void temperature;
+    void stream;
+    const resp = await openai.responses.create(payload);
+    return { api: "responses", rawText: String(extractTextFromResponses(resp) || "").trim(), resp };
+  }
+
+  // Chat Completions (legacy + still fine for many models).
+  if (stream) {
+    const resp = await openai.chat.completions.create({
+      model: m,
+      messages,
+      ...(typeof temperature === "number" ? { temperature } : {}),
+      ...(Number.isFinite(maxTokens) ? { max_tokens: maxTokens } : {}),
+      ...(response_format ? { response_format } : {}),
+      stream: true
+    });
+    return { api: "chat_stream", stream: resp };
+  }
+
+  const resp = await openai.chat.completions.create({
+    model: m,
+    messages,
+    ...(typeof temperature === "number" ? { temperature } : {}),
+    ...(Number.isFinite(maxTokens) ? { max_tokens: maxTokens } : {}),
+    ...(response_format ? { response_format } : {})
+  });
+  const rawText = String(resp?.choices?.[0]?.message?.content || "").trim();
+  return { api: "chat", rawText, resp };
+}
+
 // Persistent storage paths:
 // - On Render: you typically mount a disk to /var/data
 // - On local macOS: /var/data is usually not writable → fallback to ./data
@@ -72,9 +155,9 @@ if (!IS_RENDER && process.platform === "darwin" && (RAW_DATA_DIR === "/var/data"
       "If you want to override: set DATA_DIR=./data (or any writable path)."
   );
 }
-// Default to a high-quality chat model. You can override via OPENAI_MODEL in env.
-// IMPORTANT: trim whitespace — a trailing space/newline will cause OpenAI "invalid model ID".
-const OPENAI_MODEL = String(process.env.OPENAI_MODEL || "gpt-4.1").trim();
+// Default to a high-quality model. You can override via OPENAI_MODEL in env.
+// IMPORTANT: normalize common human-entered values (e.g. "GPT-5.2 Mini") → valid model id.
+const OPENAI_MODEL = normalizeOpenAIModel(process.env.OPENAI_MODEL || "gpt-4.1") || "gpt-4.1";
 const OPENAI_STT_MODEL = process.env.OPENAI_STT_MODEL || "whisper-1";
 const OPENAI_STT_PROMPT =
   process.env.OPENAI_STT_PROMPT ||
@@ -2234,14 +2317,8 @@ app.all("/twilio/record", async (req, res) => {
     const history = getMessages(db, callSid, { limit: 10 });
     const messages = [{ role: "system", content: system }, ...history];
 
-    const completion = await openai.chat.completions.create({
-      model: OPENAI_MODEL,
-      messages,
-      temperature: 0.3,
-      max_tokens: 120
-    });
-
-    const answer = sanitizeSayText((completion.choices?.[0]?.message?.content || "").trim() || "תודה רבה, יום טוב.");
+    const llm = await createLlmText({ model: OPENAI_MODEL, messages, temperature: 0.3, maxTokens: 120 });
+    const answer = sanitizeSayText(String(llm.rawText || "").trim() || "תודה רבה, יום טוב.");
     addMessage(db, { callSid, role: "assistant", content: answer });
 
     if (detectOptOut(answer)) {
@@ -2471,38 +2548,45 @@ async function streamAssistantToConversationRelay({
   const history = getMessages(db, callSid, { limit: 10 });
   const messages = [{ role: "system", content: system }, ...history];
 
-  // Stream tokens to Twilio as soon as they arrive.
-  const stream = await openai.chat.completions.create({
-    model: OPENAI_MODEL,
-    messages,
-    temperature: 0.3,
-    max_tokens: 180,
-    stream: true
-  });
-
+  // Stream tokens when supported; otherwise send a single chunk (GPT-5 via Responses API).
   let full = "";
-  let pending = "";
-  for await (const chunk of stream) {
-    const delta = chunk?.choices?.[0]?.delta?.content ?? "";
-    if (!delta) continue;
-    full += delta;
-    // Hold back one token chunk so we can mark the last chunk with last:true.
-    if (pending) {
-      wsSendText(ws, { type: "text", token: pending, last: false, interruptible: true, preemptible: true });
+  try {
+    const llm = await createLlmText({
+      model: OPENAI_MODEL,
+      messages,
+      temperature: 0.3,
+      maxTokens: 180,
+      stream: !isGpt5Family(OPENAI_MODEL)
+    });
+    if (llm.api === "chat_stream" && llm.stream) {
+      let pending = "";
+      for await (const chunk of llm.stream) {
+        const delta = chunk?.choices?.[0]?.delta?.content ?? "";
+        if (!delta) continue;
+        full += delta;
+        // Hold back one token chunk so we can mark the last chunk with last:true.
+        if (pending) {
+          wsSendText(ws, { type: "text", token: pending, last: false, interruptible: true, preemptible: true });
+        }
+        pending = delta;
+      }
+
+      if (!pending && !full) {
+        pending = "תודה רבה, יום טוב.";
+        full = pending;
+      }
+
+      wsSendText(ws, { type: "text", token: pending, last: true, interruptible: true, preemptible: true });
+    } else {
+      full = String(llm.rawText || "").trim() || "תודה רבה, יום טוב.";
+      wsSendText(ws, { type: "text", token: full, last: true, interruptible: true, preemptible: true });
     }
-    pending = delta;
+  } catch {
+    full = "תודה רבה, יום טוב.";
+    wsSendText(ws, { type: "text", token: full, last: true, interruptible: true, preemptible: true });
   }
 
-  if (!pending && !full) {
-    pending = "תודה רבה, יום טוב.";
-    full = pending;
-  }
-
-  {
-    wsSendText(ws, { type: "text", token: pending, last: true, interruptible: true, preemptible: true });
-  }
-
-  const answer = sanitizeSayText(full.trim());
+  const answer = sanitizeSayText(String(full || "").trim());
   addMessage(db, { callSid, role: "assistant", content: answer });
 }
 
@@ -3021,33 +3105,35 @@ wssMediaStream.on("connection", (ws, req) => {
       ];
 
       // Force a structured decision so the agent keeps a stable flow and updates lead outcomes.
+      const response_format = {
+        type: "json_schema",
+        json_schema: {
+          name: "sales_agent_turn",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              reply: { type: "string" },
+              nextState: {
+                type: "string",
+                enum: ["CHECK_INTEREST", "PITCH", "CLOSE", "POST_CLOSE", "HANDLE_OBJECTION", "END"]
+              },
+              outcome: { type: "string", enum: ["none", "interested", "not_interested", "do_not_call"] },
+              shouldEnd: { type: "boolean" }
+            },
+            required: ["reply", "nextState", "outcome", "shouldEnd"]
+          }
+        }
+      };
+
       const callLlm = async (model) =>
-        openai.chat.completions.create({
+        createLlmText({
           model,
           messages,
           temperature: 0.2,
-          max_tokens: 140,
-          response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "sales_agent_turn",
-            strict: true,
-            schema: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                reply: { type: "string" },
-                nextState: {
-                  type: "string",
-                  enum: ["CHECK_INTEREST", "PITCH", "CLOSE", "POST_CLOSE", "HANDLE_OBJECTION", "END"]
-                },
-                outcome: { type: "string", enum: ["none", "interested", "not_interested", "do_not_call"] },
-                shouldEnd: { type: "boolean" }
-              },
-              required: ["reply", "nextState", "outcome", "shouldEnd"]
-            }
-          }
-          }
+          maxTokens: 140,
+          response_format
         });
 
       let completion = null;
@@ -3065,7 +3151,7 @@ wssMediaStream.on("connection", (ws, req) => {
       }
       msLog("timing", { callSid, llmMs: Date.now() - tLlm0 });
 
-      const raw = String(completion.choices?.[0]?.message?.content || "").trim();
+      const raw = String(completion?.rawText || "").trim();
       let parsed = null;
       try {
         parsed = JSON.parse(raw);
