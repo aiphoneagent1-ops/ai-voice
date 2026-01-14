@@ -981,13 +981,19 @@ function detectWaitRequest(text) {
   return patterns.some((p) => t.includes(p));
 }
 
-function limitPhoneReply(text, maxChars = 180) {
+function limitPhoneReply(text, maxChars = 120) {
   const s = sanitizeSayText(String(text || "").trim());
   if (!s) return "";
   if (s.length <= maxChars) return s;
   const cut = s.slice(0, maxChars);
   const lastPunct = Math.max(cut.lastIndexOf("."), cut.lastIndexOf("!"), cut.lastIndexOf("?"), cut.lastIndexOf("…"));
   return sanitizeSayText((lastPunct > 40 ? cut.slice(0, lastPunct + 1) : cut).trim());
+}
+
+function detectAffirmativeShort(text) {
+  const t = String(text || "").toLowerCase().trim();
+  const patterns = ["כן", "כן כן", "בטח", "ברור", "אוקיי", "אוקי", "סבבה", "בהחלט", "יאללה", "תעביר", "תעבירו"];
+  return patterns.some((p) => t === p || t.startsWith(p + " "));
 }
 
 function detectTransferConsent(text) {
@@ -2683,6 +2689,7 @@ wssMediaStream.on("connection", (ws, req) => {
   // Hangup control (only after Twilio acks playback completion via mark)
   let pendingHangupOnMark = false;
   let hangupMarkName = "";
+  let lastOutcome = "none";
 
   async function hangupCallNow() {
     if (!MS_AUTO_HANGUP) return;
@@ -2751,12 +2758,13 @@ wssMediaStream.on("connection", (ws, req) => {
     let sent = 0;
     const myId = ++playId;
 
+    const playStartAt = Date.now();
     return new Promise((resolve) => {
       currentPlay = {
         id: myId,
         resolve,
         label,
-        meta: { framesSent: 0, offset: 0, totalBytes: ulawBuf.length }
+        meta: { framesSent: 0, offset: 0, totalBytes: ulawBuf.length, firstChunkAt: 0, playStartAt }
       };
       msLog("play start", { callSid, streamSid, label, bytes: ulawBuf.length });
 
@@ -2792,7 +2800,10 @@ wssMediaStream.on("connection", (ws, req) => {
             end: offset >= ulawBuf.length
           });
         }
-        if (sent === 1) msLog("sent first audio chunk", { callSid, streamSid, label, bytes: ulawBuf.length });
+        if (sent === 1) {
+          if (currentPlay?.meta) currentPlay.meta.firstChunkAt = Date.now();
+          msLog("sent first audio chunk", { callSid, streamSid, label, bytes: ulawBuf.length });
+        }
         if (sent % 25 === 0) msLog("sent audio chunks", { label, chunks: sent });
 
         if (offset >= ulawBuf.length) {
@@ -2807,7 +2818,11 @@ wssMediaStream.on("connection", (ws, req) => {
           if (playTimer) clearInterval(playTimer);
           playTimer = null;
           try {
-            resolve({ ok: true, label, bytes: ulawBuf.length, chunks: sent, markName });
+            const meta = done?.meta || {};
+            const firstChunkDelayMs =
+              meta.firstChunkAt && meta.playStartAt ? Number(meta.firstChunkAt) - Number(meta.playStartAt) : null;
+            const playbackMs = meta.playStartAt ? Date.now() - Number(meta.playStartAt) : null;
+            resolve({ ok: true, label, bytes: ulawBuf.length, chunks: sent, markName, firstChunkDelayMs, playbackMs });
           } catch {}
         }
       };
@@ -2824,9 +2839,12 @@ wssMediaStream.on("connection", (ws, req) => {
   async function sayText(text, { label = "elevenlabs" } = {}) {
     const safe = sanitizeSayText(String(text || "").trim());
     if (!safe) return;
+    const tGen0 = Date.now();
     const ulaw = await elevenlabsTtsToUlaw8000({ text: safe, persona: AGENT_VOICE_PERSONA });
+    const genMs = Date.now() - tGen0;
     if (!ulaw) return;
-    return await playUlaw(ulaw, { label });
+    const pr = await playUlaw(ulaw, { label });
+    return { ...pr, genMs };
   }
 
   async function transcribeAndRespond(pcm8kAll) {
@@ -2902,7 +2920,8 @@ wssMediaStream.on("connection", (ws, req) => {
     } catch {}
 
     // Deterministic close: explicit approval to transfer details => don't ask again.
-    if (detectTransferConsent(speech)) {
+    // Also accept short affirmations (e.g. "כן") when we're already in CLOSE.
+    if (detectTransferConsent(speech) || (conversationState === "CLOSE" && detectAffirmativeShort(speech))) {
       try {
         if (callSid && phone) upsertLead(db, { phone, status: "waiting", callSid, persona });
         leadWaiting = true;
@@ -3013,6 +3032,7 @@ wssMediaStream.on("connection", (ws, req) => {
 
         // Apply outcomes (leads + DNC) based on the agent decision.
         try {
+          lastOutcome = outcome || "none";
           if (outcome === "do_not_call") {
             if (phone) markDoNotCall(db, phone);
             if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
@@ -3045,9 +3065,16 @@ wssMediaStream.on("connection", (ws, req) => {
     if (closed) return;
     const tTts0 = Date.now();
     const pr = await sayText(answer, { label: "reply" });
-    msLog("timing", { callSid, ttsMs: Date.now() - tTts0, totalMs: Date.now() - t0 });
-    // Auto-hangup after the final line, but only after Twilio confirms playback finished.
-    if (conversationState === "END") {
+    // New timing: separate generation vs playback
+    msLog("timing", {
+      callSid,
+      ttsGenMs: pr?.genMs ?? null,
+      playbackMs: pr?.playbackMs ?? null,
+      firstChunkDelayMs: pr?.firstChunkDelayMs ?? null,
+      totalMs: Date.now() - t0
+    });
+    // Auto-hangup ONLY on explicit terminal outcomes (prevents premature hangup on bad LLM END).
+    if (conversationState === "END" && (lastOutcome === "do_not_call" || lastOutcome === "not_interested")) {
       if (pr?.markName) {
         pendingHangupOnMark = true;
         hangupMarkName = String(pr.markName || "");
@@ -3469,9 +3496,15 @@ server.listen(PORT, HOST, () => {
       const gFemale = sanitizeSayText(
         String(openingScriptFemale || openingScript || "").trim() || buildGreeting({ persona: "female" })
       );
+      const fixed = [
+        "ברור, אני איתך. תגיד לי מתי נוח.",
+        "אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב.",
+        "מעולה. אני מעביר את הפרטים שלך ללשכה שלנו והם יחזרו אליך עם שעה ומקום. יש עוד משהו שאפשר לעזור?"
+      ];
       await Promise.all([
         elevenlabsTtsToUlaw8000({ text: gMale, persona: AGENT_VOICE_PERSONA }),
-        elevenlabsTtsToUlaw8000({ text: gFemale, persona: AGENT_VOICE_PERSONA })
+        elevenlabsTtsToUlaw8000({ text: gFemale, persona: AGENT_VOICE_PERSONA }),
+        ...fixed.map((t) => elevenlabsTtsToUlaw8000({ text: sanitizeSayText(t), persona: AGENT_VOICE_PERSONA }))
       ]);
       if (MS_DEBUG) console.log("[ms] ulaw prewarm complete");
     } catch (e) {
