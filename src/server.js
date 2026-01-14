@@ -174,8 +174,9 @@ const CR_ELEVENLABS_TEXT_NORMALIZATION = String(process.env.CR_ELEVENLABS_TEXT_N
 const MS_DEBUG = process.env.MS_DEBUG === "1" || process.env.MS_DEBUG === "true";
 const MS_LOG_EVERY_FRAME = process.env.MS_LOG_EVERY_FRAME === "1" || process.env.MS_LOG_EVERY_FRAME === "true";
 const MS_VAD_THRESHOLD = Number(process.env.MS_VAD_THRESHOLD || 550); // 0..~8000
-const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 700);
-const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 400);
+// Latency tuning: lower silence threshold -> faster "turn taking"
+const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 350);
+const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 250);
 const ELEVENLABS_STREAM_OUTPUT_FORMAT = String(process.env.ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000").trim();
 const MS_TEST_TONE = process.env.MS_TEST_TONE === "1" || process.env.MS_TEST_TONE === "true";
 // Barge-in tuning: avoid clearing agent speech on line noise/echo.
@@ -2616,6 +2617,7 @@ wssMediaStream.on("connection", (ws, req) => {
     if (!openai) return;
     if (!pcm8kAll || !pcm8kAll.length) return;
 
+    msLog("stt start", { callSid, samples8k: pcm8kAll.length });
     // Convert to 16k wav for Whisper (better quality than 8k).
     const pcm16k = upsample8kTo16k(pcm8kAll);
     const wav = pcm16ToWavBuffer(pcm16k, 16000);
@@ -2640,7 +2642,10 @@ wssMediaStream.on("connection", (ws, req) => {
       fs.unlinkSync(tmpPath);
     } catch {}
 
-    if (!speech) return;
+    if (!speech) {
+      msLog("stt empty", { callSid });
+      return;
+    }
     msLog("stt", { callSid, chars: speech.length });
 
     // Barge-in: if caller starts talking mid-playback, we already clear buffered audio.
@@ -2686,6 +2691,7 @@ wssMediaStream.on("connection", (ws, req) => {
       console.warn("[ms] LLM failed", e?.message || e);
       answer = "סליחה, הייתה תקלה קטנה. אפשר להגיד שוב?";
     }
+    msLog("llm answer", { callSid, chars: answer.length });
 
     try {
       if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: answer });
@@ -2780,6 +2786,34 @@ wssMediaStream.on("connection", (ws, req) => {
         allowListen = true;
         allowBargeIn = true;
         msLog("listening enabled");
+
+        // If the user already spoke during greeting, and we're already past end-of-speech,
+        // finalize immediately (so they don't wait).
+        try {
+          const now = Date.now();
+          if (speechActive && lastVoiceAt && now - lastVoiceAt >= MS_END_SILENCE_MS) {
+            const durMs = now - utteranceStartAt;
+            const chunks = utterancePcm8kChunks;
+            speechActive = false;
+            utterancePcm8kChunks = [];
+            utteranceStartAt = 0;
+            lastVoiceAt = 0;
+            if (durMs >= MS_MIN_UTTERANCE_MS) {
+              let total = 0;
+              for (const c of chunks) total += c.length;
+              const pcmAll = new Int16Array(total);
+              let o = 0;
+              for (const c of chunks) {
+                pcmAll.set(c, o);
+                o += c.length;
+              }
+              msLog("utterance finalize after greeting", { callSid, ms: durMs });
+              inFlight = (inFlight || Promise.resolve())
+                .then(() => transcribeAndRespond(pcmAll))
+                .catch(() => {});
+            }
+          }
+        } catch {}
       })().catch((e) => {
         console.warn("[ms] greeting failed", e?.message || e);
         // Fail-open: if greeting fails, still allow the call to proceed.
@@ -2851,6 +2885,7 @@ wssMediaStream.on("connection", (ws, req) => {
         lastVoiceAt = 0;
 
         if (durMs < MS_MIN_UTTERANCE_MS) return;
+        msLog("utterance end", { callSid, ms: durMs });
 
         // Concatenate
         let total = 0;
