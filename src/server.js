@@ -85,11 +85,32 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
   // Prefer Responses API for GPT-5 family models (best compatibility).
   // For streaming, we currently fall back to non-streaming and send one chunk.
   if (isGpt5Family(m) && openai?.responses?.create) {
+    // Translate Chat Completions-style `response_format` into Responses `text.format`.
+    // Chat: { type:"json_schema", json_schema:{ name, strict, schema } }
+    // Responses expects: text: { format: { type:"json_schema", name, strict, schema } }
+    let textFormat = undefined;
+    try {
+      if (response_format && typeof response_format === "object") {
+        const rfType = String(response_format.type || "").trim();
+        if (rfType === "json_schema" && response_format.json_schema && typeof response_format.json_schema === "object") {
+          const js = response_format.json_schema;
+          textFormat = {
+            type: "json_schema",
+            name: String(js.name || "output").trim() || "output",
+            strict: Boolean(js.strict),
+            schema: js.schema
+          };
+        }
+      }
+    } catch {
+      textFormat = undefined;
+    }
+
     const payload = {
       model: m,
       input: messages,
       // NOTE: In the Responses API, `response_format` moved to `text.format`.
-      ...(response_format ? { text: { format: response_format } } : {}),
+      ...(textFormat ? { text: { format: textFormat } } : {}),
       ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {})
     };
     // Avoid passing temperature for GPT-5 unless we explicitly control reasoning settings.
