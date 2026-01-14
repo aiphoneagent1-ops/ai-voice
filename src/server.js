@@ -3088,6 +3088,21 @@ wssMediaStream.on("connection", (ws, req) => {
       return;
     }
 
+    // Deterministic interest: "אני מעוניין/ת" should NEVER lead to "תודה רבה יום טוב".
+    // If caller expresses interest (but didn't explicitly consent to transfer yet), move to CLOSE and ask permission.
+    if (detectInterested(speech) && !detectNotInterested(speech) && conversationState !== "POST_CLOSE") {
+      conversationState = "CLOSE";
+      const pitch =
+        persona === "female"
+          ? "מעולה. זה ערב הפרשת חלה לנשים בחדרה, קצר ונעים. להעביר ללשכה שיחזרו אלייך עם הפרטים?"
+          : "מעולה. זה שיעור תורה קצר בחדרה, באווירה טובה. להעביר ללשכה שיחזרו אליך עם הפרטים?";
+      try {
+        if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: pitch });
+      } catch {}
+      await sayText(pitch, { label: "reply" });
+      return;
+    }
+
     // If caller asks us to wait, don't end the call. Keep it natural.
     if (detectWaitRequest(speech)) {
       const waitText = "ברור, אני איתך. תגיד לי מתי נוח.";
@@ -3160,7 +3175,13 @@ wssMediaStream.on("connection", (ws, req) => {
     }
 
     // LLM
-    let answer = "תודה רבה, יום טוב.";
+    // Default should never prematurely end the call when the user is interested.
+    let answer =
+      conversationState === "CLOSE"
+        ? (persona === "female"
+            ? "מעולה. להעביר ללשכה שיחזרו אלייך עם הפרטים?"
+            : "מעולה. להעביר ללשכה שיחזרו אליך עם הפרטים?")
+        : "אפשר להגיד שוב? לא הייתי בטוח ששמעתי.";
     try {
       const tLlm0 = Date.now();
       const knowledgeBase = getSetting(db, "knowledgeBase", "");
@@ -3265,8 +3286,14 @@ wssMediaStream.on("connection", (ws, req) => {
 
         answer = limitPhoneReply(replyText || answer);
 
-        // If the model says to end, steer the state to END (but we still speak the final line).
-        if (shouldEnd) conversationState = "END";
+        // Guardrail: if the caller expressed interest, do not allow the model to end the call.
+        if (detectInterested(speech) && !detectNotInterested(speech)) {
+          if (conversationState === "CHECK_INTEREST" || conversationState === "PITCH") conversationState = "CLOSE";
+          lastOutcome = "interested";
+        } else if (shouldEnd) {
+          // If the model says to end, steer the state to END (but we still speak the final line).
+          conversationState = "END";
+        }
       } else {
         // Fallback: if JSON parsing fails, just use plain text.
         answer = limitPhoneReply(raw || answer);
