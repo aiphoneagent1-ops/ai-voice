@@ -173,8 +173,13 @@ const CR_ELEVENLABS_TEXT_NORMALIZATION = String(process.env.CR_ELEVENLABS_TEXT_N
 // Media Streams (Realtime audio in/out)
 const MS_DEBUG = process.env.MS_DEBUG === "1" || process.env.MS_DEBUG === "true";
 const MS_LOG_EVERY_FRAME = process.env.MS_LOG_EVERY_FRAME === "1" || process.env.MS_LOG_EVERY_FRAME === "true";
-// VAD sensitivity (RMS on decoded PCM16 @ 8k). We'll default to a moderate value and tune via logs.
-const MS_VAD_THRESHOLD = Number(process.env.MS_VAD_THRESHOLD || 700); // 0..~8000
+// VAD sensitivity (RMS on decoded PCM16 @ 8k).
+// IMPORTANT: many phone lines have a constant "noise floor" (often ~1000 RMS) that would otherwise look like speech.
+// We therefore use an adaptive threshold: max(MS_VAD_MIN_RMS, noiseFloor*mult + margin).
+const MS_VAD_MIN_RMS = Number(process.env.MS_VAD_MIN_RMS || 700);
+const MS_VAD_NOISE_MULT = Number(process.env.MS_VAD_NOISE_MULT || 1.8);
+const MS_VAD_NOISE_MARGIN = Number(process.env.MS_VAD_NOISE_MARGIN || 250);
+const MS_NOISE_CALIBRATION_MS = Number(process.env.MS_NOISE_CALIBRATION_MS || 300);
 // Latency tuning: lower silence threshold -> faster "turn taking"
 const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 350);
 const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 250);
@@ -2567,6 +2572,8 @@ wssMediaStream.on("connection", (ws, req) => {
   let inboundFrames = 0;
   let inboundVoicedFrames = 0;
   let inboundMaxRms = 0;
+  let noiseFloor = 0;
+  let calibrateUntil = 0;
   /** @type {Int16Array[]} */
   let utterancePcm8kChunks = [];
   let utteranceStartAt = 0;
@@ -2705,6 +2712,7 @@ wssMediaStream.on("connection", (ws, req) => {
   }
 
   async function transcribeAndRespond(pcm8kAll) {
+    if (closed) return;
     if (!openai) return;
     if (!pcm8kAll || !pcm8kAll.length) return;
 
@@ -2788,6 +2796,7 @@ wssMediaStream.on("connection", (ws, req) => {
       if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: answer });
     } catch {}
 
+    if (closed) return;
     await sayText(answer, { label: "reply" });
   }
 
@@ -2932,7 +2941,9 @@ wssMediaStream.on("connection", (ws, req) => {
       inboundFrames++;
       if (rms > inboundMaxRms) inboundMaxRms = rms;
 
-      const voiced = rms >= MS_VAD_THRESHOLD;
+      const adaptiveThr = Math.max(MS_VAD_MIN_RMS, noiseFloor * MS_VAD_NOISE_MULT + MS_VAD_NOISE_MARGIN);
+      const calibrating = allowListen && calibrateUntil && now < calibrateUntil;
+      const voiced = !calibrating && rms >= adaptiveThr;
       if (voiced) {
         inboundVoicedFrames++;
         lastVoiceAt = now;
@@ -2940,7 +2951,7 @@ wssMediaStream.on("connection", (ws, req) => {
           speechActive = true;
           utterancePcm8kChunks = [];
           utteranceStartAt = now;
-          msLog("speech start", { callSid, rms: Math.round(rms) });
+          msLog("speech start", { callSid, rms: Math.round(rms), thr: Math.round(adaptiveThr) });
         }
         utterancePcm8kChunks.push(pcm16);
 
@@ -2971,12 +2982,20 @@ wssMediaStream.on("connection", (ws, req) => {
         bargeInFrames = Math.max(0, bargeInFrames - 1);
       }
 
+      // Update noise floor (EMA) when we think it's silence and we're allowed to listen.
+      if (allowListen && !voiced) {
+        const alpha = 0.06;
+        noiseFloor = noiseFloor ? noiseFloor * (1 - alpha) + rms * alpha : rms;
+      }
+
       if (MS_DEBUG && inboundFrames % 100 === 0) {
         msLog("inbound stats", {
           frames: inboundFrames,
           voiced: inboundVoicedFrames,
           maxRms: Math.round(inboundMaxRms),
-          threshold: MS_VAD_THRESHOLD,
+          thr: Math.round(adaptiveThr),
+          noise: Math.round(noiseFloor),
+          calibrating,
           allowListen
         });
         // decay max rms so log stays meaningful over time
@@ -3079,6 +3098,7 @@ wssMediaStream.on("connection", (ws, req) => {
         agentSpeaking = false;
         allowListen = true;
         allowBargeIn = MS_ENABLE_BARGE_IN;
+        calibrateUntil = Date.now() + MS_NOISE_CALIBRATION_MS;
         msLog("listening enabled");
       }
       return;
