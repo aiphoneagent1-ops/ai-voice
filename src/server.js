@@ -187,6 +187,9 @@ const MS_FORCE_SHORT_GREETING = process.env.MS_FORCE_SHORT_GREETING === "1" || p
 const MS_AUTO_HANGUP = process.env.MS_AUTO_HANGUP !== "0" && process.env.MS_AUTO_HANGUP !== "false";
 // Latency tuning: lower silence threshold -> faster "turn taking"
 const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 350);
+// Faster turn-taking for short utterances (e.g. "כן") without waiting full silence window.
+const MS_FAST_END_SILENCE_MS = Number(process.env.MS_FAST_END_SILENCE_MS || 220);
+const MS_FAST_END_MAX_UTTERANCE_MS = Number(process.env.MS_FAST_END_MAX_UTTERANCE_MS || 1200);
 const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 250);
 // Fallback: if user pauses briefly, don't wait forever—force finalize after this (once we see a pause).
 const MS_FORCE_FINALIZE_AFTER_MS = Number(process.env.MS_FORCE_FINALIZE_AFTER_MS || 900);
@@ -979,6 +982,10 @@ function detectWaitRequest(text) {
   const t = String(text || "").toLowerCase();
   const patterns = ["תמתין", "תמתין רגע", "רגע", "שנייה", "שניה", "דקה", "חכה", "חכי", "רק רגע"];
   return patterns.some((p) => t.includes(p));
+}
+
+function getThinkingText() {
+  return "שנייה אני איתך.";
 }
 
 function limitPhoneReply(text, maxChars = 120) {
@@ -2886,6 +2893,21 @@ wssMediaStream.on("connection", (ws, req) => {
     }
     msLog("stt", { callSid, chars: speech.length });
 
+    // If caller said a short "yes" early, respond deterministically (no LLM) to avoid loops.
+    // This makes the agent feel "logical" like a human, not prompt-y.
+    if (detectAffirmativeShort(speech) && (conversationState === "CHECK_INTEREST" || conversationState === "PITCH")) {
+      conversationState = "CLOSE";
+      const pitch =
+        persona === "female"
+          ? "מעולה. זה ערב הפרשת חלה לנשים בחדרה, קצר ונעים. להעביר ללשכה שיחזרו אלייך עם הפרטים?"
+          : "מעולה. זה שיעור תורה קצר בחדרה, באווירה טובה. להעביר ללשכה שיחזרו אליך עם הפרטים?";
+      try {
+        if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: pitch });
+      } catch {}
+      await sayText(pitch, { label: "reply" });
+      return;
+    }
+
     // If caller asks us to wait, don't end the call. Keep it natural.
     if (detectWaitRequest(speech)) {
       const waitText = "ברור, אני איתך. תגיד לי מתי נוח.";
@@ -3306,7 +3328,14 @@ wssMediaStream.on("connection", (ws, req) => {
         inboundMaxRms = 0;
       }
 
-      if (allowListen && speechActive && lastVoiceAt && now - lastVoiceAt >= MS_END_SILENCE_MS) {
+      // End-of-speech: normal silence threshold OR faster threshold for short utterances ("כן", "אוקיי")
+      const fastSilenceOk =
+        utteranceStartAt &&
+        now - utteranceStartAt <= MS_FAST_END_MAX_UTTERANCE_MS &&
+        lastVoiceAt &&
+        now - lastVoiceAt >= MS_FAST_END_SILENCE_MS;
+      const normalSilenceOk = lastVoiceAt && now - lastVoiceAt >= MS_END_SILENCE_MS;
+      if (allowListen && speechActive && (fastSilenceOk || normalSilenceOk)) {
         const durMs = now - utteranceStartAt;
         const chunks = utterancePcm8kChunks;
         speechActive = false;
@@ -3327,7 +3356,24 @@ wssMediaStream.on("connection", (ws, req) => {
           o += c.length;
         }
 
-        // Only one pipeline at a time; newer utterances can wait.
+      // Instant backchannel: play a cached "thinking" phrase immediately after user finishes speaking,
+      // while STT/LLM/TTS runs. This makes the call feel human even if TTS generation takes time.
+      // NOTE: this audio is prewarmed/cached so it should start almost immediately.
+      try {
+        if (!agentSpeaking && !playing) {
+          const think = sanitizeSayText(getThinkingText());
+          if (think) {
+            // Fire-and-forget: fetch from cache or generate, then play immediately.
+            elevenlabsTtsToUlaw8000({ text: think, persona: AGENT_VOICE_PERSONA })
+              .then((ulaw) => {
+                if (ulaw) playUlaw(ulaw, { label: "thinking" });
+              })
+              .catch(() => {});
+          }
+        }
+      } catch {}
+
+      // Only one pipeline at a time; newer utterances can wait.
         inFlight = (inFlight || Promise.resolve())
           .then(() => transcribeAndRespond(pcmAll))
           .catch(() => {});
@@ -3498,6 +3544,7 @@ server.listen(PORT, HOST, () => {
       );
       const fixed = [
         "ברור, אני איתך. תגיד לי מתי נוח.",
+        "שנייה אני איתך.",
         "אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב.",
         "מעולה. אני מעביר את הפרטים שלך ללשכה שלנו והם יחזרו אליך עם שעה ומקום. יש עוד משהו שאפשר לעזור?"
       ];
