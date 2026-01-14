@@ -2468,8 +2468,9 @@ wssMediaStream.on("connection", (ws, req) => {
   // We want a "normal call":
   // - Greeting plays fully (no barge-in, no listening)
   // - After greeting ends, enable listening + barge-in
-  let allowListen = false;
-  let allowBargeIn = false;
+  // We always CAPTURE inbound audio, but only TRANSCRIBE/RESPOND after the greeting is done.
+  let allowListen = false; // "process speech" (STT+LLM+TTS)
+  let allowBargeIn = false; // interrupt agent speech
 
   // Outbound playback state
   let playTimer = null;
@@ -2778,11 +2779,13 @@ wssMediaStream.on("connection", (ws, req) => {
         // Now we can listen + allow barge-in for the rest of the call.
         allowListen = true;
         allowBargeIn = true;
+        msLog("listening enabled");
       })().catch((e) => {
         console.warn("[ms] greeting failed", e?.message || e);
         // Fail-open: if greeting fails, still allow the call to proceed.
         allowListen = true;
         allowBargeIn = true;
+        msLog("listening enabled (after greeting failure)");
       });
       return;
     }
@@ -2793,8 +2796,8 @@ wssMediaStream.on("connection", (ws, req) => {
       const b64 = String(msg?.media?.payload || "");
       if (!b64) return;
 
-      // While greeting is playing, ignore inbound audio (avoids echo triggering VAD and clearing playback).
-      if (!allowListen) return;
+      // We keep capturing inbound audio even during greeting, but we will only transcribe/respond
+      // after allowListen=true. This prevents missing the user's "כן" said during the greeting.
 
       const ulawBuf = Buffer.from(b64, "base64");
       const pcm16 = ulawBufferToPcm16(ulawBuf);
@@ -2839,7 +2842,7 @@ wssMediaStream.on("connection", (ws, req) => {
         bargeInFrames = Math.max(0, bargeInFrames - 1);
       }
 
-      if (speechActive && lastVoiceAt && now - lastVoiceAt >= MS_END_SILENCE_MS) {
+      if (allowListen && speechActive && lastVoiceAt && now - lastVoiceAt >= MS_END_SILENCE_MS) {
         const durMs = now - utteranceStartAt;
         const chunks = utterancePcm8kChunks;
         speechActive = false;
