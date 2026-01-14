@@ -194,11 +194,12 @@ const MS_FORCE_FINALIZE_PAUSE_MS = Number(process.env.MS_FORCE_FINALIZE_PAUSE_MS
 // Safety: cap utterance length so we don't buffer indefinitely.
 const MS_MAX_UTTERANCE_MS = Number(process.env.MS_MAX_UTTERANCE_MS || 2500);
 const ELEVENLABS_STREAM_OUTPUT_FORMAT = String(process.env.ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000").trim();
-const ELEVENLABS_OPTIMIZE_STREAMING_LATENCY = clampInt(process.env.ELEVENLABS_OPTIMIZE_STREAMING_LATENCY, {
-  min: 0,
-  max: 4,
-  fallback: 3
-});
+// ElevenLabs low-latency is optional. Some accounts/voices behave differently with this flag.
+// If unset, we do NOT send optimize_streaming_latency at all (safe default).
+const ELEVENLABS_OPTIMIZE_STREAMING_LATENCY_RAW = String(process.env.ELEVENLABS_OPTIMIZE_STREAMING_LATENCY || "").trim();
+const ELEVENLABS_OPTIMIZE_STREAMING_LATENCY = ELEVENLABS_OPTIMIZE_STREAMING_LATENCY_RAW
+  ? clampInt(ELEVENLABS_OPTIMIZE_STREAMING_LATENCY_RAW, { min: 0, max: 4, fallback: 0 })
+  : null;
 const MS_TEST_TONE = process.env.MS_TEST_TONE === "1" || process.env.MS_TEST_TONE === "true";
 // Barge-in tuning: avoid clearing agent speech on line noise/echo.
 const MS_BARGE_IN_FRAMES = Number(process.env.MS_BARGE_IN_FRAMES || 15); // 15 frames * 20ms = 300ms
@@ -435,30 +436,53 @@ async function elevenlabsTtsToUlaw8000({ text, persona }) {
     return disk;
   }
 
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${encodeURIComponent(
+  const baseUrl = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${encodeURIComponent(
     ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000"
-  )}&optimize_streaming_latency=${encodeURIComponent(String(ELEVENLABS_OPTIMIZE_STREAMING_LATENCY))}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "xi-api-key": ELEVENLABS_API_KEY,
-      "Content-Type": "application/json",
-      Accept: "audio/x-mulaw"
-    },
-    body: JSON.stringify({
-      text,
-      model_id: ELEVENLABS_MODEL_ID,
-      ...(ELEVENLABS_LANGUAGE_CODE ? { language_code: ELEVENLABS_LANGUAGE_CODE } : {}),
-      voice_settings: IS_ELEVEN_V3
-        ? { stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)) }
-        : {
-            stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)),
-            similarity_boost: Math.max(0, Math.min(1, ELEVENLABS_SIMILARITY_BOOST)),
-            ...(Number.isFinite(ELEVENLABS_STYLE) ? { style: Math.max(0, Math.min(1, ELEVENLABS_STYLE)) } : {}),
-            ...(ELEVENLABS_SPEAKER_BOOST ? { use_speaker_boost: true } : {})
-          }
-    })
+  )}`;
+
+  const urlWithOpt =
+    ELEVENLABS_OPTIMIZE_STREAMING_LATENCY == null
+      ? null
+      : `${baseUrl}&optimize_streaming_latency=${encodeURIComponent(String(ELEVENLABS_OPTIMIZE_STREAMING_LATENCY))}`;
+
+  const bodyJson = JSON.stringify({
+    text,
+    model_id: ELEVENLABS_MODEL_ID,
+    ...(ELEVENLABS_LANGUAGE_CODE ? { language_code: ELEVENLABS_LANGUAGE_CODE } : {}),
+    voice_settings: IS_ELEVEN_V3
+      ? { stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)) }
+      : {
+          stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)),
+          similarity_boost: Math.max(0, Math.min(1, ELEVENLABS_SIMILARITY_BOOST)),
+          ...(Number.isFinite(ELEVENLABS_STYLE) ? { style: Math.max(0, Math.min(1, ELEVENLABS_STYLE)) } : {}),
+          ...(ELEVENLABS_SPEAKER_BOOST ? { use_speaker_boost: true } : {})
+        }
   });
+
+  const doFetch = (u) =>
+    fetch(u, {
+      method: "POST",
+      headers: {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        Accept: "audio/x-mulaw"
+      },
+      body: bodyJson
+    });
+
+  // Try low-latency only if explicitly configured; if it fails, retry without it (prevents silence).
+  let res = null;
+  if (urlWithOpt) {
+    res = await doFetch(urlWithOpt);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      console.warn("ElevenLabs ulaw TTS failed (optimize_streaming_latency):", res.status, errText);
+      res = await doFetch(baseUrl);
+    }
+  } else {
+    res = await doFetch(baseUrl);
+  }
+
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
     console.warn("ElevenLabs ulaw TTS failed:", res.status, errText);
