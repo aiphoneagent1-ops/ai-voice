@@ -2790,6 +2790,7 @@ wssMediaStream.on("connection", (ws, req) => {
     if (!openai) return;
     if (!pcm8kAll || !pcm8kAll.length) return;
 
+    const t0 = Date.now();
     msLog("stt start", { callSid, samples8k: pcm8kAll.length });
     // Convert to 16k wav for Whisper (better quality than 8k).
     const pcm16k = upsample8kTo16k(pcm8kAll);
@@ -2801,6 +2802,7 @@ wssMediaStream.on("connection", (ws, req) => {
 
     let speech = "";
     try {
+      const tStt0 = Date.now();
       const transcription = await openai.audio.transcriptions.create({
         model: OPENAI_STT_MODEL,
         file: fs.createReadStream(tmpPath),
@@ -2808,6 +2810,7 @@ wssMediaStream.on("connection", (ws, req) => {
         prompt: OPENAI_STT_PROMPT
       });
       speech = String(transcription.text || "").trim();
+      msLog("timing", { callSid, sttMs: Date.now() - tStt0 });
     } catch (e) {
       console.warn("[ms] transcription failed", e?.message || e);
     }
@@ -2869,6 +2872,7 @@ wssMediaStream.on("connection", (ws, req) => {
     if (detectOptOut(speech)) {
       try {
         if (phone) markDoNotCall(db, phone);
+        if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
       } catch {}
       await sayText("אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב.");
       return;
@@ -2883,6 +2887,7 @@ wssMediaStream.on("connection", (ws, req) => {
     // LLM
     let answer = "תודה רבה, יום טוב.";
     try {
+      const tLlm0 = Date.now();
       const knowledgeBase = getSetting(db, "knowledgeBase", "");
       const knowledgeForThisTurn = selectRelevantKnowledge({ knowledgeBase, query: speech });
       const system = buildSalesAgentSystemPrompt({
@@ -2925,6 +2930,7 @@ wssMediaStream.on("connection", (ws, req) => {
           }
         }
       });
+      msLog("timing", { callSid, llmMs: Date.now() - tLlm0 });
 
       const raw = String(completion.choices?.[0]?.message?.content || "").trim();
       let parsed = null;
@@ -2983,7 +2989,9 @@ wssMediaStream.on("connection", (ws, req) => {
     } catch {}
 
     if (closed) return;
+    const tTts0 = Date.now();
     const pr = await sayText(answer, { label: "reply" });
+    msLog("timing", { callSid, ttsMs: Date.now() - tTts0, totalMs: Date.now() - t0 });
     // Auto-hangup after the final line, but only after Twilio confirms playback finished.
     if (conversationState === "END") {
       if (pr?.markName) {

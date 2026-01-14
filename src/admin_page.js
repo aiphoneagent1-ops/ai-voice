@@ -186,7 +186,7 @@ export function renderAdminPage() {
                     <th>טלפון</th>
                     <th>מין</th>
                     <th>סטטוס חיוג</th>
-                    <th>DNC</th>
+                    <th>אל תתקשרו יותר</th>
                     <th>ניסיון</th>
                   </tr>
                 </thead>
@@ -369,7 +369,7 @@ export function renderAdminPage() {
               ['סה"כ אנשי קשר', s.total],
               ["חדשים לחיוג", s.new],
               ["נכשלו", s.failed],
-              ["DNC", s.dnc],
+              ["אל תתקשרו יותר", s.dnc],
             ];
             for(const [k,v] of items){
               const d = document.createElement("div");
@@ -556,7 +556,7 @@ export function renderAdminPage() {
             const dnc = r.do_not_call ? '<span class="badge bad">כן</span>' : '<span class="badge good">לא</span>';
             const status = '<span class="badge">'+(r.dial_status || "—")+'</span>';
             const dialBtn = r.do_not_call
-              ? '<span class="badge bad">DNC</span>'
+              ? '<span class="badge bad">אל תתקשרו יותר</span>'
               : '<button class="iconBtn dialBtn" data-phone="'+(r.phone||"")+'" title="חייג עכשיו">' +
                 '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
                 '<path d="M7.2 2.9c.6-.5 1.4-.5 2 0l2 1.9c.6.6.7 1.5.2 2.2l-1 1.4c-.3.4-.3 1 .1 1.4l3.9 3.9c.4.4 1 .4 1.4.1l1.4-1c.7-.5 1.6-.4 2.2.2l1.9 2c.5.6.5 1.4 0 2-1.2 1.4-2.8 2-4.6 1.6-3.2-.7-6.5-3.1-9.2-5.8C5.1 12.4 2.7 9.1 2 5.9c-.4-1.8.2-3.4 1.6-4.6Z" stroke="rgba(255,255,255,.9)" stroke-width="1.6" stroke-linejoin="round"/>' +
