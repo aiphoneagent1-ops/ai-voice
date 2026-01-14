@@ -73,7 +73,8 @@ if (!IS_RENDER && process.platform === "darwin" && (RAW_DATA_DIR === "/var/data"
   );
 }
 // Default to a high-quality chat model. You can override via OPENAI_MODEL in env.
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1";
+// IMPORTANT: trim whitespace — a trailing space/newline will cause OpenAI "invalid model ID".
+const OPENAI_MODEL = String(process.env.OPENAI_MODEL || "gpt-4.1").trim();
 const OPENAI_STT_MODEL = process.env.OPENAI_STT_MODEL || "whisper-1";
 const OPENAI_STT_PROMPT =
   process.env.OPENAI_STT_PROMPT ||
@@ -3020,12 +3021,13 @@ wssMediaStream.on("connection", (ws, req) => {
       ];
 
       // Force a structured decision so the agent keeps a stable flow and updates lead outcomes.
-      const completion = await openai.chat.completions.create({
-        model: OPENAI_MODEL,
-        messages,
-        temperature: 0.2,
-        max_tokens: 140,
-        response_format: {
+      const callLlm = async (model) =>
+        openai.chat.completions.create({
+          model,
+          messages,
+          temperature: 0.2,
+          max_tokens: 140,
+          response_format: {
           type: "json_schema",
           json_schema: {
             name: "sales_agent_turn",
@@ -3045,8 +3047,22 @@ wssMediaStream.on("connection", (ws, req) => {
               required: ["reply", "nextState", "outcome", "shouldEnd"]
             }
           }
+          }
+        });
+
+      let completion = null;
+      try {
+        completion = await callLlm(OPENAI_MODEL);
+      } catch (e) {
+        const msg = String(e?.message || e || "");
+        // If Render env has an invalid model (common: whitespace/typo), retry with safe defaults.
+        if (msg.toLowerCase().includes("invalid model")) {
+          console.warn("[ms] LLM failed (invalid model), retrying with fallback", { model: OPENAI_MODEL });
+          completion = await callLlm("gpt-4.1");
+        } else {
+          throw e;
         }
-      });
+      }
       msLog("timing", { callSid, llmMs: Date.now() - tLlm0 });
 
       const raw = String(completion.choices?.[0]?.message?.content || "").trim();
@@ -3098,7 +3114,15 @@ wssMediaStream.on("connection", (ws, req) => {
       }
     } catch (e) {
       console.warn("[ms] LLM failed", e?.message || e);
-      answer = "סליחה, הייתה תקלה קטנה. אפשר להגיד שוב?";
+      // Fail-soft: don't loop "תקלה" endlessly. Use deterministic short reply based on state.
+      if (conversationState === "CLOSE") {
+        answer =
+          persona === "female"
+            ? "מעולה. מעביר ללשכה שיחזרו אלייך עם הפרטים."
+            : "מעולה. מעביר ללשכה שיחזרו אליך עם הפרטים.";
+      } else {
+        answer = "שנייה רגע.";
+      }
     }
     msLog("llm answer", { callSid, chars: answer.length });
 
