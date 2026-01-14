@@ -190,6 +190,8 @@ const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 350);
 // Faster turn-taking for short utterances (e.g. "כן") without waiting full silence window.
 const MS_FAST_END_SILENCE_MS = Number(process.env.MS_FAST_END_SILENCE_MS || 220);
 const MS_FAST_END_MAX_UTTERANCE_MS = Number(process.env.MS_FAST_END_MAX_UTTERANCE_MS || 1200);
+// Only play the "thinking" backchannel if there is real dead-air after end-of-speech.
+const MS_THINKING_DELAY_MS = Number(process.env.MS_THINKING_DELAY_MS || 380);
 const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 250);
 // Fallback: if user pauses briefly, don't wait forever—force finalize after this (once we see a pause).
 const MS_FORCE_FINALIZE_AFTER_MS = Number(process.env.MS_FORCE_FINALIZE_AFTER_MS || 900);
@@ -988,7 +990,7 @@ function getThinkingText() {
   return "שנייה אני איתך.";
 }
 
-function limitPhoneReply(text, maxChars = 120) {
+function limitPhoneReply(text, maxChars = 70) {
   const s = sanitizeSayText(String(text || "").trim());
   if (!s) return "";
   if (s.length <= maxChars) return s;
@@ -2698,6 +2700,11 @@ wssMediaStream.on("connection", (ws, req) => {
   let hangupMarkName = "";
   let lastOutcome = "none";
 
+  // Dead-air backchannel ("thinking") control
+  let thinkingTimer = null;
+  let awaitingReply = false;
+  let lastUtteranceEndAt = 0;
+
   async function hangupCallNow() {
     if (!MS_AUTO_HANGUP) return;
     if (!callSid) return;
@@ -2753,6 +2760,11 @@ wssMediaStream.on("connection", (ws, req) => {
 
   function playUlaw(ulawBuf, { label = "tts" } = {}) {
     if (!ulawBuf || !ulawBuf.length || !streamSid) return;
+    // Any outbound audio cancels pending "thinking" timer.
+    if (thinkingTimer) {
+      try { clearTimeout(thinkingTimer); } catch {}
+      thinkingTimer = null;
+    }
     stopPlayback({ clear: true });
     playing = true;
     playingSince = Date.now();
@@ -2829,7 +2841,17 @@ wssMediaStream.on("connection", (ws, req) => {
             const firstChunkDelayMs =
               meta.firstChunkAt && meta.playStartAt ? Number(meta.firstChunkAt) - Number(meta.playStartAt) : null;
             const playbackMs = meta.playStartAt ? Date.now() - Number(meta.playStartAt) : null;
-            resolve({ ok: true, label, bytes: ulawBuf.length, chunks: sent, markName, firstChunkDelayMs, playbackMs });
+            resolve({
+              ok: true,
+              label,
+              bytes: ulawBuf.length,
+              chunks: sent,
+              markName,
+              firstChunkDelayMs,
+              playbackMs,
+              firstChunkAt: meta.firstChunkAt || null,
+              playStartAt: meta.playStartAt || null
+            });
           } catch {}
         }
       };
@@ -3087,12 +3109,19 @@ wssMediaStream.on("connection", (ws, req) => {
     if (closed) return;
     const tTts0 = Date.now();
     const pr = await sayText(answer, { label: "reply" });
+    awaitingReply = false;
+    if (thinkingTimer) {
+      try { clearTimeout(thinkingTimer); } catch {}
+      thinkingTimer = null;
+    }
     // New timing: separate generation vs playback
     msLog("timing", {
       callSid,
       ttsGenMs: pr?.genMs ?? null,
       playbackMs: pr?.playbackMs ?? null,
       firstChunkDelayMs: pr?.firstChunkDelayMs ?? null,
+      turnLatencyMs:
+        lastUtteranceEndAt && pr?.firstChunkAt ? Number(pr.firstChunkAt) - Number(lastUtteranceEndAt) : null,
       totalMs: Date.now() - t0
     });
     // Auto-hangup ONLY on explicit terminal outcomes (prevents premature hangup on bad LLM END).
@@ -3336,6 +3365,28 @@ wssMediaStream.on("connection", (ws, req) => {
         now - lastVoiceAt >= MS_FAST_END_SILENCE_MS;
       const normalSilenceOk = lastVoiceAt && now - lastVoiceAt >= MS_END_SILENCE_MS;
       if (allowListen && speechActive && (fastSilenceOk || normalSilenceOk)) {
+        // mark end-of-speech moment for latency measurement + conditional backchannel
+        lastUtteranceEndAt = Date.now();
+        awaitingReply = true;
+        if (thinkingTimer) {
+          try { clearTimeout(thinkingTimer); } catch {}
+          thinkingTimer = null;
+        }
+        thinkingTimer = setTimeout(() => {
+          if (closed) return;
+          if (!awaitingReply) return;
+          if (agentSpeaking || playing) return;
+          const think = sanitizeSayText(getThinkingText());
+          if (!think) return;
+          // Cached/prewarmed: should start fast. If it isn't cached, the retry/fallback still prevents silence.
+          elevenlabsTtsToUlaw8000({ text: think, persona: AGENT_VOICE_PERSONA })
+            .then((ulaw) => {
+              if (!awaitingReply) return;
+              if (ulaw) playUlaw(ulaw, { label: "thinking" });
+            })
+            .catch(() => {});
+        }, MS_THINKING_DELAY_MS);
+
         const durMs = now - utteranceStartAt;
         const chunks = utterancePcm8kChunks;
         speechActive = false;
@@ -3355,23 +3406,6 @@ wssMediaStream.on("connection", (ws, req) => {
           pcmAll.set(c, o);
           o += c.length;
         }
-
-      // Instant backchannel: play a cached "thinking" phrase immediately after user finishes speaking,
-      // while STT/LLM/TTS runs. This makes the call feel human even if TTS generation takes time.
-      // NOTE: this audio is prewarmed/cached so it should start almost immediately.
-      try {
-        if (!agentSpeaking && !playing) {
-          const think = sanitizeSayText(getThinkingText());
-          if (think) {
-            // Fire-and-forget: fetch from cache or generate, then play immediately.
-            elevenlabsTtsToUlaw8000({ text: think, persona: AGENT_VOICE_PERSONA })
-              .then((ulaw) => {
-                if (ulaw) playUlaw(ulaw, { label: "thinking" });
-              })
-              .catch(() => {});
-          }
-        }
-      } catch {}
 
       // Only one pipeline at a time; newer utterances can wait.
         inFlight = (inFlight || Promise.resolve())
