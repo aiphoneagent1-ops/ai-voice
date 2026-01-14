@@ -55,11 +55,15 @@ function isGpt5Family(model) {
 }
 
 function extractTextFromResponses(resp) {
-  // The OpenAI Node SDK exposes either `output_text` or an `output[]` structure.
+  // Responses API can return:
+  // - resp.output_text (plain text)
+  // - resp.output[].content[].text (text parts)
+  // - resp.output[].content[].json (structured output for json_schema)
   try {
     const direct = resp?.output_text;
     if (direct && typeof direct === "string") return direct;
   } catch {}
+
   try {
     const out = resp?.output;
     if (!Array.isArray(out)) return "";
@@ -68,8 +72,17 @@ function extractTextFromResponses(resp) {
       const content = item?.content;
       if (!Array.isArray(content)) continue;
       for (const part of content) {
-        const t = part?.text;
-        if (typeof t === "string" && t) acc += t;
+        const t = part?.text ?? part?.output_text ?? part?.content;
+        if (typeof t === "string" && t) {
+          acc += t;
+          continue;
+        }
+        // Some SDKs return structured output under `json` for json_schema formats.
+        const j = part?.json;
+        if (j && typeof j === "object") {
+          acc += JSON.stringify(j);
+          continue;
+        }
       }
     }
     return acc;
@@ -315,8 +328,9 @@ const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 350);
 // Faster turn-taking for short utterances (e.g. "כן") without waiting full silence window.
 const MS_FAST_END_SILENCE_MS = Number(process.env.MS_FAST_END_SILENCE_MS || 220);
 const MS_FAST_END_MAX_UTTERANCE_MS = Number(process.env.MS_FAST_END_MAX_UTTERANCE_MS || 1200);
-// Only play the "thinking" backchannel if there is real dead-air after end-of-speech.
-const MS_THINKING_DELAY_MS = Number(process.env.MS_THINKING_DELAY_MS || 380);
+// Disable the "thinking" backchannel by default (it can feel interruptive on real calls).
+// If you ever want it back: set MS_THINKING_DELAY_MS (e.g. 380).
+const MS_THINKING_DELAY_MS = Number(process.env.MS_THINKING_DELAY_MS || 0);
 const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 250);
 // Fallback: if user pauses briefly, don't wait forever—force finalize after this (once we see a pause).
 const MS_FORCE_FINALIZE_AFTER_MS = Number(process.env.MS_FORCE_FINALIZE_AFTER_MS || 900);
@@ -1130,7 +1144,8 @@ function detectWaitRequest(text) {
 }
 
 function getThinkingText() {
-  return "שנייה אני איתך.";
+  // Disabled by product decision (user preference).
+  return "";
 }
 
 function limitPhoneReply(text, maxChars = 70) {
