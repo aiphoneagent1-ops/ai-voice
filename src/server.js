@@ -3153,6 +3153,28 @@ wssMediaStream.on("connection", (ws, req) => {
     return { ...pr, genMs };
   }
 
+  function handoffQuestionText() {
+    return persona === "female"
+      ? "רוצה שיחזרו אלייך מהעמותה עם פרטים מסודרים?"
+      : "רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?";
+  }
+
+  function buildHandoffSystemPrompt({ persona, knowledgeBase }) {
+    const toYou = persona === "female" ? "אלייך" : "אליך";
+    // Keep it short, natural, and aligned to product mode.
+    return [
+      `אתה נציג אנושי, ישראלי, מסורתי וחם שמתקשר ממשרד הקהילה בחדרה.`,
+      `המטרה: מענה ראשוני קצר ואז להעביר פרטים לעמותה כדי שיחזרו ${toYou} לתיאום. לא מנהלים שיחה ארוכה.`,
+      `כללי טון: קצר, רגוע, לא לוחץ. בלי "כן או לא עכשיו".`,
+      `אסור להמציא פרטים (שעה/מיקום/רב/עלות). אם חסר—תגיד שהעמותה תחזור עם כל הפרטים.`,
+      `תענה בעברית בלבד, 1–2 משפטים.`,
+      `בסוף התשובה, הוסף שאלה קצרה שמקדמת: "${handoffQuestionText()}".`,
+      knowledgeBase ? `מידע לסוכן (רק אם רלוונטי):\n${knowledgeBase}` : ""
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
   async function transcribeAndRespond(pcm8kAll) {
     if (closed) return;
     if (!openai) return;
@@ -3283,12 +3305,39 @@ wssMediaStream.on("connection", (ws, req) => {
       return;
     }
 
-    // In handoff mode, avoid LLM entirely for stability. Use a single confirm question.
-    await handleUnclearOrEmptySpeech("fallback_unclear");
-    awaitingReply = false;
-    if (thinkingTimer) {
-      try { clearTimeout(thinkingTimer); } catch {}
-      thinkingTimer = null;
+    // LLM fallback: answer naturally (like chat), but keep it short and always return to handoff.
+    try {
+      const { knowledgeBase } = settingsSnapshot();
+      const knowledgeForThisTurn = selectRelevantKnowledge({
+        knowledgeBase,
+        query: speech,
+        maxChars: 1600,
+        maxChunks: 8
+      });
+      const system = buildHandoffSystemPrompt({ persona, knowledgeBase: knowledgeForThisTurn });
+      const history = callSid ? getMessages(db, callSid, { limit: 10 }) : [];
+      const messages = [{ role: "system", content: system }, ...history, { role: "user", content: speech }];
+
+      const llm = await createLlmText({
+        model: OPENAI_MODEL,
+        messages,
+        temperature: 0.2,
+        maxTokens: 140
+      });
+      let answer = sanitizeSayText(String(llm?.rawText || "").trim());
+      if (!answer) answer = handoffQuestionText();
+      answer = limitPhoneReply(answer, 140);
+
+      try {
+        if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: answer });
+      } catch {}
+      await sayText(answer, { label: "reply" });
+    } catch (e) {
+      msLog("llm fallback failed", e?.message || e);
+      await handleUnclearOrEmptySpeech("llm_fallback_failed");
+    } finally {
+      awaitingReply = false;
+      clearThinkingTimer();
     }
     return;
   }
