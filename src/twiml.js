@@ -38,8 +38,9 @@ export function buildRecordTwiML({
     trim: "trim-silence"
   });
 
-  // אם לא הוקלט (timeout) — לא נאמר כלום כדי להימנע מבעיות TTS בשפות לא נתמכות.
-  response.hangup();
+  // If Twilio fails to invoke the Record action on timeout/no-speech, do NOT hang up silently.
+  // Redirect back to the action URL so the app can respond with a safe neutral prompt.
+  response.redirect({ method: "POST" }, actionUrl);
 
   return response.toString();
 }

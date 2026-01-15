@@ -215,7 +215,7 @@ const OPENAI_MODEL = normalizeOpenAIModel(process.env.OPENAI_MODEL || "gpt-4.1")
 const OPENAI_STT_MODEL = process.env.OPENAI_STT_MODEL || "whisper-1";
 const OPENAI_STT_PROMPT =
   process.env.OPENAI_STT_PROMPT ||
-  "תמלול שיחה טלפונית בעברית. מילים נפוצות: חדרה, קהילה, לשכה, שיעור תורה, הפרשת חלה, רישום, כתובת, יום, שעה, עלות, תרומה, תודה.";
+  "תמלול שיחה טלפונית בעברית. מילים נפוצות: חדרה, קהילה, עמותה, שיעור תורה, הפרשת חלה, רישום, כתובת, יום, שעה, עלות, תרומה, תודה.";
 const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
 const OPENAI_TTS_VOICE_MALE = process.env.OPENAI_TTS_VOICE_MALE || "alloy";
 const OPENAI_TTS_VOICE_FEMALE = process.env.OPENAI_TTS_VOICE_FEMALE || "alloy";
@@ -1109,8 +1109,6 @@ function detectInterested(text) {
     "תרשמי",
     "להירשם",
     "תעבירי אותי",
-    "תעבירי ללשכה",
-    "תעבירו ללשכה",
     "תעביר לעמותה",
     "תעבירי לעמותה",
     "תעבירו לעמותה",
@@ -1125,6 +1123,7 @@ function detectInterested(text) {
 function detectNotInterested(text) {
   const t = normalizeIntentText(text);
   const patterns = [
+    "לא",
     "לא רוצה",
     "לא מעוניין",
     "לא מעוניינת",
@@ -1165,6 +1164,8 @@ function limitPhoneReply(text, maxChars = 70) {
 function detectAffirmativeShort(text) {
   const t = normalizeIntentText(text);
   if (!t) return false;
+  // Negation wins: avoid false positives like "כן אבל לא".
+  if (detectOptOut(t) || detectNotInterested(t)) return false;
   // If "כן" appears anywhere, treat as affirmative (unless a clear negation is also present).
   if (/\bכן\b/.test(t)) return true;
   const patterns = [
@@ -1195,8 +1196,6 @@ function detectTransferConsent(text) {
     "תעביר פרטים",
     "תעבירו את הפרטים",
     "תעבירו פרטים",
-    "תעביר ללשכה",
-    "תעבירו ללשכה",
     "תעביר לעמותה",
     "תעבירי לעמותה",
     "תעבירו לעמותה",
@@ -1218,6 +1217,16 @@ function detectNoMoreHelp(text) {
   const t = String(text || "").toLowerCase().trim();
   const patterns = ["לא", "לא תודה", "זהו", "זה הכל", "אין", "אין עוד", "לא צריך", "סיימנו"];
   return patterns.some((p) => t === p || t.includes(p));
+}
+
+function serverVersion() {
+  // Render provides RENDER_GIT_COMMIT in many setups; allow manual override too.
+  return (
+    String(process.env.SERVER_VERSION || "").trim() ||
+    String(process.env.RENDER_GIT_COMMIT || "").trim() ||
+    String(process.env.GIT_COMMIT || "").trim() ||
+    "dev"
+  );
 }
 
 function shortGreetingByPersona(persona) {
@@ -1710,7 +1719,15 @@ function toAbsoluteUrl(req, pathname) {
   return `${base}${pathname}`;
 }
 
-app.get("/health", (req, res) => res.json({ ok: true }));
+app.get("/health", (req, res) =>
+  res.json({
+    ok: true,
+    version: serverVersion(),
+    realtimeMode: REALTIME_MODE,
+    msMode: MS_MODE,
+    crMode: CR_MODE
+  })
+);
 
 // Admin mini-site
 app.get("/admin", (req, res) => {
@@ -2674,17 +2691,22 @@ async function streamAssistantToConversationRelay({
       }
 
       if (!pending && !full) {
-        pending = "תודה רבה, יום טוב.";
+        crLogAlways("llm empty stream output", { callSid, model: OPENAI_MODEL, userText: String(userText || "").slice(0, 120) });
+        pending = "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?";
         full = pending;
       }
 
       wsSendText(ws, { type: "text", token: pending, last: true, interruptible: true, preemptible: true });
     } else {
-      full = String(llm.rawText || "").trim() || "תודה רבה, יום טוב.";
+      full = String(llm.rawText || "").trim();
+      if (!full) {
+        crLogAlways("llm empty output", { callSid, api: llm.api, model: OPENAI_MODEL, userText: String(userText || "").slice(0, 120) });
+        full = "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?";
+      }
       wsSendText(ws, { type: "text", token: full, last: true, interruptible: true, preemptible: true });
     }
   } catch {
-    full = "תודה רבה, יום טוב.";
+    full = "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?";
     wsSendText(ws, { type: "text", token: full, last: true, interruptible: true, preemptible: true });
   }
 
