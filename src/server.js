@@ -2858,15 +2858,47 @@ wssMediaStream.on("connection", (ws, req) => {
   let conversationState = "CHECK_INTEREST";
   // Reprompt control: never loop "repeat yourself" style prompts.
   let confirmCount = 0;
+  let persuasionAttempted = false;
 
   function confirmQuestionText() {
     // No-apology mode: never say "לא שמעתי/לא קלטתי/תחזור".
-    if (conversationState === "CLOSE" || conversationState === "POST_CLOSE") {
-      return persona === "female"
-        ? "סבבה — להעביר פרטים ללשכה? כן או לא?"
-        : "סבבה — להעביר פרטים ללשכה? כן או לא?";
+    return persona === "female"
+      ? "סבבה — שיחזרו אלייך מהעמותה עם פרטים? כן או לא?"
+      : "סבבה — שיחזרו אליך מהעמותה עם פרטים? כן או לא?";
+  }
+
+  async function sayFinalAndHangup({ text, outcome }) {
+    if (closed) return;
+    const finalText = sanitizeSayText(String(text || "").trim());
+    if (!finalText) return;
+    try {
+      if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: finalText });
+    } catch {}
+
+    // Persist lead outcome before hangup.
+    try {
+      if (outcome === "interested") {
+        if (callSid && phone) upsertLead(db, { phone, status: "waiting", callSid, persona });
+        leadWaiting = true;
+        lastOutcome = "interested";
+      } else if (outcome === "not_interested") {
+        if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
+        lastOutcome = "not_interested";
+      } else if (outcome === "do_not_call") {
+        if (phone) markDoNotCall(db, phone);
+        if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
+        lastOutcome = "do_not_call";
+      }
+    } catch {}
+
+    const r = await sayText(finalText, { label: "reply" });
+    if (r?.markName) {
+      pendingHangupOnMark = true;
+      hangupMarkName = String(r.markName || "");
+    } else {
+      await hangupCallNow();
     }
-    return persona === "female" ? "סבבה — זה רלוונטי לך? כן או לא?" : "סבבה — זה רלוונטי לך? כן או לא?";
+    conversationState = "END";
   }
 
   async function handleUnclearOrEmptySpeech(reason) {
@@ -3162,42 +3194,42 @@ wssMediaStream.on("connection", (ws, req) => {
     });
 
     // If caller said a short "yes" early, respond deterministically (no LLM) to avoid loops.
-    // This makes the agent feel "logical" like a human, not prompt-y.
-    if (detectAffirmativeShort(speech) && (conversationState === "CHECK_INTEREST" || conversationState === "PITCH")) {
+    // Product mode: "initial response + handoff" (no long conversation).
+    // YES/INTEREST => confirm handoff immediately and end the call.
+    if (detectAffirmativeShort(speech) || detectInterested(speech)) {
       confirmCount = 0;
-      msLog("deterministic", { callSid, kind: "affirmative_short", state: conversationState });
-      conversationState = "CLOSE";
-      const pitch =
+      persuasionAttempted = false;
+      msLog("deterministic", { callSid, kind: "handoff_yes" });
+      const finalText =
         persona === "female"
-          ? "מעולה. זה ערב הפרשת חלה לנשים בחדרה, קצר ונעים. להעביר ללשכה שיחזרו אלייך עם הפרטים?"
-          : "מעולה. זה שיעור תורה קצר בחדרה, באווירה טובה. להעביר ללשכה שיחזרו אליך עם הפרטים?";
-      try {
-        if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: pitch });
-      } catch {}
-      await sayText(pitch, { label: "reply" });
+          ? "מעולה. אין בעיה — העברתי לעמותה ויחזרו אלייך בהקדם. יום טוב ובשורות טובות."
+          : "מעולה. אין בעיה — העברתי לעמותה ויחזרו אליך בהקדם. יום טוב ובשורות טובות.";
+      await sayFinalAndHangup({ text: finalText, outcome: "interested" });
       return;
     }
 
-    // Deterministic interest: "אני מעוניין/ת" should NEVER lead to "תודה רבה יום טוב".
-    // If caller expresses interest (but didn't explicitly consent to transfer yet), move to CLOSE and ask permission.
-    if (detectInterested(speech) && !detectNotInterested(speech) && conversationState !== "POST_CLOSE") {
+    // Hard NO handling: try to persuade ONCE, then end politely.
+    if (detectNotInterested(speech) && !detectOptOut(speech)) {
       confirmCount = 0;
-      msLog("deterministic", { callSid, kind: "interested", state: conversationState });
-      conversationState = "CLOSE";
-      const pitch =
-        persona === "female"
-          ? "מעולה. זה ערב הפרשת חלה לנשים בחדרה, קצר ונעים. להעביר ללשכה שיחזרו אלייך עם הפרטים?"
-          : "מעולה. זה שיעור תורה קצר בחדרה, באווירה טובה. להעביר ללשכה שיחזרו אליך עם הפרטים?";
-      try {
-        if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: pitch });
-      } catch {}
-      await sayText(pitch, { label: "reply" });
+      if (!persuasionAttempted) {
+        persuasionAttempted = true;
+        msLog("deterministic", { callSid, kind: "no_first_try" });
+        const oneTry =
+          persona === "female"
+            ? "מבין לגמרי. לפני שמסיימים — שיחזרו אלייך מהעמותה רק עם פרטים? כן או לא?"
+            : "מבין לגמרי. לפני שמסיימים — שיחזרו אליך מהעמותה רק עם פרטים? כן או לא?";
+        await sayText(oneTry, { label: "reply" });
+        return;
+      }
+      msLog("deterministic", { callSid, kind: "no_second_end" });
+      await sayFinalAndHangup({ text: "אין בעיה, תודה על הזמן. יום טוב ובשורות טובות.", outcome: "not_interested" });
       return;
     }
 
     // If caller asks us to wait, don't end the call. Keep it natural.
     if (detectWaitRequest(speech)) {
       confirmCount = 0;
+      persuasionAttempted = false;
       msLog("deterministic", { callSid, kind: "wait_request", state: conversationState });
       const waitText = "ברור, אני איתך. תגיד לי מתי נוח.";
       try {
@@ -3207,49 +3239,22 @@ wssMediaStream.on("connection", (ws, req) => {
       return;
     }
 
-    // Post-close: if user says "no/thanks", end politely and hang up after playback finishes.
-    if (conversationState === "POST_CLOSE" && detectNoMoreHelp(speech)) {
-      confirmCount = 0;
-      msLog("deterministic", { callSid, kind: "post_close_no_more_help" });
-      const finalText = "סבבה לגמרי. יום טוב ובשורות טובות.";
-      try {
-        if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: finalText });
-      } catch {}
-      const r = await sayText(finalText, { label: "reply" });
-      if (r?.markName) {
-        pendingHangupOnMark = true;
-        hangupMarkName = String(r.markName || "");
-      } else {
-        await hangupCallNow();
-      }
-      conversationState = "END";
-      return;
-    }
-
     // Barge-in: if caller starts talking mid-playback, we already clear buffered audio.
     // Now handle business logic + LLM response.
     try {
       if (callSid && phone) addMessage(db, { callSid, role: "user", content: speech });
     } catch {}
 
-    // Deterministic close: explicit approval to transfer details => don't ask again.
-    // Also accept short affirmations (e.g. "כן") when we're already in CLOSE.
-    if (detectTransferConsent(speech) || (conversationState === "CLOSE" && detectAffirmativeShort(speech))) {
+    // Explicit consent to transfer details => end immediately (handoff mode).
+    if (detectTransferConsent(speech)) {
       confirmCount = 0;
-      msLog("deterministic", { callSid, kind: "transfer_consent", state: conversationState });
-      try {
-        if (callSid && phone) upsertLead(db, { phone, status: "waiting", callSid, persona });
-        leadWaiting = true;
-      } catch {}
-      conversationState = "POST_CLOSE";
-      const closeText =
+      persuasionAttempted = false;
+      msLog("deterministic", { callSid, kind: "handoff_transfer" });
+      const finalText =
         persona === "female"
-          ? "מעולה. אני מעביר את הפרטים שלך ללשכה שלנו והם יחזרו אלייך עם שעה ומקום. יש עוד משהו שאפשר לעזור?"
-          : "מעולה. אני מעביר את הפרטים שלך ללשכה שלנו והם יחזרו אליך עם שעה ומקום. יש עוד משהו שאפשר לעזור?";
-      try {
-        if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: closeText });
-      } catch {}
-      await sayText(closeText, { label: "reply" });
+          ? "מעולה. אין בעיה — העברתי לעמותה ויחזרו אלייך בהקדם. יום טוב ובשורות טובות."
+          : "מעולה. אין בעיה — העברתי לעמותה ויחזרו אליך בהקדם. יום טוב ובשורות טובות.";
+      await sayFinalAndHangup({ text: finalText, outcome: "interested" });
       return;
     }
 
@@ -3260,211 +3265,25 @@ wssMediaStream.on("connection", (ws, req) => {
     if (detectOptOut(speech)) {
       confirmCount = 0;
       msLog("deterministic", { callSid, kind: "opt_out" });
-      try {
-        if (phone) markDoNotCall(db, phone);
-        if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
-      } catch {}
-      await sayText("אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב.");
+      await sayFinalAndHangup({ text: "אין בעיה, הסרתי אותך. יום טוב.", outcome: "do_not_call" });
       return;
     }
 
     // STT noise gating: if Whisper returns something tiny, ignore it unless we are in a closing phase.
-    if (speech.length < 4 && !(conversationState === "CLOSE" || conversationState === "POST_CLOSE")) {
+    if (speech.length < 4) {
       msLog("stt gated (too short)", { callSid, chars: speech.length, state: conversationState });
       await handleUnclearOrEmptySpeech("stt_too_short");
       return;
     }
 
-    // LLM
-    // Default should never be an apology / "repeat yourself" prompt.
-    let answer =
-      conversationState === "CLOSE"
-        ? (persona === "female"
-            ? "מעולה. להעביר ללשכה שיחזרו אלייך עם הפרטים?"
-            : "מעולה. להעביר ללשכה שיחזרו אליך עם הפרטים?")
-        : confirmQuestionText();
-    try {
-      const tLlm0 = Date.now();
-      const knowledgeBase = getSetting(db, "knowledgeBase", "");
-      const knowledgeForThisTurn = selectRelevantKnowledge({ knowledgeBase, query: speech });
-      const system = buildSalesAgentSystemPrompt({
-        persona,
-        knowledgeBase: knowledgeForThisTurn,
-        state: conversationState
-      });
-      const history = callSid ? getMessages(db, callSid, { limit: 10 }) : [];
-      const messages = [
-        { role: "system", content: system },
-        ...history,
-        { role: "user", content: speech }
-      ];
-
-      // Force a structured decision so the agent keeps a stable flow and updates lead outcomes.
-      const response_format = {
-        type: "json_schema",
-        json_schema: {
-          name: "sales_agent_turn",
-          strict: true,
-          schema: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              reply: { type: "string" },
-              nextState: {
-                type: "string",
-                enum: ["CHECK_INTEREST", "PITCH", "CLOSE", "POST_CLOSE", "HANDLE_OBJECTION", "END"]
-              },
-              outcome: { type: "string", enum: ["none", "interested", "not_interested", "do_not_call"] },
-              shouldEnd: { type: "boolean" }
-            },
-            required: ["reply", "nextState", "outcome", "shouldEnd"]
-          }
-        }
-      };
-
-      const callLlm = async (model) =>
-        createLlmText({
-          model,
-          messages,
-          temperature: 0.2,
-          maxTokens: 140,
-          response_format
-        });
-
-      let completion = null;
-      try {
-        completion = await callLlm(OPENAI_MODEL);
-      } catch (e) {
-        const msg = String(e?.message || e || "");
-        // If Render env has an invalid model (common: whitespace/typo), retry with safe defaults.
-        if (msg.toLowerCase().includes("invalid model")) {
-          console.warn("[ms] LLM failed (invalid model), retrying with fallback", { model: OPENAI_MODEL });
-          completion = await callLlm("gpt-4.1");
-        } else {
-          throw e;
-        }
-      }
-      msLog("timing", { callSid, llmMs: Date.now() - tLlm0 });
-
-      const raw = String(completion?.rawText || "").trim();
-      let parsed = null;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        parsed = null;
-      }
-
-      if (parsed && typeof parsed === "object") {
-        const replyText = sanitizeSayText(String(parsed.reply || "").trim());
-        const ns = String(parsed.nextState || "").trim();
-        const outcome = String(parsed.outcome || "none").trim();
-        const shouldEnd = Boolean(parsed.shouldEnd);
-        msLog("llm decision", {
-          callSid,
-          nextState: ns,
-          outcome,
-          shouldEnd,
-          replyChars: replyText.length
-        });
-
-        if (
-          ns === "CHECK_INTEREST" ||
-          ns === "PITCH" ||
-          ns === "CLOSE" ||
-          ns === "POST_CLOSE" ||
-          ns === "HANDLE_OBJECTION" ||
-          ns === "END"
-        ) {
-          conversationState = ns;
-        }
-
-        // Apply outcomes (leads + DNC) based on the agent decision.
-        try {
-          lastOutcome = outcome || "none";
-          if (outcome === "do_not_call") {
-            if (phone) markDoNotCall(db, phone);
-            if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
-            conversationState = "END";
-          } else if (outcome === "interested") {
-            if (callSid && phone) upsertLead(db, { phone, status: "waiting", callSid, persona });
-          } else if (outcome === "not_interested") {
-            if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
-          }
-        } catch {}
-
-        answer = limitPhoneReply(replyText || answer);
-
-        // Guardrail: if the caller expressed interest, do not allow the model to end the call.
-        if (detectInterested(speech) && !detectNotInterested(speech)) {
-          if (conversationState === "CHECK_INTEREST" || conversationState === "PITCH") conversationState = "CLOSE";
-          lastOutcome = "interested";
-        } else if (shouldEnd) {
-          // If the model says to end, steer the state to END (but we still speak the final line).
-          conversationState = "END";
-        }
-      } else {
-        // Fallback: if JSON parsing fails, just use plain text.
-        answer = limitPhoneReply(raw || answer);
-      }
-    } catch (e) {
-      console.warn("[ms] LLM failed", e?.message || e);
-      // Fail-soft: never apologize/ask to repeat. Ask a closed question instead.
-      if (conversationState === "CLOSE") {
-        answer =
-          persona === "female"
-            ? "מעולה. מעביר ללשכה שיחזרו אלייך עם הפרטים."
-            : "מעולה. מעביר ללשכה שיחזרו אליך עם הפרטים.";
-      } else {
-        answer = confirmQuestionText();
-      }
-    }
-    msLog("llm answer", { callSid, chars: answer.length });
-
-    // Final guardrail: if user intent was affirmative/interested, never say a goodbye.
-    // This prevents the "שנייה אני איתך... תודה רבה יום טוב" failure mode.
-    if ((detectAffirmativeShort(speech) || detectInterested(speech)) && !detectNotInterested(speech)) {
-      const looksLikeGoodbye = /יום טוב|תודה רבה/i.test(answer);
-      const alreadyClosing = /להעביר|לשכה|פרטים/i.test(answer) || conversationState === "CLOSE" || conversationState === "POST_CLOSE";
-      if (looksLikeGoodbye && !alreadyClosing) {
-        conversationState = "CLOSE";
-        answer =
-          persona === "female"
-            ? "מעולה. להעביר ללשכה שיחזרו אלייך עם הפרטים?"
-            : "מעולה. להעביר ללשכה שיחזרו אליך עם הפרטים?";
-      }
-    }
-
-    try {
-      if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: answer });
-    } catch {}
-
-    if (closed) return;
-    const tTts0 = Date.now();
-    const pr = await sayText(answer, { label: "reply" });
+    // In handoff mode, avoid LLM entirely for stability. Use a single confirm question.
+    await handleUnclearOrEmptySpeech("fallback_unclear");
     awaitingReply = false;
     if (thinkingTimer) {
       try { clearTimeout(thinkingTimer); } catch {}
       thinkingTimer = null;
     }
-    // New timing: separate generation vs playback
-    msLog("timing", {
-      callSid,
-      ttsGenMs: pr?.genMs ?? null,
-      playbackMs: pr?.playbackMs ?? null,
-      firstChunkDelayMs: pr?.firstChunkDelayMs ?? null,
-      turnLatencyMs:
-        lastUtteranceEndAt && pr?.firstChunkAt ? Number(pr.firstChunkAt) - Number(lastUtteranceEndAt) : null,
-      totalMs: Date.now() - t0
-    });
-    // Auto-hangup ONLY on explicit terminal outcomes (prevents premature hangup on bad LLM END).
-    if (conversationState === "END" && (lastOutcome === "do_not_call" || lastOutcome === "not_interested")) {
-      if (pr?.markName) {
-        pendingHangupOnMark = true;
-        hangupMarkName = String(pr.markName || "");
-      } else {
-        await hangupCallNow();
-      }
-    }
+    return;
   }
 
   msLog("ws connected", {
