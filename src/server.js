@@ -1837,15 +1837,15 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
         r[key] = normalizeCellValue(row.getCell(c + 1).value);
       }
 
-      const phone = String(r.phone || r.Phone || r.PHONE || "").trim();
-      if (!phone) continue;
-      const gender = parseGender(r.gender || r.Gender || r.GENDER || "");
-      const firstName = String(r.first_name || r.firstName || r.name || r.Name || "").trim() || null;
-      upsertContact(db, { phone, gender, firstName });
-      imported++;
-    }
+    const phone = String(r.phone || r.Phone || r.PHONE || "").trim();
+    if (!phone) continue;
+    const gender = parseGender(r.gender || r.Gender || r.GENDER || "");
+    const firstName = String(r.first_name || r.firstName || r.name || r.Name || "").trim() || null;
+    upsertContact(db, { phone, gender, firstName });
+    imported++;
+  }
 
-    res.json({ ok: true, imported, type: "xlsx" });
+  res.json({ ok: true, imported, type: "xlsx" });
   })().catch((err) => {
     console.error("[import-xlsx] failed:", err);
     res.status(400).json({ error: "failed to parse xlsx" });
@@ -2206,12 +2206,12 @@ app.all("/twilio/record", async (req, res) => {
     if (!recordingUrl) {
       // Don't hang up immediately if the user is still speaking / recording failed.
       if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
-        await respondWithPlayAndMaybeHangup(req, res, {
+      await respondWithPlayAndMaybeHangup(req, res, {
           text: "סבבה — זה רלוונטי לך? כן או לא?",
-          persona,
+        persona,
           hangup: false,
           retry: retry + 1
-        });
+      });
         return;
       }
       await respondWithPlayAndMaybeHangup(req, res, { text: "סבבה, נסיים כאן. יום טוב ובשורות טובות.", persona, hangup: true });
@@ -2248,12 +2248,12 @@ app.all("/twilio/record", async (req, res) => {
     });
     if (!recRes.ok) {
       if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
-        await respondWithPlayAndMaybeHangup(req, res, {
+      await respondWithPlayAndMaybeHangup(req, res, {
           text: "סבבה — זה רלוונטי לך? כן או לא?",
-          persona,
+        persona,
           hangup: false,
           retry: retry + 1
-        });
+      });
         return;
       }
       await respondWithPlayAndMaybeHangup(req, res, { text: "סבבה, נסיים כאן. יום טוב ובשורות טובות.", persona, hangup: true });
@@ -2277,12 +2277,12 @@ app.all("/twilio/record", async (req, res) => {
 
     if (!speech) {
       if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
-        await respondWithPlayAndMaybeHangup(req, res, {
+      await respondWithPlayAndMaybeHangup(req, res, {
           text: "סבבה — זה רלוונטי לך? כן או לא?",
-          persona,
+        persona,
           hangup: false,
           retry: retry + 1
-        });
+      });
         return;
       }
       await respondWithPlayAndMaybeHangup(req, res, { text: "סבבה, נסיים כאן. יום טוב ובשורות טובות.", persona, hangup: true });
@@ -3165,6 +3165,7 @@ wssMediaStream.on("connection", (ws, req) => {
     // This makes the agent feel "logical" like a human, not prompt-y.
     if (detectAffirmativeShort(speech) && (conversationState === "CHECK_INTEREST" || conversationState === "PITCH")) {
       confirmCount = 0;
+      msLog("deterministic", { callSid, kind: "affirmative_short", state: conversationState });
       conversationState = "CLOSE";
       const pitch =
         persona === "female"
@@ -3181,6 +3182,7 @@ wssMediaStream.on("connection", (ws, req) => {
     // If caller expresses interest (but didn't explicitly consent to transfer yet), move to CLOSE and ask permission.
     if (detectInterested(speech) && !detectNotInterested(speech) && conversationState !== "POST_CLOSE") {
       confirmCount = 0;
+      msLog("deterministic", { callSid, kind: "interested", state: conversationState });
       conversationState = "CLOSE";
       const pitch =
         persona === "female"
@@ -3196,6 +3198,7 @@ wssMediaStream.on("connection", (ws, req) => {
     // If caller asks us to wait, don't end the call. Keep it natural.
     if (detectWaitRequest(speech)) {
       confirmCount = 0;
+      msLog("deterministic", { callSid, kind: "wait_request", state: conversationState });
       const waitText = "ברור, אני איתך. תגיד לי מתי נוח.";
       try {
         if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: waitText });
@@ -3207,6 +3210,7 @@ wssMediaStream.on("connection", (ws, req) => {
     // Post-close: if user says "no/thanks", end politely and hang up after playback finishes.
     if (conversationState === "POST_CLOSE" && detectNoMoreHelp(speech)) {
       confirmCount = 0;
+      msLog("deterministic", { callSid, kind: "post_close_no_more_help" });
       const finalText = "סבבה לגמרי. יום טוב ובשורות טובות.";
       try {
         if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: finalText });
@@ -3232,6 +3236,7 @@ wssMediaStream.on("connection", (ws, req) => {
     // Also accept short affirmations (e.g. "כן") when we're already in CLOSE.
     if (detectTransferConsent(speech) || (conversationState === "CLOSE" && detectAffirmativeShort(speech))) {
       confirmCount = 0;
+      msLog("deterministic", { callSid, kind: "transfer_consent", state: conversationState });
       try {
         if (callSid && phone) upsertLead(db, { phone, status: "waiting", callSid, persona });
         leadWaiting = true;
@@ -3254,6 +3259,7 @@ wssMediaStream.on("connection", (ws, req) => {
     // Opt-out fast path
     if (detectOptOut(speech)) {
       confirmCount = 0;
+      msLog("deterministic", { callSid, kind: "opt_out" });
       try {
         if (phone) markDoNotCall(db, phone);
         if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
@@ -3353,6 +3359,13 @@ wssMediaStream.on("connection", (ws, req) => {
         const ns = String(parsed.nextState || "").trim();
         const outcome = String(parsed.outcome || "none").trim();
         const shouldEnd = Boolean(parsed.shouldEnd);
+        msLog("llm decision", {
+          callSid,
+          nextState: ns,
+          outcome,
+          shouldEnd,
+          replyChars: replyText.length
+        });
 
         if (
           ns === "CHECK_INTEREST" ||
