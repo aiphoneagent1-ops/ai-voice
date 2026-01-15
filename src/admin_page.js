@@ -253,7 +253,7 @@ export function renderAdminPage() {
 
           <div style="height:6px;"></div>
           <h3 style="margin:0 0 8px; font-size:14px;">מידע לסוכן (Knowledge Base)</h3>
-          <p class="status" style="margin-top:0;">זה המידע שהסוכן משתמש בו כדי לענות על שאלות על הפרשת חלה / שיעור תורה. אם אין לך פרטים מדויקים (תאריך/כתובת), כתוב שהלשכה תיתן את הפרטים בהרשמה.</p>
+          <p class="status" style="margin-top:0;">זה המידע שהסוכן משתמש בו כדי לענות על שאלות על הפרשת חלה / שיעור תורה. אם אין לך פרטים מדויקים (תאריך/כתובת), כתוב שהעמותה תחזור עם כל הפרטים לתיאום.</p>
           <textarea id="knowledgeBase" placeholder="כתוב כאן את כל הידע של הסוכן..."></textarea>
 
           <div style="height:12px;"></div>

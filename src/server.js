@@ -1136,6 +1136,7 @@ function detectNotInterested(text) {
     "עזבי",
     "אין לי זמן",
     "לא עכשיו",
+    "לא נראה לי",
     "אולי אחר כך"
   ];
   return patterns.some((p) => t.includes(p));
@@ -1164,9 +1165,26 @@ function limitPhoneReply(text, maxChars = 70) {
 function detectAffirmativeShort(text) {
   const t = normalizeIntentText(text);
   if (!t) return false;
-  // Most common: "כן", "כן אחי", "כן יאללה", etc.
-  if (t === "כן" || t.startsWith("כן ")) return true;
-  const patterns = ["כן כן", "בטח", "ברור", "אוקיי", "אוקי", "סבבה", "בהחלט", "יאללה", "תעביר", "תעבירו"];
+  // If "כן" appears anywhere, treat as affirmative (unless a clear negation is also present).
+  if (/\bכן\b/.test(t)) return true;
+  const patterns = [
+    "בטח",
+    "ברור",
+    "אוקיי",
+    "אוקי",
+    "סבבה",
+    "בהחלט",
+    "יאללה",
+    "קדימה",
+    "סגור",
+    "סבבה אחי",
+    "נראה לי",
+    "אפשר",
+    "בוא נעשה",
+    "יאללה תעביר",
+    "תעביר",
+    "תעבירו"
+  ];
   return patterns.some((p) => t === p || t.startsWith(p + " ") || t.includes(" " + p + " "));
 }
 
@@ -3225,7 +3243,11 @@ wssMediaStream.on("connection", (ws, req) => {
     // If caller said a short "yes" early, respond deterministically (no LLM) to avoid loops.
     // Product mode: "initial response + handoff" (no long conversation).
     // YES/INTEREST => confirm handoff immediately and end the call.
-    if (detectAffirmativeShort(speech) || detectInterested(speech)) {
+    if (
+      (detectAffirmativeShort(speech) || detectInterested(speech) || detectTransferConsent(speech)) &&
+      !detectNotInterested(speech) &&
+      !detectOptOut(speech)
+    ) {
       confirmCount = 0;
       persuasionAttempted = false;
       msLog("deterministic", { callSid, kind: "handoff_yes" });
@@ -3274,19 +3296,6 @@ wssMediaStream.on("connection", (ws, req) => {
       if (callSid && phone) addMessage(db, { callSid, role: "user", content: speech });
     } catch {}
 
-    // Explicit consent to transfer details => end immediately (handoff mode).
-    if (detectTransferConsent(speech)) {
-      confirmCount = 0;
-      persuasionAttempted = false;
-      msLog("deterministic", { callSid, kind: "handoff_transfer" });
-      const finalText =
-        persona === "female"
-          ? "מעולה. אין בעיה — העברתי לעמותה ויחזרו אלייך בהקדם. יום טוב ובשורות טובות."
-          : "מעולה. אין בעיה — העברתי לעמותה ויחזרו אליך בהקדם. יום טוב ובשורות טובות.";
-      await sayFinalAndHangup({ text: finalText, outcome: "interested" });
-      return;
-    }
-
     // Lead tracking is handled by the LLM structured decision (outcome).
     // We avoid heuristic writes here because short/partial transcriptions can flip-flop status.
 
@@ -3326,6 +3335,10 @@ wssMediaStream.on("connection", (ws, req) => {
       });
       let answer = sanitizeSayText(String(llm?.rawText || "").trim());
       if (!answer) answer = handoffQuestionText();
+      // Safety: always end with the handoff question, even if the model forgets.
+      if (!answer.includes("רוצה שיחזרו") && !answer.includes("שיחזרו")) {
+        answer = `${answer} ${handoffQuestionText()}`.trim();
+      }
       answer = limitPhoneReply(answer, 140);
 
       try {
