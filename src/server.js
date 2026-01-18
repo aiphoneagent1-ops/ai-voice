@@ -1061,6 +1061,10 @@ setDefaultIfEmpty("middleScriptMale", DEFAULT_MIDDLE_MALE);
 setDefaultIfEmpty("middleScriptFemale", DEFAULT_MIDDLE_FEMALE);
 setDefaultIfEmpty("closingScriptMale", DEFAULT_CLOSING_MALE);
 setDefaultIfEmpty("closingScriptFemale", DEFAULT_CLOSING_FEMALE);
+// White-label / campaign config: these strings control who calls back.
+// Keep them as phrases (not just nouns) so Hebrew grammar stays correct across clients.
+setDefaultIfEmpty("handoffToPhrase", "לעמותה");
+setDefaultIfEmpty("handoffFromPhrase", "מהעמותה");
 
 // If the user already edited scripts, keep them—but add a small helpful "explanation" block once.
 appendIfMissing("middleScriptMale", {
@@ -1516,6 +1520,9 @@ function settingsSnapshot() {
   const autoDialBatchSize = Number(getSetting(db, "autoDialBatchSize", 5));
   const autoDialIntervalSeconds = Number(getSetting(db, "autoDialIntervalSeconds", 30));
 
+  const handoffToPhrase = String(getSetting(db, "handoffToPhrase", "לעמותה") || "").trim() || "לעמותה";
+  const handoffFromPhrase = String(getSetting(db, "handoffFromPhrase", "מהעמותה") || "").trim() || "מהעמותה";
+
   return {
     knowledgeBase,
     openingScript,
@@ -1529,7 +1536,9 @@ function settingsSnapshot() {
     closingScriptFemale,
     autoDialEnabled,
     autoDialBatchSize,
-    autoDialIntervalSeconds
+    autoDialIntervalSeconds,
+    handoffToPhrase,
+    handoffFromPhrase
   };
 }
 
@@ -1831,7 +1840,9 @@ app.post("/api/admin/settings", (req, res) => {
     middleScriptMale = "",
     middleScriptFemale = "",
     closingScriptMale = "",
-    closingScriptFemale = ""
+    closingScriptFemale = "",
+    handoffToPhrase = "",
+    handoffFromPhrase = ""
   } = req.body || {};
   setSetting(db, "knowledgeBase", String(knowledgeBase));
   setSetting(db, "openingScript", String(openingScript));
@@ -1843,6 +1854,8 @@ app.post("/api/admin/settings", (req, res) => {
   setSetting(db, "middleScriptFemale", String(middleScriptFemale));
   setSetting(db, "closingScriptMale", String(closingScriptMale));
   setSetting(db, "closingScriptFemale", String(closingScriptFemale));
+  if (handoffToPhrase != null) setSetting(db, "handoffToPhrase", String(handoffToPhrase));
+  if (handoffFromPhrase != null) setSetting(db, "handoffFromPhrase", String(handoffFromPhrase));
   res.json({ ok: true });
 });
 
@@ -2511,7 +2524,13 @@ app.all("/twilio/record", async (req, res) => {
       return;
     }
 
-    const system = buildSystemPrompt({ persona, knowledgeBase: knowledgeForThisTurn });
+    const { handoffToPhrase, handoffFromPhrase } = settingsSnapshot();
+    const system = buildSystemPrompt({
+      persona,
+      knowledgeBase: knowledgeForThisTurn,
+      handoffToPhrase,
+      handoffFromPhrase
+    });
     const history = getMessages(db, callSid, { limit: 10 });
     const messages = [{ role: "system", content: system }, ...history];
 
@@ -2738,7 +2757,13 @@ async function streamAssistantToConversationRelay({
 
   const { knowledgeBase } = settingsSnapshot();
   const knowledgeForThisTurn = selectRelevantKnowledge({ knowledgeBase, query: userText });
-  const system = buildSystemPrompt({ persona, knowledgeBase: knowledgeForThisTurn });
+  const { handoffToPhrase, handoffFromPhrase } = settingsSnapshot();
+  const system = buildSystemPrompt({
+    persona,
+    knowledgeBase: knowledgeForThisTurn,
+    handoffToPhrase,
+    handoffFromPhrase
+  });
 
   // Persist user message
   addMessage(db, { callSid, role: "user", content: userText });
@@ -3445,9 +3470,11 @@ wssMediaStream.on("connection", (ws, req) => {
   }
 
   function handoffQuestionText() {
+    const { handoffFromPhrase } = settingsSnapshot();
+    const from = String(handoffFromPhrase || "מהעמותה").trim() || "מהעמותה";
     return persona === "female"
-      ? "רוצה שיחזרו אלייך מהעמותה עם פרטים מסודרים?"
-      : "רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?";
+      ? `רוצה שיחזרו אלייך ${from} עם פרטים מסודרים?`
+      : `רוצה שיחזרו אליך ${from} עם פרטים מסודרים?`;
   }
 
   function buildHandoffSystemPrompt({ persona, knowledgeBase }) {
@@ -3524,10 +3551,12 @@ wssMediaStream.on("connection", (ws, req) => {
       confirmCount = 0;
       persuasionAttempted = false;
       msLog("deterministic", { callSid, kind: "handoff_yes" });
+      const { handoffToPhrase } = settingsSnapshot();
+      const toPhrase = String(handoffToPhrase || "לעמותה").trim() || "לעמותה";
       const finalText =
         persona === "female"
-          ? "מעולה. אין בעיה — העברתי לעמותה ויחזרו אלייך בהקדם. יום טוב ובשורות טובות."
-          : "מעולה. אין בעיה — העברתי לעמותה ויחזרו אליך בהקדם. יום טוב ובשורות טובות.";
+          ? `מעולה. אין בעיה — העברתי ${toPhrase} ויחזרו אלייך בהקדם. יום טוב ובשורות טובות.`
+          : `מעולה. אין בעיה — העברתי ${toPhrase} ויחזרו אליך בהקדם. יום טוב ובשורות טובות.`;
       await sayFinalAndHangup({ text: finalText, outcome: "interested" });
       return;
     }

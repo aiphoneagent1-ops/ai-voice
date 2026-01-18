@@ -253,8 +253,22 @@ export function renderAdminPage() {
 
           <div style="height:6px;"></div>
           <h3 style="margin:0 0 8px; font-size:14px;">מידע לסוכן (Knowledge Base)</h3>
-          <p class="status" style="margin-top:0;">זה המידע שהסוכן משתמש בו כדי לענות על שאלות על הפרשת חלה / שיעור תורה. אם אין לך פרטים מדויקים (תאריך/כתובת), כתוב שהעמותה תחזור עם כל הפרטים לתיאום.</p>
+          <p class="status" style="margin-top:0;">זה המידע שהסוכן משתמש בו כדי לענות על שאלות. אם אין לך פרטים מדויקים (תאריך/כתובת), כתוב שהגורם הרלוונטי יחזור עם כל הפרטים לתיאום.</p>
           <textarea id="knowledgeBase" placeholder="כתוב כאן את כל הידע של הסוכן..."></textarea>
+
+          <div style="height:12px;"></div>
+          <h3 style="margin:0 0 8px; font-size:14px;">מי חוזר ללקוח (White‑label)</h3>
+          <p class="status" style="margin-top:0;">כאן מגדירים את הניסוח של החזרה אל הלקוח. לדוגמה: לעמותה/מהעמותה, לעסק/מהעסק.</p>
+          <div class="row" style="gap:12px; align-items:flex-start;">
+            <div style="flex:1; min-width:240px;">
+              <label style="margin-top:0;">ניסוח “העברתי …”</label>
+              <input id="handoffToPhrase" placeholder='למשל: לעמותה / לעסק / לבעל העסק' />
+            </div>
+            <div style="flex:1; min-width:240px;">
+              <label style="margin-top:0;">ניסוח “יחזרו …”</label>
+              <input id="handoffFromPhrase" placeholder='למשל: מהעמותה / מהעסק / מבעל העסק' />
+            </div>
+          </div>
 
           <div style="height:12px;"></div>
           <label>פתיח קבוע (מה אומרים ישר כשעונים)</label>
@@ -357,6 +371,8 @@ export function renderAdminPage() {
           $("knowledgeBase").value = data.knowledgeBase || "";
           $("openingScriptMale").value = data.openingScriptMale || "";
           $("openingScriptFemale").value = data.openingScriptFemale || "";
+          if($("handoffToPhrase")) $("handoffToPhrase").value = data.handoffToPhrase || "לעמותה";
+          if($("handoffFromPhrase")) $("handoffFromPhrase").value = data.handoffFromPhrase || "מהעמותה";
           $("autoDialEnabled").checked = !!data.autoDialEnabled;
           $("autoDialBatch").value = data.autoDialBatchSize ?? 5;
           $("autoDialInterval").value = data.autoDialIntervalSeconds ?? 30;
@@ -421,7 +437,9 @@ export function renderAdminPage() {
             body: JSON.stringify({
               knowledgeBase: $("knowledgeBase").value,
               openingScriptMale: $("openingScriptMale").value,
-              openingScriptFemale: $("openingScriptFemale").value
+              openingScriptFemale: $("openingScriptFemale").value,
+              handoffToPhrase: $("handoffToPhrase") ? $("handoffToPhrase").value : undefined,
+              handoffFromPhrase: $("handoffFromPhrase") ? $("handoffFromPhrase").value : undefined
             })
           });
           setStatus($("kbStatus"), "נשמר", true);

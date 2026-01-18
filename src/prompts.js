@@ -1,6 +1,8 @@
 export function buildSystemPrompt({
   persona,
   knowledgeBase = "",
+  handoffToPhrase = "לעמותה",
+  handoffFromPhrase = "מהעמותה",
   // legacy (kept for backward-compat)
   openingScript = "",
   middleScript = "",
@@ -14,8 +16,8 @@ export function buildSystemPrompt({
   closingScriptFemale = ""
 }) {
   const base = `
-אתה נציג אנושי, טבעי ומכבד שמתקשר למספר שאישר מראש לקבל שיחה.
-מטרה: להזמין לשיעור תורה (לגבר) או להפרשת חלה (לאישה).
+אתה נציג אנושי, טבעי ומכבד שמתקשר ללקוח/ה בשיחה טלפונית.
+מטרה: מענה ראשוני קצר + לקדם אישור להעברת פרטים כדי שיחזרו אליו/אליה לתיאום.
 
 כללים חשובים:
 - עברית בלבד.
@@ -47,7 +49,7 @@ export function buildSystemPrompt({
 
   const closing = `
 יעד סיום:
-- אם יש עניין: להגיד משהו בסגנון "מעולה, אני מעביר את הפרטים לעמותה שלנו והם יחזרו ${toYou}", ואז לסיים.
+- אם יש עניין: להגיד משהו בסגנון "מעולה, אני מעביר את הפרטים ${handoffToPhrase} והם יחזרו ${toYou} ${handoffFromPhrase} לתיאום", ואז לסיים.
 - אם אין עניין: "תודה רבה, יום טוב" ולסיים.
 `;
 
