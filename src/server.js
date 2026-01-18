@@ -119,12 +119,12 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
       textFormat = undefined;
     }
 
-    // Responses API appears to require `text.format.name` even for plain text output.
+    // Responses API requires `text.format.type` (and `name`) even for plain text output.
     // So we always send a default plain-text format unless we override with json_schema.
     const payload = {
       model: m,
       input: messages,
-      text: { format: textFormat || { name: "plain_text" } },
+      text: { format: textFormat || { type: "text", name: "plain_text" } },
       ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {})
     };
     // Avoid passing temperature for GPT-5 unless we explicitly control reasoning settings.
@@ -142,7 +142,7 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
         const resp2 = await openai.responses.create({
           model: m,
           input: messages,
-          text: { format: { name: "plain_text" } },
+          text: { format: { type: "text", name: "plain_text" } },
           ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {})
         });
         return { api: "responses_retry_plain", rawText: String(extractTextFromResponses(resp2) || "").trim(), resp: resp2 };
@@ -3370,20 +3370,38 @@ wssMediaStream.on("connection", (ws, req) => {
       state: conversationState
     });
 
-    // If caller said a short "yes" early, respond deterministically (no LLM) to avoid loops.
-    // Product mode: "initial response + handoff" (no long conversation).
-    // YES/INTEREST => confirm handoff immediately and end the call.
-    if (
-      (detectAffirmativeShort(speech) || detectInterested(speech) || detectTransferConsent(speech)) &&
-      !detectNotInterested(speech) &&
-      !detectOptOut(speech)
-    ) {
-      confirmCount = 0;
-      persuasionAttempted = false;
-      msLog("deterministic", { callSid, kind: "handoff_yes" });
-      const finalText = handoffConfirmCloseText({ persona });
-      await sayFinalAndHangup({ text: finalText, outcome: "interested" });
-      return;
+    // YES/INTEREST handling (two-step close):
+    // - If user explicitly says "transfer details" -> close immediately.
+    // - Otherwise: first "yes/interest" -> ask the handoff question (CLOSE state),
+    //   second "yes" in CLOSE -> confirm + mark lead waiting + hang up.
+    if (!detectNotInterested(speech) && !detectOptOut(speech)) {
+      if (detectTransferConsent(speech)) {
+        confirmCount = 0;
+        persuasionAttempted = false;
+        msLog("deterministic", { callSid, kind: "handoff_consent_direct" });
+        await sayFinalAndHangup({ text: handoffConfirmCloseText({ persona }), outcome: "interested" });
+        return;
+      }
+
+      if (detectAffirmativeShort(speech) || detectInterested(speech)) {
+        confirmCount = 0;
+        persuasionAttempted = false;
+
+        if (conversationState === "CLOSE") {
+          msLog("deterministic", { callSid, kind: "handoff_yes_confirm" });
+          await sayFinalAndHangup({ text: handoffConfirmCloseText({ persona }), outcome: "interested" });
+          return;
+        }
+
+        msLog("deterministic", { callSid, kind: "handoff_yes_ask" });
+        conversationState = "CLOSE";
+        const q = handoffQuestionText();
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
+        } catch {}
+        await sayText(q, { label: "reply" });
+        return;
+      }
     }
 
     // Hard NO handling: try to persuade ONCE, then end politely.
