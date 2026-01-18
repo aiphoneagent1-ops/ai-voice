@@ -91,7 +91,7 @@ function extractTextFromResponses(resp) {
   }
 }
 
-async function createLlmText({ model, messages, temperature, maxTokens, response_format, stream, signal }) {
+async function createLlmText({ model, messages, temperature, maxTokens, response_format, stream }) {
   if (!openai) throw new Error("OpenAI client not initialized");
   const m = String(model || "").trim();
 
@@ -125,8 +125,7 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
       model: m,
       input: messages,
       text: { format: textFormat || { name: "plain_text" } },
-      ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {}),
-      ...(signal ? { signal } : {})
+      ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {})
     };
     // Avoid passing temperature for GPT-5 unless we explicitly control reasoning settings.
     void temperature;
@@ -144,8 +143,7 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
           model: m,
           input: messages,
           text: { format: { name: "plain_text" } },
-          ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {}),
-          ...(signal ? { signal } : {})
+          ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {})
         });
         return { api: "responses_retry_plain", rawText: String(extractTextFromResponses(resp2) || "").trim(), resp: resp2 };
       } catch {
@@ -162,8 +160,7 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
       ...(typeof temperature === "number" ? { temperature } : {}),
       ...(Number.isFinite(maxTokens) ? { max_tokens: maxTokens } : {}),
       ...(response_format ? { response_format } : {}),
-      stream: true,
-      ...(signal ? { signal } : {})
+      stream: true
     });
     return { api: "chat_stream", stream: resp };
   }
@@ -173,8 +170,7 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
     messages,
     ...(typeof temperature === "number" ? { temperature } : {}),
     ...(Number.isFinite(maxTokens) ? { max_tokens: maxTokens } : {}),
-    ...(response_format ? { response_format } : {}),
-    ...(signal ? { signal } : {})
+    ...(response_format ? { response_format } : {})
   });
   const rawText = String(resp?.choices?.[0]?.message?.content || "").trim();
   return { api: "chat", rawText, resp };
@@ -599,7 +595,7 @@ async function elevenlabsTtsToUlaw8000({ text, persona }) {
       headers: {
         "xi-api-key": ELEVENLABS_API_KEY,
         "Content-Type": "application/json",
-        Accept: "audio/x-mulaw"
+        Accept: "audio/ulaw"
       },
       body: bodyJson
     });
@@ -691,7 +687,7 @@ async function elevenlabsTtsToUlaw8000Stream({ text, persona }) {
       headers: {
         "xi-api-key": ELEVENLABS_API_KEY,
         "Content-Type": "application/json",
-        Accept: "audio/x-mulaw"
+        Accept: "audio/ulaw"
       },
       body: bodyJson
     });
@@ -728,7 +724,22 @@ async function elevenlabsTtsToUlaw8000Stream({ text, persona }) {
     return { buffered: buf };
   }
 
-  return { reader: res.body.getReader(), contentType: ct };
+  const reader = res.body.getReader();
+  // Probe one chunk up front. If ElevenLabs returns an empty body (we saw this in logs),
+  // return null so callers can fall back to the non-streaming path.
+  try {
+    const first = await reader.read();
+    if (!first?.done && first?.value && first.value.byteLength) {
+      return { reader, contentType: ct, firstChunk: Buffer.from(first.value) };
+    }
+  } catch (e) {
+    try { reader.releaseLock(); } catch {}
+    if (MS_DEBUG) console.warn("[ms] elevenlabs ulaw stream probe failed:", e?.message || e);
+    return null;
+  }
+  try { reader.releaseLock(); } catch {}
+  if (MS_DEBUG) console.warn("[ms] elevenlabs ulaw stream empty body (probe done with no bytes)");
+  return null;
 }
 function startsWithLang(code, prefix) {
   return new RegExp(`^${String(prefix).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-|$)`, "i").test(String(code || ""));
@@ -3101,7 +3112,15 @@ wssMediaStream.on("connection", (ws, req) => {
     // Streaming path: start playback while ElevenLabs is still producing audio.
     const stream = await elevenlabsTtsToUlaw8000Stream({ text: safe, persona: AGENT_VOICE_PERSONA });
     const genMs = Date.now() - tGen0;
-    if (!stream) return;
+    if (!stream) {
+      // Fallback: if streaming fails (or returns empty body), generate full ulaw and play normally.
+      const ulaw = await elevenlabsTtsToUlaw8000({ text: safe, persona: AGENT_VOICE_PERSONA });
+      if (!ulaw) return;
+      _ulawMemCache.set(cacheKey, ulaw);
+      putUlawToDisk(cacheKey, ulaw);
+      const pr = await playUlaw(ulaw, { label });
+      return { ...pr, genMs: Date.now() - tGen0, streamed: false, streamFallback: true };
+    }
 
     // If we had to buffer (no reader), just play normally.
     if (stream.buffered) {
@@ -3131,11 +3150,11 @@ wssMediaStream.on("connection", (ws, req) => {
     const playStartAt = Date.now();
     const prebufferFrames = Math.max(1, Math.min(60, Number(MS_TTS_PREBUFFER_FRAMES) || 10));
 
-    // Queue and buffering
-    let queued = Buffer.alloc(0);
+    // Queue and buffering (seed with the probed first chunk so we never "play" an empty stream)
+    let queued = Buffer.from(stream.firstChunk || Buffer.alloc(0));
     let streamDone = false;
     let streamErr = "";
-    let totalBytes = 0;
+    let totalBytes = queued.length;
     let framesSent = 0;
     let offsetBytes = 0;
     let lastByteAt = Date.now();
@@ -3436,40 +3455,29 @@ wssMediaStream.on("connection", (ws, req) => {
       const messages = [{ role: "system", content: system }, ...history, { role: "user", content: speech }];
 
       const tLlm0 = Date.now();
-      const ac = new AbortController();
-      const llmTimer = setTimeout(() => {
+      msLog("llm start (fallback)", { callSid, timeoutMs: MS_LLM_TIMEOUT_MS, model: OPENAI_MODEL });
+      const llmPromise = createLlmText({
+        model: OPENAI_MODEL,
+        messages,
+        temperature: 0.2,
+        maxTokens: 140
+      });
+      const timeoutPromise = new Promise((resolve) =>
+        setTimeout(() => resolve({ __timeout: true }), Math.max(300, MS_LLM_TIMEOUT_MS))
+      );
+      const raced = await Promise.race([llmPromise, timeoutPromise]);
+      const llmTimedOut = !!raced && typeof raced === "object" && raced.__timeout === true;
+      if (llmTimedOut) {
+        msLog("llm timeout (fallback)", { callSid, ms: Date.now() - tLlm0 });
+        const q = handoffQuestionText();
         try {
-          ac.abort();
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
         } catch {}
-      }, Math.max(300, MS_LLM_TIMEOUT_MS));
-
-      let llm = null;
-      try {
-        msLog("llm start (fallback)", { callSid, timeoutMs: MS_LLM_TIMEOUT_MS, model: OPENAI_MODEL });
-        llm = await createLlmText({
-          model: OPENAI_MODEL,
-          messages,
-          temperature: 0.2,
-          maxTokens: 140,
-          signal: ac.signal
-        });
-      } catch (e) {
-        const msg = String(e?.message || e || "");
-        const aborted = String(e?.name || "").toLowerCase().includes("abort") || msg.toLowerCase().includes("aborted");
-        msLog("llm failed (fallback)", { callSid, aborted, err: msg });
-        if (aborted) {
-          const q = handoffQuestionText();
-          try {
-            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
-          } catch {}
-          await sayText(q, { label: "reply" });
-          return;
-        }
-        throw e;
-      } finally {
-        try { clearTimeout(llmTimer); } catch {}
-        msLog("timing", { callSid, llmMs: Date.now() - tLlm0 });
+        await sayText(q, { label: "reply" });
+        return;
       }
+      const llm = raced;
+      msLog("timing", { callSid, llmMs: Date.now() - tLlm0 });
       let answer = sanitizeSayText(String(llm?.rawText || "").trim());
       if (!answer) answer = handoffQuestionText();
       // Safety: always end with the handoff question, even if the model forgets.
