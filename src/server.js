@@ -1430,6 +1430,21 @@ function parseGender(raw) {
   return null;
 }
 
+function normalizeShortPhrase(raw, { fallback, maxChars = 24, maxWords = 3 } = {}) {
+  const fb = String(fallback || "").trim();
+  let s = String(raw ?? "").trim();
+  if (!s) return fb;
+  // collapse whitespace + remove newlines (admin UI sometimes pastes multi-line text by mistake)
+  s = s.replace(/\s+/g, " ").trim();
+  // If this contains sentence punctuation or looks like a full sentence/question, reject.
+  if (/[?!。！？]/.test(s) || s.includes("\n")) return fb;
+  // If user pasted a full script, it will typically be long and multi-word.
+  if (s.length > maxChars) return fb;
+  const words = s.split(" ").filter(Boolean);
+  if (words.length > maxWords) return fb;
+  return s || fb;
+}
+
 function settingsSnapshot() {
   const knowledgeBase = getSetting(db, "knowledgeBase", "");
 
@@ -1450,8 +1465,19 @@ function settingsSnapshot() {
   const autoDialBatchSize = Number(getSetting(db, "autoDialBatchSize", 5));
   const autoDialIntervalSeconds = Number(getSetting(db, "autoDialIntervalSeconds", 30));
 
-  const handoffToPhrase = String(getSetting(db, "handoffToPhrase", "לצוות") || "").trim() || "לצוות";
-  const handoffFromPhrase = String(getSetting(db, "handoffFromPhrase", "מהצוות") || "").trim() || "מהצוות";
+  // White-label phrases MUST be short ("לצוות", "מהצוות", "לעמותה", "מהעמותה").
+  // If someone pastes the whole greeting here, it creates a repetition loop like:
+  // "רוצה שיחזרו אליך <greeting> עם פרטים מסודרים?"
+  const handoffToPhrase = normalizeShortPhrase(getSetting(db, "handoffToPhrase", "לצוות"), {
+    fallback: "לצוות",
+    maxChars: 24,
+    maxWords: 3
+  });
+  const handoffFromPhrase = normalizeShortPhrase(getSetting(db, "handoffFromPhrase", "מהצוות"), {
+    fallback: "מהצוות",
+    maxChars: 24,
+    maxWords: 3
+  });
 
   return {
     knowledgeBase,
