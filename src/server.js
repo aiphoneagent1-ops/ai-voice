@@ -91,7 +91,7 @@ function extractTextFromResponses(resp) {
   }
 }
 
-async function createLlmText({ model, messages, temperature, maxTokens, response_format, stream }) {
+async function createLlmText({ model, messages, temperature, maxTokens, response_format, stream, signal }) {
   if (!openai) throw new Error("OpenAI client not initialized");
   const m = String(model || "").trim();
 
@@ -125,7 +125,8 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
       model: m,
       input: messages,
       text: { format: textFormat || { name: "plain_text" } },
-      ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {})
+      ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {}),
+      ...(signal ? { signal } : {})
     };
     // Avoid passing temperature for GPT-5 unless we explicitly control reasoning settings.
     void temperature;
@@ -143,7 +144,8 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
           model: m,
           input: messages,
           text: { format: { name: "plain_text" } },
-          ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {})
+          ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {}),
+          ...(signal ? { signal } : {})
         });
         return { api: "responses_retry_plain", rawText: String(extractTextFromResponses(resp2) || "").trim(), resp: resp2 };
       } catch {
@@ -160,7 +162,8 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
       ...(typeof temperature === "number" ? { temperature } : {}),
       ...(Number.isFinite(maxTokens) ? { max_tokens: maxTokens } : {}),
       ...(response_format ? { response_format } : {}),
-      stream: true
+      stream: true,
+      ...(signal ? { signal } : {})
     });
     return { api: "chat_stream", stream: resp };
   }
@@ -170,7 +173,8 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
     messages,
     ...(typeof temperature === "number" ? { temperature } : {}),
     ...(Number.isFinite(maxTokens) ? { max_tokens: maxTokens } : {}),
-    ...(response_format ? { response_format } : {})
+    ...(response_format ? { response_format } : {}),
+    ...(signal ? { signal } : {})
   });
   const rawText = String(resp?.choices?.[0]?.message?.content || "").trim();
   return { api: "chat", rawText, resp };
@@ -215,7 +219,7 @@ const OPENAI_MODEL = normalizeOpenAIModel(process.env.OPENAI_MODEL || "gpt-4.1")
 const OPENAI_STT_MODEL = process.env.OPENAI_STT_MODEL || "whisper-1";
 const OPENAI_STT_PROMPT =
   process.env.OPENAI_STT_PROMPT ||
-  "תמלול שיחה טלפונית בעברית. מילים נפוצות: חדרה, קהילה, עמותה, שיעור תורה, הפרשת חלה, רישום, כתובת, יום, שעה, עלות, תרומה, תודה.";
+  "תמלול שיחה טלפונית בעברית. מילים נפוצות: כן, מעוניין, מעוניינת, סבבה, יאללה, תעביר, פרטים, שיחזרו, תודה, לא, לא תודה, להסיר, אל תתקשרו.";
 const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
 const OPENAI_TTS_VOICE_MALE = process.env.OPENAI_TTS_VOICE_MALE || "alloy";
 const OPENAI_TTS_VOICE_FEMALE = process.env.OPENAI_TTS_VOICE_FEMALE || "alloy";
@@ -343,6 +347,10 @@ const ELEVENLABS_STREAM_OUTPUT_FORMAT = String(process.env.ELEVENLABS_STREAM_OUT
 // When using streaming TTS, we prebuffer a few frames before starting playback to avoid underflow.
 // 10 frames * 20ms = 200ms buffer (good tradeoff for low perceived latency).
 const MS_TTS_PREBUFFER_FRAMES = Number(process.env.MS_TTS_PREBUFFER_FRAMES || 10);
+// If the LLM call hangs, we cut it off and ask a safe handoff question instead of going silent.
+const MS_LLM_TIMEOUT_MS = Number(process.env.MS_LLM_TIMEOUT_MS || 2500);
+// If the ElevenLabs streaming reader stalls (no bytes arriving), end playback cleanly (avoid infinite silence).
+const MS_TTS_STREAM_STALL_MS = Number(process.env.MS_TTS_STREAM_STALL_MS || 1500);
 // ElevenLabs low-latency is optional. Some accounts/voices behave differently with this flag.
 // If unset, we do NOT send optimize_streaming_latency at all (safe default).
 const ELEVENLABS_OPTIMIZE_STREAMING_LATENCY_RAW = String(process.env.ELEVENLABS_OPTIMIZE_STREAMING_LATENCY || "").trim();
@@ -3314,6 +3322,7 @@ wssMediaStream.on("connection", (ws, req) => {
     let totalBytes = 0;
     let framesSent = 0;
     let offsetBytes = 0;
+    let lastByteAt = Date.now();
 
     // Read loop (pull bytes from ElevenLabs)
     (async () => {
@@ -3325,6 +3334,7 @@ wssMediaStream.on("connection", (ws, req) => {
             const b = Buffer.from(value);
             totalBytes += b.length;
             queued = queued.length ? Buffer.concat([queued, b]) : b;
+            lastByteAt = Date.now();
           }
         }
       } catch (e) {
@@ -3358,6 +3368,11 @@ wssMediaStream.on("connection", (ws, req) => {
         if (!started) {
           const haveFrames = Math.floor(queued.length / CHUNK_BYTES);
           if (haveFrames < prebufferFrames) {
+            // If streaming stalls, start with whatever we have (better than indefinite silence).
+            if (!streamDone && haveFrames >= 1 && Date.now() - lastByteAt > MS_TTS_STREAM_STALL_MS) {
+              msLog("tts stream stall (start anyway)", { callSid, streamSid, label, haveFrames, prebufferFrames });
+              started = true;
+            } else {
             if (streamDone && queued.length < CHUNK_BYTES) {
               // Nothing meaningful arrived; end cleanly.
               const markName = `done_${label}_${myId}_${Date.now()}`;
@@ -3374,11 +3389,17 @@ wssMediaStream.on("connection", (ws, req) => {
               return;
             }
             return;
+            }
           }
           started = true;
         }
 
         if (queued.length < CHUNK_BYTES) {
+          // If the stream stalls after start, treat it as done and flush/pad.
+          if (!streamDone && Date.now() - lastByteAt > MS_TTS_STREAM_STALL_MS) {
+            msLog("tts stream stall (flush)", { callSid, streamSid, label, queued: queued.length });
+            streamDone = true;
+          }
           if (streamDone) {
             // Flush any remainder by padding to a full frame (Twilio expects 160 bytes).
             if (queued.length > 0) {
@@ -3455,10 +3476,10 @@ wssMediaStream.on("connection", (ws, req) => {
     const toYou = persona === "female" ? "אלייך" : "אליך";
     // Keep it short, natural, and aligned to product mode.
     return [
-      `אתה נציג אנושי, ישראלי, מסורתי וחם שמתקשר ממשרד הקהילה בחדרה.`,
-      `המטרה: מענה ראשוני קצר ואז להעביר פרטים לעמותה כדי שיחזרו ${toYou} לתיאום. לא מנהלים שיחה ארוכה.`,
+      `אתה נציג אנושי, טבעי וקצר שמתקשר ללקוח/ה בשיחה טלפונית.`,
+      `המטרה: מענה ראשוני קצר ואז להגיע לאישור להעברת פרטים כדי שיחזרו ${toYou} לתיאום. לא מנהלים שיחה ארוכה.`,
       `כללי טון: קצר, רגוע, לא לוחץ. בלי "כן או לא עכשיו".`,
-      `אסור להמציא פרטים (שעה/מיקום/רב/עלות). אם חסר—תגיד שהעמותה תחזור עם כל הפרטים.`,
+      `אסור להמציא פרטים (שעה/מיקום/עלות). אם חסר—תגיד שיחזרו ${toYou} עם כל הפרטים לתיאום.`,
       `תענה בעברית בלבד, 1–2 משפטים.`,
       `בסוף התשובה, הוסף שאלה קצרה שמקדמת: "${handoffQuestionText()}".`,
       knowledgeBase ? `מידע לסוכן (רק אם רלוונטי):\n${knowledgeBase}` : ""
@@ -3603,12 +3624,41 @@ wssMediaStream.on("connection", (ws, req) => {
       const history = callSid ? getMessages(db, callSid, { limit: 10 }) : [];
       const messages = [{ role: "system", content: system }, ...history, { role: "user", content: speech }];
 
-      const llm = await createLlmText({
-        model: OPENAI_MODEL,
-        messages,
-        temperature: 0.2,
-        maxTokens: 140
-      });
+      const tLlm0 = Date.now();
+      const ac = new AbortController();
+      const llmTimer = setTimeout(() => {
+        try {
+          ac.abort();
+        } catch {}
+      }, Math.max(300, MS_LLM_TIMEOUT_MS));
+
+      let llm = null;
+      try {
+        msLog("llm start (fallback)", { callSid, timeoutMs: MS_LLM_TIMEOUT_MS, model: OPENAI_MODEL });
+        llm = await createLlmText({
+          model: OPENAI_MODEL,
+          messages,
+          temperature: 0.2,
+          maxTokens: 140,
+          signal: ac.signal
+        });
+      } catch (e) {
+        const msg = String(e?.message || e || "");
+        const aborted = String(e?.name || "").toLowerCase().includes("abort") || msg.toLowerCase().includes("aborted");
+        msLog("llm failed (fallback)", { callSid, aborted, err: msg });
+        if (aborted) {
+          const q = handoffQuestionText();
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
+          } catch {}
+          await sayText(q, { label: "reply" });
+          return;
+        }
+        throw e;
+      } finally {
+        try { clearTimeout(llmTimer); } catch {}
+        msLog("timing", { callSid, llmMs: Date.now() - tLlm0 });
+      }
       let answer = sanitizeSayText(String(llm?.rawText || "").trim());
       if (!answer) answer = handoffQuestionText();
       // Safety: always end with the handoff question, even if the model forgets.
