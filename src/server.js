@@ -119,12 +119,14 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
       textFormat = undefined;
     }
 
-    // Responses API requires `text.format.type` (and `name`) even for plain text output.
-    // So we always send a default plain-text format unless we override with json_schema.
+    // Responses API format requirements have changed over time:
+    // - some versions required `text.format.type`
+    // - some reject `text.format.name`
+    // To keep compatibility, for plain text we send the minimal format `{ type:"text" }`.
     const payload = {
       model: m,
       input: messages,
-      text: { format: textFormat || { type: "text", name: "plain_text" } },
+      text: { format: textFormat || { type: "text" } },
       ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {})
     };
     // Avoid passing temperature for GPT-5 unless we explicitly control reasoning settings.
@@ -139,10 +141,11 @@ async function createLlmText({ model, messages, temperature, maxTokens, response
       const msg = String(e?.message || e || "");
       console.warn("[llm] responses.create failed; retrying with plain_text", { model: m, err: msg });
       try {
+        // Minimal plain-text format: avoid `name` (some API versions reject it).
         const resp2 = await openai.responses.create({
           model: m,
           input: messages,
-          text: { format: { type: "text", name: "plain_text" } },
+          text: { format: { type: "text" } },
           ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {})
         });
         return { api: "responses_retry_plain", rawText: String(extractTextFromResponses(resp2) || "").trim(), resp: resp2 };
