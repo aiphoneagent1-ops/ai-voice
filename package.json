@@ -9,11 +9,9 @@
     "import:xlsx": "node scripts/import-xlsx.js",
     "add:contacts": "node scripts/add-contacts.js",
     "remove:contact": "node scripts/remove-contact.js",
-    "test:gemini-tts": "node scripts/test-gemini-tts.js",
     "dial": "node scripts/dial.js"
   },
   "dependencies": {
-    "@google/genai": "^1.6.0",
     "better-sqlite3": "^11.7.0",
     "csv-parse": "^5.5.6",
     "dotenv": "^16.4.5",

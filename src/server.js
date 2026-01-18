@@ -33,7 +33,7 @@ import {
 } from "./db.js";
 import { buildSystemPrompt, buildGreeting, buildSalesAgentSystemPrompt } from "./prompts.js";
 import { buildPlayAndHangup, buildRecordTwiML, buildSayAndHangup } from "./twiml.js";
-import { geminiTtsToFile } from "./gemini_tts.js";
+// Gemini TTS removed (we keep only OpenAI STT/LLM + ElevenLabs v3 TTS).
 import { renderAdminPage } from "./admin_page.js";
 import { normalizePhoneE164IL } from "./phone.js";
 
@@ -223,14 +223,10 @@ const OPENAI_STT_PROMPT =
 const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
 const OPENAI_TTS_VOICE_MALE = process.env.OPENAI_TTS_VOICE_MALE || "alloy";
 const OPENAI_TTS_VOICE_FEMALE = process.env.OPENAI_TTS_VOICE_FEMALE || "alloy";
-const TTS_PROVIDER = (process.env.TTS_PROVIDER || "").toLowerCase(); // openai | elevenlabs | google
-const GOOGLE_TTS_API_KEY = process.env.GOOGLE_TTS_API_KEY || "";
-const GOOGLE_TTS_VOICE_NAME = process.env.GOOGLE_TTS_VOICE_NAME || "he-IL-Wavenet-A"; // typically female
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_TTS_MODEL = process.env.GEMINI_TTS_MODEL || "gemini-2.5-pro-preview-tts";
-const GEMINI_TTS_VOICE_NAME = process.env.GEMINI_TTS_VOICE_NAME || "Zephyr";
+// We keep only ElevenLabs v3 for TTS in this codebase.
+// (OpenAI is used for STT + LLM.)
+const TTS_PROVIDER = "elevenlabs";
 const DEBUG_TTS = process.env.DEBUG_TTS === "1";
-const GEMINI_TTS_TIMEOUT_MS = Number(process.env.GEMINI_TTS_TIMEOUT_MS || 8000);
 // Default OFF: keep answers driven by KB + LLM (more natural). Set USE_FAQ_RULES=1 to re-enable deterministic FAQ replies.
 const USE_FAQ_RULES = process.env.USE_FAQ_RULES === "1";
 const TTS_POLL_MAX = Number(process.env.TTS_POLL_MAX || 20);
@@ -262,23 +258,14 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || process.env.ELEVENLABS_VOICE || "";
 const ELEVENLABS_VOICE_MALE = process.env.ELEVENLABS_VOICE_MALE || "";
 const ELEVENLABS_VOICE_FEMALE = process.env.ELEVENLABS_VOICE_FEMALE || "";
-const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
-const IS_ELEVEN_V3 = String(ELEVENLABS_MODEL_ID).toLowerCase() === "eleven_v3";
+// This build supports ElevenLabs v3 only.
+const ELEVENLABS_MODEL_ID = "eleven_v3";
 function parseFiniteEnvNumber(raw, fallback) {
   const v = Number(raw);
   return Number.isFinite(v) ? v : fallback;
 }
-// Match UI defaults:
-// - Multilingual v2: stability 0.4, similarity 0.8, style 0
-// - Eleven v3 (alpha): stability 0.5 (UI shows only stability)
-const ELEVENLABS_STABILITY = parseFiniteEnvNumber(
-  process.env.ELEVENLABS_STABILITY,
-  IS_ELEVEN_V3 ? 0.5 : 0.4
-);
-const ELEVENLABS_SIMILARITY_BOOST = parseFiniteEnvNumber(process.env.ELEVENLABS_SIMILARITY_BOOST, 0.8);
-const ELEVENLABS_STYLE = parseFiniteEnvNumber(process.env.ELEVENLABS_STYLE, 0); // 0..1 (optional)
-const ELEVENLABS_SPEAKER_BOOST =
-  process.env.ELEVENLABS_SPEAKER_BOOST === "1" || process.env.ELEVENLABS_SPEAKER_BOOST === "true";
+// Eleven v3 UI exposes only Stability.
+const ELEVENLABS_STABILITY = parseFiniteEnvNumber(process.env.ELEVENLABS_STABILITY, 0.5);
 
 // Force a deterministic MP3 output (helps Twilio playback quality; avoids VBR surprises).
 // ElevenLabs docs: codec_sample_rate_bitrate (e.g. mp3_44100_128, mp3_22050_32, etc.)
@@ -404,12 +391,9 @@ function computeElevenUlawCacheKey({ text, persona }) {
         "elevenlabs_ulaw",
         ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000",
         voiceId || "",
-        ELEVENLABS_MODEL_ID || "",
+        ELEVENLABS_MODEL_ID,
         String(ELEVENLABS_LANGUAGE_CODE || ""),
         String(ELEVENLABS_STABILITY),
-        String(ELEVENLABS_SIMILARITY_BOOST),
-        String(ELEVENLABS_STYLE),
-        String(ELEVENLABS_SPEAKER_BOOST ? "1" : "0"),
         String(text || "")
       ].join("::")
     )
@@ -606,14 +590,7 @@ async function elevenlabsTtsToUlaw8000({ text, persona }) {
     text,
     model_id: ELEVENLABS_MODEL_ID,
     ...(ELEVENLABS_LANGUAGE_CODE ? { language_code: ELEVENLABS_LANGUAGE_CODE } : {}),
-    voice_settings: IS_ELEVEN_V3
-      ? { stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)) }
-      : {
-          stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)),
-          similarity_boost: Math.max(0, Math.min(1, ELEVENLABS_SIMILARITY_BOOST)),
-          ...(Number.isFinite(ELEVENLABS_STYLE) ? { style: Math.max(0, Math.min(1, ELEVENLABS_STYLE)) } : {}),
-          ...(ELEVENLABS_SPEAKER_BOOST ? { use_speaker_boost: true } : {})
-        }
+    voice_settings: { stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)) }
   });
 
   const doFetch = (u) =>
@@ -705,14 +682,7 @@ async function elevenlabsTtsToUlaw8000Stream({ text, persona }) {
     text,
     model_id: ELEVENLABS_MODEL_ID,
     ...(ELEVENLABS_LANGUAGE_CODE ? { language_code: ELEVENLABS_LANGUAGE_CODE } : {}),
-    voice_settings: IS_ELEVEN_V3
-      ? { stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)) }
-      : {
-          stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)),
-          similarity_boost: Math.max(0, Math.min(1, ELEVENLABS_SIMILARITY_BOOST)),
-          ...(Number.isFinite(ELEVENLABS_STYLE) ? { style: Math.max(0, Math.min(1, ELEVENLABS_STYLE)) } : {}),
-          ...(ELEVENLABS_SPEAKER_BOOST ? { use_speaker_boost: true } : {})
-        }
+    voice_settings: { stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)) }
   });
 
   const doFetch = (u) =>
@@ -948,79 +918,46 @@ const DEFAULT_KNOWLEDGE_BASE = `
 const DEFAULT_OPENING_MALE = `שלום אחי, מדבר בנוגע להצעה קצרה—יש לך דקה?`;
 const DEFAULT_OPENING_FEMALE = `שלום יקרה, מדבר בנוגע להצעה קצרה—יש לך דקה?`;
 
+// Campaign content is configured via the Admin UI.
+// Keep server defaults generic so the codebase is fully white-label.
 const DEFAULT_MIDDLE_MALE = `
-מטרת האמצע: להבין מהר אם יש עניין, לענות קצר, ולהציע לבוא פעם אחת לנסות.
+מטרת האמצע (תבנית לקמפיין):
+- להבין מהר אם יש עניין.
+- לענות קצר וברור.
+- להגיע לאישור להעברת פרטים כדי שיחזרו לתיאום.
 
-הסבר קצר על השיעור (אם שואלים "מה זה בדיוק?" או "על מה מדברים?"):
-- "זה שיעור תורה קצר וברור בחדרה, באווירה טובה. מדברים על דברים פרקטיים לחיים—אמונה, זוגיות, פרנסה, הלכה פשוטה—וגם יש זמן לשאלות. לא חייבים ידע קודם."
-- "בדרך כלל זה 45–60 דקות, יש כיבוד קל, ואפשר לבוא פעם אחת רק לנסות. העמותה תחזור עם שעה/מקום מדויק."
+דוגמאות תשובה (להחליף למה שמתאים לקמפיין):
+- "בגדול זה [תיאור קצר]. רוצה שיחזרו אליך עם פרטים מסודרים?"
+- "אין לי פה את כל הפרטים המדויקים, יחזרו אליך לתיאום."
 
-אם שואלים "מי זה?/מאיפה יש לכם את המספר?"
-- "אני ממשרד הקהילה בחדרה. המספר אצלנו ברשימה של אנשים שאישרו לקבל עדכון. אם לא מתאים—אני מוריד אותך."
-
-אם אומרים "אין לי זמן"
-- "מבין. זה קצר ונעים. רוצה לנסות פעם אחת, רק לראות אם זה מתאים?"
-
-אם אומרים "אני לא דתי"
-- "הכל טוב אחי, זה פתוח לכולם. באים לשמוע ולהתחזק קצת, בלי התחייבות."
-
-אם שואלים "איפה/מתי?"
-- "הפרטים המדויקים אצל העמותה—אני מעביר את הפרטים שלך והם יחזרו עם שעה וכתובת."
-
-אם יש הסכמה/עניין
-- "מעולה. אז אני מעביר עכשיו את הפרטים שלך לעמותה, והם יחזרו אליך עם רישום ופרטים, בסדר?"
-
-אם מבקשים להסיר/לא להתקשר
-- "בטח, מוריד אותך עכשיו. תודה רבה ויום טוב."
+אם מבקשים להסיר/לא להתקשר:
+- "בטח, מוריד אותך עכשיו. יום טוב."
 `.trim();
 
 const DEFAULT_MIDDLE_FEMALE = `
-מטרת האמצע: להסביר בקצרה מה זה, להרגיע חששות, ולהזמין לבוא פעם אחת.
+מטרת האמצע (תבנית לקמפיין):
+- להבין מהר אם יש עניין.
+- לענות קצר וברור.
+- להגיע לאישור להעברת פרטים כדי שיחזרו לתיאום.
 
-הסבר קצר על האירוע (אם שואלים "מה עושים שם?" או "מה זה בכלל?"):
-- "זה מפגש נשים נעים בחדרה: כמה דקות חיזוק, הפרשת חלה ותפילה קצרה. אווירה טובה ומכבדת, לא מלחיץ—באמת באות נשים מכל הסוגים."
-- "בדרך כלל זה בערך שעה–שעה וחצי, יש אווירה משפחתית וקצת כיבוד. העמותה תחזור עם שעה/מקום מדויק."
+דוגמאות תשובה (להחליף למה שמתאים לקמפיין):
+- "בגדול זה [תיאור קצר]. רוצה שיחזרו אלייך עם פרטים מסודרים?"
+- "אין לי פה את כל הפרטים המדויקים, יחזרו אלייך לתיאום."
 
-אם שואלים "מי זה?/מאיפה יש לכם את המספר?"
-- "אני ממשרד הקהילה בחדרה. המספר אצלנו ברשימה של אנשים שאישרו לקבל עדכון. אם לא מתאים—אני מוריד אותך."
-
-אם שואלים "מה זה הפרשת חלה?"
-- "מפגש נשים בחדרה, קצת חיזוק, הפרשת חלה ותפילה קצרה. אווירה טובה, באמת."
-
-אם אומרים "אני לא דתייה"
-- "זה בסדר גמור, זה פתוח לכולן. באות נשים מכל הסוגים."
-
-אם אומרים "אין לי זמן"
-- "מבין. זה לא ארוך. ואם תרצי—תבואי פעם אחת רק לראות."
-
-אם שואלים "איפה/מתי?/כמה עולה?"
-- "אני לא רוצה להמציא. העמותה נותנת את כל הפרטים בשיחה—שעה, כתובת ואם יש עלות."
-
-אם יש הסכמה/עניין
-- "מעולה יקרה. אז אני מעביר עכשיו את הפרטים שלך לעמותה שיחזרו אלייך לתיאום?"
-
-אם מבקשים להסיר/לא להתקשר
-- "בטח, מוריד אותך עכשיו. תודה רבה ויום טוב."
+אם מבקשים להסיר/לא להתקשר:
+- "בטח, מוריד אותך עכשיו. יום טוב."
 `.trim();
 
 const DEFAULT_CLOSING_MALE = `
-אם הבן אדם רוצה/מסכים:
-- "מעולה אחי. אני מעביר עכשיו את הפרטים שלך לעמותה שלנו, והם יחזרו אליך. תודה רבה!"
-- ואז לסיים שיחה.
-
-אם הבן אדם לא רוצה:
-- "הבנתי, אין בעיה. תודה על הזמן, יום טוב."
-- ואז לסיים שיחה.
+סגירה (תבנית לקמפיין):
+- אם יש הסכמה: "מעולה. אני מעביר את הפרטים שלך, ויחזרו אליך לתיאום. יום טוב."
+- אם אין עניין: "הבנתי, תודה על הזמן. יום טוב."
 `.trim();
 
 const DEFAULT_CLOSING_FEMALE = `
-אם היא רוצה/מסכימה:
-- "מדהים יקרה. אני מעביר עכשיו את הפרטים שלך לעמותה שלנו, והם יחזרו אלייך. תודה רבה!"
-- ואז לסיים שיחה.
-
-אם היא לא רוצה:
-- "הבנתי, אין בעיה. תודה על הזמן, יום טוב."
-- ואז לסיים שיחה.
+סגירה (תבנית לקמפיין):
+- אם יש הסכמה: "מעולה. אני מעביר את הפרטים שלך, ויחזרו אלייך לתיאום. יום טוב."
+- אם אין עניין: "הבנתי, תודה על הזמן. יום טוב."
 `.trim();
 
 function setDefaultIfEmpty(key, value) {
@@ -1045,17 +982,20 @@ setDefaultIfEmpty("closingScriptMale", DEFAULT_CLOSING_MALE);
 setDefaultIfEmpty("closingScriptFemale", DEFAULT_CLOSING_FEMALE);
 // White-label / campaign config: these strings control who calls back.
 // Keep them as phrases (not just nouns) so Hebrew grammar stays correct across clients.
-setDefaultIfEmpty("handoffToPhrase", "לעמותה");
-setDefaultIfEmpty("handoffFromPhrase", "מהעמותה");
+setDefaultIfEmpty("handoffToPhrase", "לצוות");
+setDefaultIfEmpty("handoffFromPhrase", "מהצוות");
 
 // If the user already edited scripts, keep them—but add a small helpful "explanation" block once.
+// Keep legacy upgrade helpers, but make them generic (white-label).
 appendIfMissing("middleScriptMale", {
-  marker: "הסבר קצר על השיעור",
-  snippet: `הסבר קצר על השיעור (אם שואלים "מה זה בדיוק?" או "על מה מדברים?"):\n- "זה שיעור תורה קצר וברור בחדרה, באווירה טובה. מדברים על דברים פרקטיים לחיים—אמונה, זוגיות, פרנסה, הלכה פשוטה—וגם יש זמן לשאלות. לא חייבים ידע קודם."\n- "בדרך כלל זה 45–60 דקות, יש כיבוד קל, ואפשר לבוא פעם אחת רק לנסות. העמותה תחזור עם שעה/מקום מדויק."`
+  marker: "דוגמאות תשובה",
+  snippet:
+    `דוגמאות תשובה (להחליף למה שמתאים לקמפיין):\n- "בגדול זה [תיאור קצר]. רוצה שיחזרו אליך עם פרטים מסודרים?"\n- "אין לי פה את כל הפרטים המדויקים, יחזרו אליך לתיאום."`
 });
 appendIfMissing("middleScriptFemale", {
-  marker: "הסבר קצר על האירוע",
-  snippet: `הסבר קצר על האירוע (אם שואלים "מה עושים שם?" או "מה זה בכלל?"):\n- "זה מפגש נשים נעים בחדרה: כמה דקות חיזוק, הפרשת חלה ותפילה קצרה. אווירה טובה ומכבדת, לא מלחיץ—באמת באות נשים מכל הסוגים."\n- "בדרך כלל זה בערך שעה–שעה וחצי, יש אווירה משפחתית וקצת כיבוד. העמותה תחזור עם שעה/מקום מדויק."`
+  marker: "דוגמאות תשובה",
+  snippet:
+    `דוגמאות תשובה (להחליף למה שמתאים לקמפיין):\n- "בגדול זה [תיאור קצר]. רוצה שיחזרו אלייך עם פרטים מסודרים?"\n- "אין לי פה את כל הפרטים המדויקים, יחזרו אלייך לתיאום."`
 });
 
 function normalizePhone(raw) {
@@ -1174,10 +1114,9 @@ function detectInterested(text) {
     "תרשמי",
     "להירשם",
     "תעבירי אותי",
-    "תעביר לעמותה",
-    "תעבירי לעמותה",
-    "תעבירו לעמותה",
-    "לעמותה"
+    "תעביר",
+    "תעבירי",
+    "תעבירו"
   ];
   if (patterns.some((p) => t.includes(p))) return true;
   // Extra tolerance for common partials/typos like "מעוניים"
@@ -1261,9 +1200,6 @@ function detectTransferConsent(text) {
     "תעביר פרטים",
     "תעבירו את הפרטים",
     "תעבירו פרטים",
-    "תעביר לעמותה",
-    "תעבירי לעמותה",
-    "תעבירו לעמותה",
     "מאשר להעביר",
     "מאשרת להעביר",
     "כן תעביר",
@@ -1295,10 +1231,9 @@ function serverVersion() {
 }
 
 function shortGreetingByPersona(persona) {
-  if (persona === "female") {
-    return "היי, מדבר ממשרד הקהילה בחדרה. הפרשת חלה לנשים—זה רלוונטי לך?";
-  }
-  return "היי, מדבר ממשרד הקהילה בחדרה. שיעור תורה קצר—זה רלוונטי לך?";
+  return persona === "female"
+    ? "היי, מדבר בנוגע להצעה קצרה—זה רלוונטי לך?"
+    : "היי, מדבר בנוגע להצעה קצרה—זה רלוונטי לך?";
 }
 
 function normalizeGreetingForLatency({ greeting, persona }) {
@@ -1358,21 +1293,16 @@ function quickReplyByRules({ speech, persona }) {
   if (faq.who) {
     return {
       text:
-        "אני ממשרד הקהילה בחדרה. המספר אצלנו ברשימה של אנשים שאישרו לקבל עדכון. אם לא מתאים לך—אני מוריד אותך מיד.",
+        "אני מתקשר בנוגע להצעה קצרה. המספר אצלנו ברשימה של אנשים שאישרו לקבל עדכון. אם לא מתאים—אני מוריד אותך מיד.",
       end: false
     };
   }
   if (faq.what) {
-    if (persona === "female") {
-      return {
-        text:
-          "זה מפגש נשים נעים בחדרה: כמה דקות חיזוק, הפרשת חלה ותפילה קצרה. אווירה טובה ומכבדת. אם תרצי—העמותה תחזור אלייך עם כל הפרטים המסודרים.",
-        end: false
-      };
-    }
     return {
       text:
-        "זה שיעור תורה קצר וברור בחדרה, באווירה טובה, עם זמן לשאלות. לא צריך ידע קודם. אם תרצה—העמותה תחזור אליך עם כל הפרטים המסודרים.",
+        persona === "female"
+          ? "בגדול זו הצעה/שירות קצר. אין לי את כל הפרטים כאן—רוצה שיחזרו אלייך עם פרטים מסודרים?"
+          : "בגדול זו הצעה/שירות קצר. אין לי את כל הפרטים כאן—רוצה שיחזרו אליך עם פרטים מסודרים?",
       end: false
     };
   }
@@ -1502,8 +1432,8 @@ function settingsSnapshot() {
   const autoDialBatchSize = Number(getSetting(db, "autoDialBatchSize", 5));
   const autoDialIntervalSeconds = Number(getSetting(db, "autoDialIntervalSeconds", 30));
 
-  const handoffToPhrase = String(getSetting(db, "handoffToPhrase", "לעמותה") || "").trim() || "לעמותה";
-  const handoffFromPhrase = String(getSetting(db, "handoffFromPhrase", "מהעמותה") || "").trim() || "מהעמותה";
+  const handoffToPhrase = String(getSetting(db, "handoffToPhrase", "לצוות") || "").trim() || "לצוות";
+  const handoffFromPhrase = String(getSetting(db, "handoffFromPhrase", "מהצוות") || "").trim() || "מהצוות";
 
   return {
     knowledgeBase,
@@ -1522,6 +1452,23 @@ function settingsSnapshot() {
     handoffToPhrase,
     handoffFromPhrase
   };
+}
+
+function handoffQuestionTextForPersona(persona) {
+  const { handoffFromPhrase } = settingsSnapshot();
+  const from = String(handoffFromPhrase || "מהצוות").trim() || "מהצוות";
+  return persona === "female"
+    ? `סבבה. רוצה שיחזרו אלייך ${from} עם פרטים מסודרים?`
+    : `סבבה. רוצה שיחזרו אליך ${from} עם פרטים מסודרים?`;
+}
+
+function handoffConfirmCloseText({ persona }) {
+  const { handoffToPhrase, handoffFromPhrase } = settingsSnapshot();
+  const toPhrase = String(handoffToPhrase || "לצוות").trim() || "לצוות";
+  const fromPhrase = String(handoffFromPhrase || "מהצוות").trim() || "מהצוות";
+  return persona === "female"
+    ? `מעולה. אין בעיה — העברתי ${toPhrase} ויחזרו אלייך ${fromPhrase} בהקדם. יום טוב ובשורות טובות.`
+    : `מעולה. אין בעיה — העברתי ${toPhrase} ויחזרו אליך ${fromPhrase} בהקדם. יום טוב ובשורות טובות.`;
 }
 
 async function elevenlabsTtsToFile({ text, persona }) {
@@ -1551,18 +1498,7 @@ async function elevenlabsTtsToFile({ text, persona }) {
       text,
       model_id: ELEVENLABS_MODEL_ID,
       ...(ELEVENLABS_LANGUAGE_CODE ? { language_code: ELEVENLABS_LANGUAGE_CODE } : {}),
-      // Eleven v3 (alpha) UI exposes only Stability; keep request minimal to match it closely.
-      voice_settings: IS_ELEVEN_V3
-        ? {
-            stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY))
-          }
-        : {
-            stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)),
-            similarity_boost: Math.max(0, Math.min(1, ELEVENLABS_SIMILARITY_BOOST)),
-            // Optional knobs (some voices/models benefit from these):
-            ...(Number.isFinite(ELEVENLABS_STYLE) ? { style: Math.max(0, Math.min(1, ELEVENLABS_STYLE)) } : {}),
-            ...(ELEVENLABS_SPEAKER_BOOST ? { use_speaker_boost: true } : {})
-          }
+      voice_settings: { stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)) }
     })
   });
 
@@ -1601,77 +1537,13 @@ async function openaiTtsToFile({ text, persona }) {
   return `/tts/${filename}`;
 }
 
-async function googleTtsToFile({ text }) {
-  if (!GOOGLE_TTS_API_KEY) return null;
-
-  const key = crypto
-    .createHash("sha256")
-    .update(`google::${GOOGLE_TTS_VOICE_NAME}::${text}`)
-    .digest("hex");
-  const filename = `${key}.mp3`;
-  const outPath = path.join(ttsDir, filename);
-  if (fs.existsSync(outPath)) return `/tts/${filename}`;
-
-  const url = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${encodeURIComponent(
-    GOOGLE_TTS_API_KEY
-  )}`;
-  const payload = {
-    input: { text },
-    voice: { languageCode: "he-IL", name: GOOGLE_TTS_VOICE_NAME },
-    audioConfig: { audioEncoding: "MP3" }
-  };
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    console.warn("Google TTS failed:", res.status, errText);
-    return null;
-  }
-
-  const json = await res.json();
-  const audioContent = json?.audioContent;
-  if (!audioContent) return null;
-
-  fs.writeFileSync(outPath, Buffer.from(audioContent, "base64"));
-  return `/tts/${filename}`;
-}
-
 function computeTtsCacheKey({ provider, text, persona }) {
   const p = String(provider || "").toLowerCase();
-  if (p === "gemini" || p === "google_ai_studio") {
-    return crypto
-      .createHash("sha256")
-      .update(`gemini::${GEMINI_TTS_MODEL}::${GEMINI_TTS_VOICE_NAME}::${text}`)
-      .digest("hex");
-  }
-  if (p === "google") {
-    return crypto
-      .createHash("sha256")
-      .update(`google::${GOOGLE_TTS_VOICE_NAME}::${text}`)
-      .digest("hex");
-  }
   if (p === "elevenlabs") {
     const voiceId =
       (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
-    // Include model + settings so changing env doesn't keep serving stale cached audio.
-    const settingsSig = IS_ELEVEN_V3
-      ? [ELEVENLABS_MODEL_ID, ELEVENLABS_OUTPUT_FORMAT || "", ELEVENLABS_LANGUAGE_CODE || "", ELEVENLABS_STABILITY].join(
-          "|"
-        )
-      : [
-          ELEVENLABS_MODEL_ID,
-          ELEVENLABS_OUTPUT_FORMAT || "",
-          ELEVENLABS_LANGUAGE_CODE || "",
-          Number.isFinite(ELEVENLABS_STABILITY) ? ELEVENLABS_STABILITY : "",
-          Number.isFinite(ELEVENLABS_SIMILARITY_BOOST) ? ELEVENLABS_SIMILARITY_BOOST : "",
-          Number.isFinite(ELEVENLABS_STYLE) ? ELEVENLABS_STYLE : "",
-          ELEVENLABS_SPEAKER_BOOST ? "boost" : "no-boost"
-        ].join("|");
+    // Include model + stability so changing env doesn't keep serving stale cached audio.
+    const settingsSig = [ELEVENLABS_MODEL_ID, ELEVENLABS_OUTPUT_FORMAT || "", ELEVENLABS_LANGUAGE_CODE || "", ELEVENLABS_STABILITY].join("|");
     return crypto.createHash("sha256").update(`${voiceId}::${settingsSig}::${text}`).digest("hex");
   }
   // openai
@@ -1694,20 +1566,6 @@ function findCachedAudioByKey(key) {
 async function kickoffTtsGeneration({ provider, text, persona }) {
   const p = String(provider || "").toLowerCase();
   try {
-    if (p === "gemini" || p === "google_ai_studio") {
-      await geminiTtsToFile({
-        apiKey: GEMINI_API_KEY,
-        model: GEMINI_TTS_MODEL,
-        voiceName: GEMINI_TTS_VOICE_NAME,
-        text,
-        outDir: ttsDir
-      });
-      return;
-    }
-    if (p === "google") {
-      await googleTtsToFile({ text });
-      return;
-    }
     if (p === "elevenlabs") {
       await elevenlabsTtsToFile({ text, persona });
       return;
@@ -1723,52 +1581,13 @@ async function ttsToPath({ text, persona }) {
     const ms = Date.now() - started;
     console.log(`[tts] provider=${provider} persona=${persona ?? "n/a"} ms=${ms} result=${result ?? "null"}`);
   };
-
-  // בחירת ספק מפורשת (מומלץ כדי להימנע מהפתעות)
-  if (TTS_PROVIDER === "gemini" || TTS_PROVIDER === "google_ai_studio") {
-    const geminiPromise = geminiTtsToFile({
-      apiKey: GEMINI_API_KEY,
-      model: GEMINI_TTS_MODEL,
-      voiceName: GEMINI_TTS_VOICE_NAME,
-      text,
-      outDir: ttsDir
-    });
-    const timeoutPromise = new Promise((resolve) =>
-      setTimeout(() => resolve(null), GEMINI_TTS_TIMEOUT_MS)
-    );
-    const out = await Promise.race([geminiPromise, timeoutPromise]);
-    debug("gemini", out);
-    if (out) return out;
-    // fallback מהיר כדי שלא יהיה "שקט" / timeout של Twilio
-    const fb = await openaiTtsToFile({ text, persona });
-    debug("openai(fallback_from_gemini)", fb);
-    return fb;
-  }
-  if (TTS_PROVIDER === "google") {
-    const out = await googleTtsToFile({ text });
-    debug("google", out);
-    return out;
-  }
-  if (TTS_PROVIDER === "elevenlabs") {
-    const out = await elevenlabsTtsToFile({ text, persona });
-    debug("elevenlabs", out);
-    return out;
-  }
-  if (TTS_PROVIDER === "openai") {
-    const out = await openaiTtsToFile({ text, persona });
-    debug("openai", out);
-    return out;
-  }
-
-  // ברירת מחדל: ElevenLabs אם הוגדר, אחרת OpenAI
-  const eleven = await elevenlabsTtsToFile({ text, persona });
-  if (eleven) {
-    debug("elevenlabs(fallback)", eleven);
-    return eleven;
-  }
-  const out = await openaiTtsToFile({ text, persona });
-  debug("openai(fallback)", out);
-  return out;
+  // Only ElevenLabs in this build (keep OpenAI TTS as a last-resort safety fallback).
+  const out = await elevenlabsTtsToFile({ text, persona });
+  debug("elevenlabs", out);
+  if (out) return out;
+  const fb = await openaiTtsToFile({ text, persona });
+  debug("openai(fallback)", fb);
+  return fb;
 }
 
 function getPublicBaseUrl(req) {
@@ -2323,7 +2142,7 @@ app.all("/twilio/record", async (req, res) => {
       // Don't hang up immediately if the user is still speaking / recording failed.
       if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
       await respondWithPlayAndMaybeHangup(req, res, {
-          text: persona === "female" ? "סבבה. רוצה שיחזרו אלייך מהעמותה עם פרטים מסודרים?" : "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?",
+          text: handoffQuestionTextForPersona(persona),
         persona,
           hangup: false,
           retry: retry + 1
@@ -2365,7 +2184,7 @@ app.all("/twilio/record", async (req, res) => {
     if (!recRes.ok) {
       if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
       await respondWithPlayAndMaybeHangup(req, res, {
-          text: persona === "female" ? "סבבה. רוצה שיחזרו אלייך מהעמותה עם פרטים מסודרים?" : "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?",
+          text: handoffQuestionTextForPersona(persona),
         persona,
           hangup: false,
           retry: retry + 1
@@ -2394,7 +2213,7 @@ app.all("/twilio/record", async (req, res) => {
     if (!speech) {
       if (retry < Math.max(0, NO_SPEECH_MAX_RETRIES)) {
       await respondWithPlayAndMaybeHangup(req, res, {
-          text: persona === "female" ? "סבבה. רוצה שיחזרו אלייך מהעמותה עם פרטים מסודרים?" : "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?",
+          text: handoffQuestionTextForPersona(persona),
         persona,
           hangup: false,
           retry: retry + 1
@@ -2481,10 +2300,9 @@ app.all("/twilio/record", async (req, res) => {
       try {
         upsertLead(db, { phone, status: interested ? "waiting" : "not_interested", callSid, persona });
       } catch {}
-      const toYou = persona === "female" ? "אלייך" : "אליך";
       const picked =
         (interested
-          ? `מעולה. אין בעיה — אני מעביר לעמותה ויחזרו ${toYou} בהקדם עם פרטים מסודרים. יום טוב ובשורות טובות.`
+          ? handoffConfirmCloseText({ persona })
           : "הבנתי, אין בעיה. תודה על הזמן, יום טוב.");
       const safe = sanitizeSayText(picked);
 
@@ -2617,7 +2435,7 @@ app.all("/twilio/play", async (req, res) => {
       if (attempt >= TTS_POLL_MAX) {
         // Never leave the caller in silence. Fallback to Twilio <Say> (Polly.Carmit) and continue.
         const xml = buildRecordTwiML({
-          sayText: "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?",
+          sayText: handoffQuestionTextForPersona("male"),
           playUrl: null,
           actionUrl: recordActionUrl(req, 0),
           playBeep: false,
@@ -2652,7 +2470,7 @@ app.all("/twilio/play", async (req, res) => {
     console.error(err);
     // Safety: never return "nothing". Continue the conversation even on errors.
     const xml = buildRecordTwiML({
-      sayText: "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?",
+      sayText: handoffQuestionTextForPersona("male"),
       playUrl: null,
       actionUrl: recordActionUrl(req, 0),
       playBeep: false,
@@ -2733,7 +2551,7 @@ async function streamAssistantToConversationRelay({
   userText
 }) {
   if (!openai) {
-    wsSendText(ws, { type: "text", token: "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?", last: true });
+    wsSendText(ws, { type: "text", token: handoffQuestionTextForPersona(persona), last: true });
     return;
   }
 
@@ -2778,7 +2596,7 @@ async function streamAssistantToConversationRelay({
 
       if (!pending && !full) {
         crLogAlways("llm empty stream output", { callSid, model: OPENAI_MODEL, userText: String(userText || "").slice(0, 120) });
-        pending = "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?";
+        pending = handoffQuestionTextForPersona(persona);
         full = pending;
       }
 
@@ -2787,12 +2605,12 @@ async function streamAssistantToConversationRelay({
       full = String(llm.rawText || "").trim();
       if (!full) {
         crLogAlways("llm empty output", { callSid, api: llm.api, model: OPENAI_MODEL, userText: String(userText || "").slice(0, 120) });
-        full = "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?";
+        full = handoffQuestionTextForPersona(persona);
       }
       wsSendText(ws, { type: "text", token: full, last: true, interruptible: true, preemptible: true });
     }
   } catch {
-    full = "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?";
+    full = handoffQuestionTextForPersona(persona);
     wsSendText(ws, { type: "text", token: full, last: true, interruptible: true, preemptible: true });
   }
 
@@ -2932,7 +2750,7 @@ wssConversationRelay.on("connection", (ws, req) => {
 
         await streamAssistantToConversationRelay({ ws, callSid, persona, userText: voicePrompt });
       })().catch((e) => {
-        wsSendJson(ws, { type: "text", token: "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?", last: true });
+        wsSendJson(ws, { type: "text", token: handoffQuestionTextForPersona(persona), last: true });
         if (DEBUG_TTS) console.warn("[cr] handler error:", e?.message || e);
       });
     }
@@ -2995,9 +2813,7 @@ wssMediaStream.on("connection", (ws, req) => {
 
   function confirmQuestionText() {
     // No-apology mode: never say "לא שמעתי/לא קלטתי/תחזור".
-    return persona === "female"
-      ? "סבבה. רוצה שיחזרו אלייך מהעמותה עם פרטים מסודרים?"
-      : "סבבה. רוצה שיחזרו אליך מהעמותה עם פרטים מסודרים?";
+    return handoffQuestionTextForPersona(persona);
   }
 
   async function sayFinalAndHangup({ text, outcome }) {
@@ -3466,7 +3282,7 @@ wssMediaStream.on("connection", (ws, req) => {
 
   function handoffQuestionText() {
     const { handoffFromPhrase } = settingsSnapshot();
-    const from = String(handoffFromPhrase || "מהעמותה").trim() || "מהעמותה";
+    const from = String(handoffFromPhrase || "מהצוות").trim() || "מהצוות";
     return persona === "female"
       ? `רוצה שיחזרו אלייך ${from} עם פרטים מסודרים?`
       : `רוצה שיחזרו אליך ${from} עם פרטים מסודרים?`;
@@ -3546,12 +3362,7 @@ wssMediaStream.on("connection", (ws, req) => {
       confirmCount = 0;
       persuasionAttempted = false;
       msLog("deterministic", { callSid, kind: "handoff_yes" });
-      const { handoffToPhrase } = settingsSnapshot();
-      const toPhrase = String(handoffToPhrase || "לעמותה").trim() || "לעמותה";
-      const finalText =
-        persona === "female"
-          ? `מעולה. אין בעיה — העברתי ${toPhrase} ויחזרו אלייך בהקדם. יום טוב ובשורות טובות.`
-          : `מעולה. אין בעיה — העברתי ${toPhrase} ויחזרו אליך בהקדם. יום טוב ובשורות טובות.`;
+      const finalText = handoffConfirmCloseText({ persona });
       await sayFinalAndHangup({ text: finalText, outcome: "interested" });
       return;
     }
@@ -3564,8 +3375,8 @@ wssMediaStream.on("connection", (ws, req) => {
         msLog("deterministic", { callSid, kind: "no_first_try" });
         const oneTry =
           persona === "female"
-            ? "מבין לגמרי. לפני שמסיימים — רוצה שיחזרו אלייך מהעמותה רק עם פרטים מסודרים?"
-            : "מבין לגמרי. לפני שמסיימים — רוצה שיחזרו אליך מהעמותה רק עם פרטים מסודרים?";
+            ? `מבין לגמרי. לפני שמסיימים — ${handoffQuestionText()}`
+            : `מבין לגמרי. לפני שמסיימים — ${handoffQuestionText()}`;
         await sayText(oneTry, { label: "reply" });
         return;
       }
@@ -4123,7 +3934,7 @@ server.listen(PORT, HOST, () => {
         "ברור, אני איתך. תגיד לי מתי נוח.",
         "שנייה אני איתך.",
         "אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב.",
-        "מעולה. אין בעיה — אני מעביר לעמותה ויחזרו אליך בהקדם עם פרטים מסודרים. יום טוב ובשורות טובות."
+        handoffConfirmCloseText({ persona: "male" })
       ];
       await Promise.all([
         elevenlabsTtsToUlaw8000({ text: gMale, persona: AGENT_VOICE_PERSONA }),
