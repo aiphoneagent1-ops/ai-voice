@@ -3169,29 +3169,6 @@ wssMediaStream.on("connection", (ws, req) => {
     let offsetBytes = 0;
     let lastByteAt = Date.now();
 
-    // Read loop (pull bytes from ElevenLabs)
-    (async () => {
-      try {
-        while (!closed && ws.readyState === ws.OPEN && currentPlay?.id === myId) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (value && value.byteLength) {
-            const b = Buffer.from(value);
-            totalBytes += b.length;
-            queued = queued.length ? Buffer.concat([queued, b]) : b;
-            lastByteAt = Date.now();
-          }
-        }
-      } catch (e) {
-        streamErr = String(e?.message || e || "");
-      } finally {
-        streamDone = true;
-        try {
-          reader.releaseLock();
-        } catch {}
-      }
-    })().catch(() => {});
-
     return await new Promise((resolve) => {
       currentPlay = {
         id: myId,
@@ -3200,6 +3177,32 @@ wssMediaStream.on("connection", (ws, req) => {
         meta: { framesSent: 0, offset: 0, totalBytes: 0, firstChunkAt: 0, playStartAt }
       };
       msLog("play start (streaming)", { callSid, streamSid, label, prebufferFrames });
+
+      // Read loop (pull bytes from ElevenLabs).
+      // IMPORTANT: start this only AFTER currentPlay is set; otherwise `currentPlay?.id === myId`
+      // is false and the loop exits immediately, causing playback to cut off after 1 frame.
+      (async () => {
+        try {
+          while (!closed && ws.readyState === ws.OPEN) {
+            if (currentPlay?.id !== myId) break; // newer playback started or we stopped
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value && value.byteLength) {
+              const b = Buffer.from(value);
+              totalBytes += b.length;
+              queued = queued.length ? Buffer.concat([queued, b]) : b;
+              lastByteAt = Date.now();
+            }
+          }
+        } catch (e) {
+          streamErr = String(e?.message || e || "");
+        } finally {
+          streamDone = true;
+          try {
+            reader.releaseLock();
+          } catch {}
+        }
+      })().catch(() => {});
 
       let started = false;
       const tick = () => {
