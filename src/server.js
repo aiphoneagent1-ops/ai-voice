@@ -1149,6 +1149,10 @@ function detectNotInterested(text) {
     "לא מעונינת",
     "לא מתאים",
     "לא תודה",
+    "ביי",
+    "ביי ביי",
+    "יאללה ביי",
+    "להתראות",
     "עזוב",
     "עזבי",
     "אין לי זמן",
@@ -3151,7 +3155,10 @@ wssMediaStream.on("connection", (ws, req) => {
     const CHUNK_BYTES = 160;
     const myId = ++playId;
     const playStartAt = Date.now();
-    const prebufferFrames = Math.max(1, Math.min(60, Number(MS_TTS_PREBUFFER_FRAMES) || 10));
+    // For replies we prefer starting faster (avoid perceived silence on slow streams).
+    // For greetings we can prebuffer more for smoothness.
+    const basePrebuffer = Math.max(1, Math.min(60, Number(MS_TTS_PREBUFFER_FRAMES) || 10));
+    const prebufferFrames = label === "reply" ? Math.min(basePrebuffer, 3) : basePrebuffer;
 
     // Queue and buffering (seed with the probed first chunk so we never "play" an empty stream)
     let queued = Buffer.from(stream.firstChunk || Buffer.alloc(0));
@@ -3381,6 +3388,36 @@ wssMediaStream.on("connection", (ws, req) => {
       (conversationState === "CHECK_INTEREST" || conversationState === "CLOSE") &&
       normSpeech === "כאן" &&
       String(speech || "").trim().length <= 4;
+
+    // If STT returns a very short / ambiguous single-word answer in the early stage,
+    // do NOT call the LLM (it can timeout and cause perceived silence).
+    // Instead, deterministically ask the handoff question to move the flow forward.
+    const sttVeryShort = String(speech || "").trim().length <= 5;
+
+    // Early short-utterance shortcut (CHECK_INTEREST):
+    // If the user likely answered (but STT is noisy), ask the handoff question directly.
+    // This avoids LLM timeouts on calls where Whisper returns 3–5 chars like "כאן"/"ביי".
+    if (
+      conversationState === "CHECK_INTEREST" &&
+      sttVeryShort &&
+      !detectOptOut(speech) &&
+      !detectTransferConsent(speech)
+    ) {
+      // If it's clearly a goodbye, end politely and mark not_interested.
+      if (detectNotInterested(speech)) {
+        msLog("deterministic", { callSid, kind: "short_goodbye_end", text: normSpeech });
+        await sayFinalAndHangup({ text: "אין בעיה, תודה על הזמן. יום טוב ובשורות טובות.", outcome: "not_interested" });
+        return;
+      }
+      msLog("deterministic", { callSid, kind: "short_ambiguous_ask_handoff", text: normSpeech });
+      conversationState = "CLOSE";
+      const q = handoffQuestionText();
+      try {
+        if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
+      } catch {}
+      await sayText(q, { label: "reply" });
+      return;
+    }
 
     // YES/INTEREST handling (two-step close):
     // - If user explicitly says "transfer details" -> close immediately.
