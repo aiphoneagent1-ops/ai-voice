@@ -4,7 +4,7 @@ export function renderAdminPage() {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>סוכן AI טלפוני לשירותי דת</title>
+    <title>סוכן AI טלפוני</title>
     <style>
       :root{
         --bg:#070a12;
@@ -126,8 +126,8 @@ export function renderAdminPage() {
     <header>
       <div class="wrap top">
         <div>
-          <h1>סוכן AI טלפוני לשירותי דת</h1>
-          <div class="sub">ניהול אנשי קשר, ידע ותסריטים — ומשם חיוג אוטומטי.</div>
+          <h1>סוכן AI טלפוני</h1>
+          <div class="sub">ניהול אנשי קשר, קמפיין (תפקיד), ידע ותסריטים — ומשם חיוג אוטומטי.</div>
         </div>
         <div class="stats" id="stats"></div>
       </div>
@@ -248,12 +248,12 @@ export function renderAdminPage() {
         </div>
 
         <div class="card">
-          <h2>הנדסת שיחה (מה הסוכן אומר בפועל)</h2>
+          <h2>קמפיין / תפקיד הסוכן (מה הסוכן אומר בפועל)</h2>
           <p class="status">מה שתכתוב כאן נשמר ומשפיע מיד על השיחות הבאות.</p>
 
           <div style="height:6px;"></div>
           <h3 style="margin:0 0 8px; font-size:14px;">מידע לסוכן (Knowledge Base)</h3>
-          <p class="status" style="margin-top:0;">זה המידע שהסוכן משתמש בו כדי לענות על שאלות. אם אין לך פרטים מדויקים (תאריך/כתובת), כתוב שהגורם הרלוונטי יחזור עם כל הפרטים לתיאום.</p>
+          <p class="status" style="margin-top:0;">כאן אתה כותב מי הסוכן, מה מציעים, מחירים/שעות/כתובות וכל מה שצריך. אם אין לך פרטים מדויקים — כתוב שהגורם הרלוונטי יחזור עם כל הפרטים לתיאום.</p>
           <textarea id="knowledgeBase" placeholder="כתוב כאן את כל הידע של הסוכן..."></textarea>
 
           <div style="height:12px;"></div>
@@ -274,11 +274,11 @@ export function renderAdminPage() {
           <label>פתיח קבוע (מה אומרים ישר כשעונים)</label>
           <div class="row" style="gap:12px; align-items:flex-start;">
             <div style="flex:1; min-width:240px;">
-              <label style="margin-top:0;">לגברים (שיעור תורה)</label>
+              <label style="margin-top:0;">לגברים</label>
               <textarea id="openingScriptMale" placeholder="פתיח לגברים..."></textarea>
             </div>
             <div style="flex:1; min-width:240px;">
-              <label style="margin-top:0;">לנשים (הפרשת חלה)</label>
+              <label style="margin-top:0;">לנשים</label>
               <textarea id="openingScriptFemale" placeholder="פתיח לנשים..."></textarea>
             </div>
           </div>
