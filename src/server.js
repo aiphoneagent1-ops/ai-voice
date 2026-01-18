@@ -3370,6 +3370,15 @@ wssMediaStream.on("connection", (ws, req) => {
       state: conversationState
     });
 
+    // Hebrew phone STT quirk:
+    // Whisper often mishears a short "כן" as "כאן." over μ-law phone audio.
+    // We accept this ONLY in the early/closing confirmation steps to keep the flow moving.
+    const normSpeech = normalizeIntentText(speech);
+    const yesMisheardAsKan =
+      (conversationState === "CHECK_INTEREST" || conversationState === "CLOSE") &&
+      normSpeech === "כאן" &&
+      String(speech || "").trim().length <= 4;
+
     // YES/INTEREST handling (two-step close):
     // - If user explicitly says "transfer details" -> close immediately.
     // - Otherwise: first "yes/interest" -> ask the handoff question (CLOSE state),
@@ -3383,7 +3392,7 @@ wssMediaStream.on("connection", (ws, req) => {
         return;
       }
 
-      if (detectAffirmativeShort(speech) || detectInterested(speech)) {
+      if (detectAffirmativeShort(speech) || detectInterested(speech) || yesMisheardAsKan) {
         confirmCount = 0;
         persuasionAttempted = false;
 
