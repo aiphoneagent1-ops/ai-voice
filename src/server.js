@@ -324,9 +324,11 @@ const MS_FORCE_SHORT_GREETING = process.env.MS_FORCE_SHORT_GREETING === "1" || p
 // Auto-hangup after final line (after mark ack)
 const MS_AUTO_HANGUP = process.env.MS_AUTO_HANGUP !== "0" && process.env.MS_AUTO_HANGUP !== "false";
 // Latency tuning: lower silence threshold -> faster "turn taking"
-const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 350);
+// Tighten default end-of-speech to reduce perceived delay.
+// You can relax this if callers get cut off: MS_END_SILENCE_MS=350-450.
+const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 300);
 // Faster turn-taking for short utterances (e.g. "כן") without waiting full silence window.
-const MS_FAST_END_SILENCE_MS = Number(process.env.MS_FAST_END_SILENCE_MS || 220);
+const MS_FAST_END_SILENCE_MS = Number(process.env.MS_FAST_END_SILENCE_MS || 200);
 const MS_FAST_END_MAX_UTTERANCE_MS = Number(process.env.MS_FAST_END_MAX_UTTERANCE_MS || 1200);
 // Disable the "thinking" backchannel by default (it can feel interruptive on real calls).
 // If you ever want it back: set MS_THINKING_DELAY_MS (e.g. 380).
@@ -338,6 +340,9 @@ const MS_FORCE_FINALIZE_PAUSE_MS = Number(process.env.MS_FORCE_FINALIZE_PAUSE_MS
 // Safety: cap utterance length so we don't buffer indefinitely.
 const MS_MAX_UTTERANCE_MS = Number(process.env.MS_MAX_UTTERANCE_MS || 2500);
 const ELEVENLABS_STREAM_OUTPUT_FORMAT = String(process.env.ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000").trim();
+// When using streaming TTS, we prebuffer a few frames before starting playback to avoid underflow.
+// 10 frames * 20ms = 200ms buffer (good tradeoff for low perceived latency).
+const MS_TTS_PREBUFFER_FRAMES = Number(process.env.MS_TTS_PREBUFFER_FRAMES || 10);
 // ElevenLabs low-latency is optional. Some accounts/voices behave differently with this flag.
 // If unset, we do NOT send optimize_streaming_latency at all (safe default).
 const ELEVENLABS_OPTIMIZE_STREAMING_LATENCY_RAW = String(process.env.ELEVENLABS_OPTIMIZE_STREAMING_LATENCY || "").trim();
@@ -672,6 +677,80 @@ async function elevenlabsTtsToUlaw8000({ text, persona }) {
   _ulawMemCache.set(cacheKey, buf);
   putUlawToDisk(cacheKey, buf);
   return buf; // raw mulaw/8000 bytes
+}
+
+async function elevenlabsTtsToUlaw8000Stream({ text, persona }) {
+  if (!ELEVENLABS_API_KEY) return null;
+  const voiceId =
+    (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
+  if (!voiceId) return null;
+
+  const baseUrl = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${encodeURIComponent(
+    ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000"
+  )}`;
+  const urlWithOpt =
+    ELEVENLABS_OPTIMIZE_STREAMING_LATENCY == null
+      ? null
+      : `${baseUrl}&optimize_streaming_latency=${encodeURIComponent(String(ELEVENLABS_OPTIMIZE_STREAMING_LATENCY))}`;
+
+  const bodyJson = JSON.stringify({
+    text,
+    model_id: ELEVENLABS_MODEL_ID,
+    ...(ELEVENLABS_LANGUAGE_CODE ? { language_code: ELEVENLABS_LANGUAGE_CODE } : {}),
+    voice_settings: IS_ELEVEN_V3
+      ? { stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)) }
+      : {
+          stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)),
+          similarity_boost: Math.max(0, Math.min(1, ELEVENLABS_SIMILARITY_BOOST)),
+          ...(Number.isFinite(ELEVENLABS_STYLE) ? { style: Math.max(0, Math.min(1, ELEVENLABS_STYLE)) } : {}),
+          ...(ELEVENLABS_SPEAKER_BOOST ? { use_speaker_boost: true } : {})
+        }
+  });
+
+  const doFetch = (u) =>
+    fetch(u, {
+      method: "POST",
+      headers: {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        Accept: "audio/x-mulaw"
+      },
+      body: bodyJson
+    });
+
+  let res = null;
+  if (urlWithOpt) {
+    res = await doFetch(urlWithOpt);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      console.warn("ElevenLabs ulaw TTS stream failed (optimize_streaming_latency):", res.status, errText);
+      res = await doFetch(baseUrl);
+    }
+  } else {
+    res = await doFetch(baseUrl);
+  }
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    console.warn("ElevenLabs ulaw TTS stream failed:", res.status, errText);
+    return null;
+  }
+
+  const ct = String(res.headers.get("content-type") || "").toLowerCase();
+  if (ct && (ct.includes("application/json") || ct.includes("text/"))) {
+    const errText = await res.text().catch(() => "");
+    console.warn("ElevenLabs ulaw TTS stream returned non-audio:", ct, errText.slice(0, 300));
+    return null;
+  }
+
+  // Node fetch returns a Web ReadableStream; we can consume it via getReader().
+  if (!res.body || typeof res.body.getReader !== "function") {
+    // Fallback: buffer fully (should be rare).
+    const buf = Buffer.from(await res.arrayBuffer());
+    return { buffered: buf };
+  }
+
+  return { reader: res.body.getReader(), contentType: ct };
 }
 function startsWithLang(code, prefix) {
   return new RegExp(`^${String(prefix).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-|$)`, "i").test(String(code || ""));
@@ -3186,11 +3265,183 @@ wssMediaStream.on("connection", (ws, req) => {
     const safe = sanitizeSayText(String(text || "").trim());
     if (!safe) return;
     const tGen0 = Date.now();
-    const ulaw = await elevenlabsTtsToUlaw8000({ text: safe, persona: AGENT_VOICE_PERSONA });
+
+    // Fast path: cache hit (memory/disk) → play immediately
+    const cacheKey = computeElevenUlawCacheKey({ text: safe, persona: AGENT_VOICE_PERSONA });
+    const cached = _ulawMemCache.get(cacheKey) || getUlawFromDisk(cacheKey);
+    if (cached && cached.length) {
+      if (!_ulawMemCache.get(cacheKey)) _ulawMemCache.set(cacheKey, cached);
+      const pr = await playUlaw(cached, { label });
+      return { ...pr, genMs: 0, cached: true };
+    }
+
+    // Streaming path: start playback while ElevenLabs is still producing audio.
+    const stream = await elevenlabsTtsToUlaw8000Stream({ text: safe, persona: AGENT_VOICE_PERSONA });
     const genMs = Date.now() - tGen0;
-    if (!ulaw) return;
-    const pr = await playUlaw(ulaw, { label });
-    return { ...pr, genMs };
+    if (!stream) return;
+
+    // If we had to buffer (no reader), just play normally.
+    if (stream.buffered) {
+      _ulawMemCache.set(cacheKey, stream.buffered);
+      putUlawToDisk(cacheKey, stream.buffered);
+      const pr = await playUlaw(stream.buffered, { label });
+      return { ...pr, genMs, streamed: false };
+    }
+
+    const reader = stream.reader;
+    if (!reader) return;
+
+    // Initialize playback state (similar to playUlaw) but with a streaming queue.
+    if (thinkingTimer) {
+      try { clearTimeout(thinkingTimer); } catch {}
+      thinkingTimer = null;
+    }
+    stopPlayback({ clear: true });
+    playing = true;
+    playingSince = Date.now();
+    agentSpeaking = true;
+    pendingEnableListenOnMark = true;
+    allowListen = false;
+
+    const CHUNK_BYTES = 160;
+    const myId = ++playId;
+    const playStartAt = Date.now();
+    const prebufferFrames = Math.max(1, Math.min(60, Number(MS_TTS_PREBUFFER_FRAMES) || 10));
+
+    // Queue and buffering
+    let queued = Buffer.alloc(0);
+    let streamDone = false;
+    let streamErr = "";
+    let totalBytes = 0;
+    let framesSent = 0;
+    let offsetBytes = 0;
+
+    // Read loop (pull bytes from ElevenLabs)
+    (async () => {
+      try {
+        while (!closed && ws.readyState === ws.OPEN && currentPlay?.id === myId) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value && value.byteLength) {
+            const b = Buffer.from(value);
+            totalBytes += b.length;
+            queued = queued.length ? Buffer.concat([queued, b]) : b;
+          }
+        }
+      } catch (e) {
+        streamErr = String(e?.message || e || "");
+      } finally {
+        streamDone = true;
+        try {
+          reader.releaseLock();
+        } catch {}
+      }
+    })().catch(() => {});
+
+    return await new Promise((resolve) => {
+      currentPlay = {
+        id: myId,
+        resolve,
+        label,
+        meta: { framesSent: 0, offset: 0, totalBytes: 0, firstChunkAt: 0, playStartAt }
+      };
+      msLog("play start (streaming)", { callSid, streamSid, label, prebufferFrames });
+
+      let started = false;
+      const tick = () => {
+        if (closed || !streamSid || ws.readyState !== ws.OPEN) {
+          stopPlayback({ clear: false });
+          return;
+        }
+        if (currentPlay?.id !== myId) return;
+
+        // Wait until we have enough to start (avoid underflow silence).
+        if (!started) {
+          const haveFrames = Math.floor(queued.length / CHUNK_BYTES);
+          if (haveFrames < prebufferFrames) {
+            if (streamDone && queued.length < CHUNK_BYTES) {
+              // Nothing meaningful arrived; end cleanly.
+              const markName = `done_${label}_${myId}_${Date.now()}`;
+              lastMarkName = markName;
+              msLog("tx mark", { name: markName });
+              wsSendToTwilio({ event: "mark", streamSid, mark: { name: markName } });
+              const done = currentPlay;
+              currentPlay = null;
+              playing = false;
+              if (playTimer) clearInterval(playTimer);
+              playTimer = null;
+              agentSpeaking = true; // until mark ack
+              resolve({ ok: true, label, bytes: totalBytes, chunks: framesSent, markName, genMs, streamed: true, empty: true, streamErr });
+              return;
+            }
+            return;
+          }
+          started = true;
+        }
+
+        if (queued.length < CHUNK_BYTES) {
+          if (streamDone) {
+            // Flush any remainder by padding to a full frame (Twilio expects 160 bytes).
+            if (queued.length > 0) {
+              const pad = Buffer.alloc(CHUNK_BYTES - queued.length, 0xff); // μlaw silence-ish
+              queued = Buffer.concat([queued, pad]);
+            } else {
+              const markName = `done_${label}_${myId}_${Date.now()}`;
+              lastMarkName = markName;
+              msLog("tx mark", { name: markName });
+              wsSendToTwilio({ event: "mark", streamSid, mark: { name: markName } });
+              const done = currentPlay;
+              currentPlay = null;
+              playing = false;
+              if (playTimer) clearInterval(playTimer);
+              playTimer = null;
+              // Cache what we got (best-effort)
+              try {
+                if (totalBytes > 0 && totalBytes <= 2_000_000) {
+                  // We didn't persist the full byte stream; keep only if we managed to accumulate it (not guaranteed).
+                }
+              } catch {}
+              resolve({
+                ok: true,
+                label,
+                bytes: totalBytes,
+                chunks: framesSent,
+                markName,
+                genMs,
+                streamed: true,
+                streamErr
+              });
+              return;
+            }
+          } else {
+            return; // wait for more bytes
+          }
+        }
+
+        const chunk = queued.subarray(0, CHUNK_BYTES);
+        queued = queued.subarray(CHUNK_BYTES);
+        wsSendToTwilio({
+          event: "media",
+          streamSid,
+          media: { payload: Buffer.from(chunk).toString("base64") }
+        });
+        framesSent++;
+        offsetBytes += CHUNK_BYTES;
+        if (currentPlay?.meta) {
+          currentPlay.meta.framesSent = framesSent;
+          currentPlay.meta.offset = offsetBytes;
+          currentPlay.meta.totalBytes = totalBytes;
+        }
+        if (framesSent === 1) {
+          if (currentPlay?.meta) currentPlay.meta.firstChunkAt = Date.now();
+          msLog("sent first audio chunk (streaming)", { callSid, streamSid, label });
+        }
+      };
+
+      tick();
+      if (!currentPlay || currentPlay.id !== myId) return;
+      playTimer = setInterval(tick, 20);
+    });
   }
 
   function handoffQuestionText() {
