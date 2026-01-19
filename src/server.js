@@ -397,13 +397,24 @@ async function postLeadToGoogleSheets(payload) {
     return { ok: false, skipped: true, reason: "missing_fetch" };
   }
   try {
-    const res = await fetch(GS_WEBHOOK_URL, {
+    // Apps Script Web App does not reliably expose custom request headers.
+    // To make auth robust, also pass the secret as a query param and in the JSON body (best-effort).
+    const url =
+      GS_WEBHOOK_SECRET
+        ? `${GS_WEBHOOK_URL}${GS_WEBHOOK_URL.includes("?") ? "&" : "?"}secret=${encodeURIComponent(GS_WEBHOOK_SECRET)}`
+        : GS_WEBHOOK_URL;
+    const bodyObj =
+      GS_WEBHOOK_SECRET && payload && typeof payload === "object"
+        ? { ...payload, secret: GS_WEBHOOK_SECRET }
+        : payload;
+
+    const res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         ...(GS_WEBHOOK_SECRET ? { "X-Webhook-Secret": GS_WEBHOOK_SECRET } : {})
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(bodyObj)
     });
     if (!res.ok) {
       const t = await res.text().catch(() => "");
