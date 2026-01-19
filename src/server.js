@@ -1785,7 +1785,9 @@ function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
     FLOW_ASK_PARTICIPANTS: "כמה משתתפים צפויים בערך?",
     FLOW_PARTICIPANTS_OK: "מצוין. נציגה תחזור אלייך בהקדם עם כל הפרטים.",
     FLOW_PARTICIPANTS_LOW: `כדי שזה יעבוד אנחנו צריכים מינימום ${minParticipants} משתתפים. תצליחי להגיע ל־${minParticipants}?`,
-    FLOW_PARTICIPANTS_LOW_FALLBACK: "מבין. בכל מקרה נציגה תחזור אלייך בהקדם ותנסה לעזור לגבי הפרטים.",
+    // IMPORTANT: this line is appended with the handoff question in code when we still need consent.
+    // Keep it non-contradictory ("so that a rep can call you...") rather than "a rep will call you..." unconditionally.
+    FLOW_PARTICIPANTS_LOW_FALLBACK: "הבנתי. כדי שנוכל לחזור אלייך עם כל הפרטים ולעזור גם לגבי המשתתפות—",
     FLOW_COOLDOWN_RULE: `בדרך כלל אפשר לקבוע שוב רק אחרי מינימום ${cooldownMonths} חודשים.`,
     FLOW_WOMEN_ONLY: "שלום, כרגע השיחה מיועדת לנשים בלבד. יום טוב.",
     // Optional: acknowledgments to make the conversation feel like active listening (override in KB if desired)
@@ -2068,8 +2070,8 @@ function handoffConfirmCloseText({ persona }) {
   const toPhrase = String(handoffToPhrase || "לצוות").trim() || "לצוות";
   const fromPhrase = String(handoffFromPhrase || "מהצוות").trim() || "מהצוות";
   return persona === "female"
-    ? `מעולה. אין בעיה — העברתי ${toPhrase} ויחזרו אלייך ${fromPhrase} בהקדם. יום טוב ובשורות טובות.`
-    : `מעולה. אין בעיה — העברתי ${toPhrase} ויחזרו אליך ${fromPhrase} בהקדם. יום טוב ובשורות טובות.`;
+    ? `מעולה. העברתי ${toPhrase} ויחזרו אלייך ${fromPhrase} בהקדם. יום טוב ובשורות טובות.`
+    : `מעולה. העברתי ${toPhrase} ויחזרו אליך ${fromPhrase} בהקדם. יום טוב ובשורות טובות.`;
 }
 
 async function elevenlabsTtsToFile({ text, persona }) {
