@@ -1639,6 +1639,63 @@ function extractFlowLinesFromKnowledgeBase(kbRaw) {
   return out;
 }
 
+function extractApprovedNamesFromKnowledgeBase(kbRaw) {
+  const kb = String(kbRaw || "");
+  if (!kb) return [];
+  const lines = kb.split(/\r?\n/);
+  const out = [];
+  let inNames = false;
+  for (const raw of lines) {
+    const line = String(raw || "").trim();
+    if (!line) {
+      // blank line ends the section
+      if (inNames) break;
+      continue;
+    }
+    if (/^רשימת\s+שמות\s+מאושרים/i.test(line)) {
+      inNames = true;
+      continue;
+    }
+    if (!inNames) continue;
+    // bullet items: "- ___"
+    const m = line.match(/^-+\s*(.+)$/);
+    if (!m) {
+      // stop if we reached another heading
+      if (/^\[.+\]$/.test(line) || /:$/.test(line)) break;
+      continue;
+    }
+    const name = String(m[1] || "").trim().replace(/^"|"$/g, "");
+    if (!name) continue;
+    if (name === "___" || name === "__" || name === "_") continue;
+    out.push(name);
+  }
+  // de-dupe + keep short reasonable names only
+  const uniq = Array.from(new Set(out.map((s) => s.trim()).filter(Boolean)));
+  return uniq.filter((n) => n.length >= 2 && n.length <= 30);
+}
+
+function detectRabbinicalInquiry(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  // "רבנית X", "מדריכה X", "הרבנית מגיעה?", "מי הרבנית?"
+  const triggers = ["רבנית", "רב", "מדריכה", "מדריכות", "רבניות", "שם הרבנית", "מי הרבנית"];
+  if (triggers.some((p) => t.includes(p))) return true;
+  // Common question forms about names
+  const q = ["מי", "האם", "יש", "קוראים", "איך קוראים", "מגיעה", "מגיע"];
+  return q.some((p) => t.includes(p));
+}
+
+function matchApprovedNameInText({ kb, userText }) {
+  const names = extractApprovedNamesFromKnowledgeBase(kb);
+  if (!names.length) return null;
+  const raw = String(userText || "");
+  for (const n of names) {
+    if (!n) continue;
+    if (raw.includes(n)) return n;
+  }
+  return null;
+}
+
 function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
   const flow = extractFlowLinesFromKnowledgeBase(kb);
   // Provide safe GENERIC defaults (white-label; can be overridden in KB).
@@ -1660,7 +1717,13 @@ function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
     // Optional: extra confirmation line after the date (matches the PDF style).
     FLOW_DATE_CONFIRM: "מצוין. אנחנו נבדוק את התאריך ביומן ונציגה תחזור אלייך בהקדם עם כל הפרטים.",
     // Optional: what to do when user asks about time/when; keep it short and promise a callback.
-    FLOW_WHEN_UNKNOWN: "כרגע אין לי את כל השעות המדויקות. נציגה תחזור אלייך לתיאום עם כל הפרטים."
+    FLOW_WHEN_UNKNOWN: "כרגע אין לי את כל השעות המדויקות. נציגה תחזור אלייך לתיאום עם כל הפרטים.",
+    // Names policy (rabbinical/instructor names):
+    // - Never list names proactively.
+    // - If asked about a specific name and it's in the approved list -> confirm.
+    // - Otherwise -> say we'll check and call back.
+    FLOW_NAME_CONFIRMED: "כן, השם הזה מוכר אצלנו. נבדוק מול היומן ויחזרו אלייך עם כל הפרטים.",
+    FLOW_NAME_UNKNOWN: "אקח את השם ואבדוק מול היומן, ויחזרו אלייך."
   };
   return { ...defaults, ...flow };
 }
@@ -3975,6 +4038,29 @@ wssMediaStream.on("connection", (ws, req) => {
       try {
         if (callSid && phone) addMessage(db, { callSid, role: "user", content: speech });
       } catch {}
+
+      // Rabbinical/instructor names policy enforcement:
+      // - Do NOT list names proactively.
+      // - If user asks about a specific name: confirm only if it's in the approved list in KB,
+      //   otherwise say we'll check and call back.
+      if (detectRabbinicalInquiry(speech)) {
+        const askedName = matchApprovedNameInText({ kb: snap.knowledgeBase, userText: speech });
+        const base = askedName ? flowText.FLOW_NAME_CONFIRMED : flowText.FLOW_NAME_UNKNOWN;
+        let q0 = "";
+        if (guidedStep === "ASK_PURPOSE") q0 = flowText.FLOW_ASK_PURPOSE;
+        else if (guidedStep === "ASK_DATE") q0 = flowText.FLOW_ASK_DATE;
+        else if (guidedStep === "ASK_PARTICIPANTS") q0 = flowText.FLOW_ASK_PARTICIPANTS;
+        else if (guidedStep === "PARTICIPANTS_PERSUADE") q0 = flowText.FLOW_PARTICIPANTS_LOW;
+        else if (guidedStep === "CLOSE") q0 = handoffQuestionText();
+        const msg = limitPhoneReply(`${sanitizeSayText(base)} ${q0}`.trim(), 260);
+        msLog("guided", { callSid, kind: askedName ? "name_confirmed" : "name_unknown", step: guidedStep });
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+        } catch {}
+        guidedLastQuestionAt = Date.now();
+        await sayText(msg, { label: "reply" });
+        return;
+      }
 
       // Smalltalk/clarification layer: keep the call natural without breaking the deterministic flow.
       // - If user says "מה נשמע/מה שלומך" → respond politely and re-ask the current step question.
