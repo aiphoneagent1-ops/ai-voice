@@ -2499,6 +2499,30 @@ app.post("/api/contacts/remove", (req, res) => {
   res.json({ ok: true, deleted: Number(info?.changes || 0) });
 });
 
+// Bulk delete contacts (admin)
+app.post("/api/contacts/delete_many", (req, res) => {
+  const phones = Array.isArray(req.body?.phones) ? req.body.phones : [];
+  if (!phones.length) return res.status(400).json({ error: "missing phones" });
+  const normalized = phones.map((p) => normalizePhoneE164IL(String(p || "").trim())).filter(Boolean);
+  if (!normalized.length) return res.status(400).json({ error: "no valid phones" });
+  const stmt = db.prepare(`DELETE FROM contacts WHERE phone = ?`);
+  const tx = db.transaction((arr) => {
+    let deleted = 0;
+    for (const ph of arr) deleted += Number(stmt.run(ph)?.changes || 0);
+    return deleted;
+  });
+  const deleted = tx(normalized);
+  res.json({ ok: true, deleted });
+});
+
+// Delete ALL contacts (admin) - safety: requires confirm token
+app.post("/api/contacts/delete_all", (req, res) => {
+  const confirm = String(req.body?.confirm || "").trim();
+  if (confirm !== "DELETE_ALL") return res.status(400).json({ error: "missing confirm" });
+  const info = db.prepare(`DELETE FROM contacts`).run();
+  res.json({ ok: true, deleted: Number(info?.changes || 0) });
+});
+
 function ensureVoicePath(url) {
   if (!url) return "";
   const u = String(url).trim().replace(/\/$/, "");

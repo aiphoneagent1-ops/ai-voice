@@ -187,6 +187,9 @@ export function renderAdminPage() {
               <table>
                 <thead>
                   <tr>
+                    <th style="width:42px; text-align:center;">
+                      <input type="checkbox" id="selectAllContacts" title="בחר הכל" />
+                    </th>
                     <th>פעולות</th>
                     <th>שם</th>
                     <th>טלפון</th>
@@ -196,6 +199,13 @@ export function renderAdminPage() {
                 </thead>
                 <tbody id="contactsBody"></tbody>
               </table>
+            </div>
+            <div class="row" style="margin-top:10px; justify-content:space-between;">
+              <div class="row" style="gap:8px;">
+                <button class="secondary" id="deleteSelectedBtn">מחק נבחרים</button>
+                <button class="secondary" id="deleteAllBtn" style="border-color: rgba(255,124,124,.35);">מחק הכל</button>
+              </div>
+              <span class="status" id="bulkStatus"></span>
             </div>
           </div>
 
@@ -648,6 +658,7 @@ export function renderAdminPage() {
           });
           const body = $("contactsBody");
           body.innerHTML = "";
+          if($("selectAllContacts")) $("selectAllContacts").checked = false;
           for(const r of rows){
             const tr = document.createElement("tr");
             const isNew = (r.dial_status || "new") === "new";
@@ -673,6 +684,7 @@ export function renderAdminPage() {
               '</svg></button>';
 
             tr.innerHTML =
+              '<td style="text-align:center;"><input type="checkbox" class="contactChk" data-phone="'+(r.phone||"")+'"/></td>' +
               '<td><div class="row" style="gap:6px;">'+ dialBtn + dncBtn + delBtn +'</div></td>' +
               '<td><strong>'+(r.first_name || "—")+'</strong></td>' +
               '<td>'+ (r.phone || "—") +'</td>' +
@@ -890,6 +902,47 @@ export function renderAdminPage() {
       $("refreshListBtn").addEventListener("click", loadContacts);
       $("search").addEventListener("input", () => { if($("listSection").style.display !== "none") loadContacts(); });
       if($("dialFilter")) $("dialFilter").addEventListener("change", () => { if($("listSection").style.display !== "none") loadContacts(); });
+
+      // Bulk select + delete
+      $("selectAllContacts").addEventListener("change", () => {
+        const v = $("selectAllContacts").checked;
+        document.querySelectorAll(".contactChk").forEach((c) => { c.checked = v; });
+      });
+      $("deleteSelectedBtn").addEventListener("click", async () => {
+        const selected = Array.from(document.querySelectorAll(".contactChk"))
+          .filter((c) => c.checked)
+          .map((c) => c.getAttribute("data-phone"))
+          .filter(Boolean);
+        if(!selected.length) return setStatus($("bulkStatus"), "לא נבחרו מספרים", false);
+        const ok = window.confirm("למחוק " + selected.length + " אנשי קשר שנבחרו?");
+        if(!ok) return;
+        try{
+          const out = await api("/api/contacts/delete_many", { method:"POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ phones: selected }) });
+          setStatus($("bulkStatus"), "נמחקו " + (out.deleted ?? 0) + " אנשי קשר", true);
+          toast("נמחק", "נמחקו " + (out.deleted ?? 0) + " אנשי קשר", true);
+          await loadContacts();
+          await loadAll();
+        }catch(e){
+          setStatus($("bulkStatus"), "שגיאה: " + e.message, false);
+          toast("שגיאה", e.message, false);
+        }
+      });
+      $("deleteAllBtn").addEventListener("click", async () => {
+        const ok1 = window.confirm("למחוק את כל אנשי הקשר? זה בלתי הפיך.");
+        if(!ok1) return;
+        const ok2 = window.prompt("כדי לאשר, כתוב בדיוק: DELETE_ALL");
+        if(ok2 !== "DELETE_ALL") return setStatus($("bulkStatus"), "בוטל", false);
+        try{
+          const out = await api("/api/contacts/delete_all", { method:"POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ confirm: "DELETE_ALL" }) });
+          setStatus($("bulkStatus"), "נמחקו " + (out.deleted ?? 0) + " אנשי קשר", true);
+          toast("נמחק הכל", "נמחקו " + (out.deleted ?? 0) + " אנשי קשר", true);
+          await loadContacts();
+          await loadAll();
+        }catch(e){
+          setStatus($("bulkStatus"), "שגיאה: " + e.message, false);
+          toast("שגיאה", e.message, false);
+        }
+      });
 
       $("showLeadsBtn").addEventListener("click", async () => {
         const sec = $("leadsSection");
