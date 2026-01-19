@@ -3026,6 +3026,7 @@ wssMediaStream.on("connection", (ws, req) => {
   /** @type {"ASK_PURPOSE"|"ASK_DATE"|"ASK_PARTICIPANTS"|"PARTICIPANTS_PERSUADE"|"CLOSE"} */
   let guidedStep = "ASK_PURPOSE";
   let guidedPurpose = "";
+  let guidedAskedPurposeQ = false;
   let guidedDateText = "";
   let guidedParticipants = null;
   let participantsPersuadeAsked = false;
@@ -3673,8 +3674,24 @@ wssMediaStream.on("connection", (ws, req) => {
 
       // Step machine
       if (guidedStep === "ASK_PURPOSE") {
-        // Treat any non-empty response as "purpose" and move on.
-        guidedPurpose = guidedPurpose || String(speech || "").trim();
+        const s = String(speech || "").trim();
+        const ns = normalizeIntentText(s);
+        const isShortYesLike = ns.length <= 6 && (detectAffirmativeShort(s) || ns === "כאן" || ns === "כן");
+
+        // If the user just said "כן"/short acknowledgment, ask the purpose question first.
+        if (!guidedPurpose && !guidedAskedPurposeQ && isShortYesLike) {
+          guidedAskedPurposeQ = true;
+          const q0 = limitPhoneReply(flowText.FLOW_ASK_PURPOSE, 160);
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
+          } catch {}
+          await sayText(q0, { label: "reply" });
+          return;
+        }
+
+        // Otherwise, treat this response as the purpose and move on.
+        guidedPurpose = guidedPurpose || s;
+        guidedAskedPurposeQ = true;
         guidedStep = "ASK_DATE";
         const q = limitPhoneReply(flowText.FLOW_ASK_DATE, 160);
         try {
