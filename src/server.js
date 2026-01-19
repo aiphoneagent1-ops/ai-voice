@@ -365,6 +365,11 @@ const MS_BARGE_IN_FRAMES = Number(process.env.MS_BARGE_IN_FRAMES || 15); // 15 f
 const MS_BARGE_IN_GRACE_MS = Number(process.env.MS_BARGE_IN_GRACE_MS || 400); // don't barge-in instantly after agent starts
 // Default: turn-taking like a normal call (no interruptions). You can enable barge-in later.
 const MS_ENABLE_BARGE_IN = process.env.MS_ENABLE_BARGE_IN === "1" || process.env.MS_ENABLE_BARGE_IN === "true";
+// Call recording (Media Streams): record both sides (agent + caller) into a stereo WAV (8k PCM16).
+// Enabled via MS_RECORD_CALLS=1 on Render.
+const MS_RECORD_CALLS = process.env.MS_RECORD_CALLS === "1" || process.env.MS_RECORD_CALLS === "true";
+// Safety: cap recording duration (seconds) to avoid unbounded disk usage in production.
+const MS_RECORD_MAX_SECONDS = Number(process.env.MS_RECORD_MAX_SECONDS || 300); // 5 minutes default
 
 // Cache for ElevenLabs ulaw outputs:
 // - Memory cache helps within a single process lifetime.
@@ -573,6 +578,39 @@ function pcm16ToWavBuffer(pcm16, sampleRate) {
   buf.writeUInt32LE(dataSize, o); o += 4;
   for (let i = 0; i < pcm16.length; i++, o += 2) buf.writeInt16LE(pcm16[i], o);
   return buf;
+}
+
+function wavHeaderPcm16({ numChannels, sampleRate, dataBytes }) {
+  const bitsPerSample = 16;
+  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  const buf = Buffer.alloc(44);
+  let o = 0;
+  buf.write("RIFF", o); o += 4;
+  buf.writeUInt32LE(36 + dataBytes, o); o += 4;
+  buf.write("WAVE", o); o += 4;
+  buf.write("fmt ", o); o += 4;
+  buf.writeUInt32LE(16, o); o += 4; // PCM fmt chunk size
+  buf.writeUInt16LE(1, o); o += 2; // PCM
+  buf.writeUInt16LE(numChannels, o); o += 2;
+  buf.writeUInt32LE(sampleRate, o); o += 4;
+  buf.writeUInt32LE(byteRate, o); o += 4;
+  buf.writeUInt16LE(blockAlign, o); o += 2;
+  buf.writeUInt16LE(bitsPerSample, o); o += 2;
+  buf.write("data", o); o += 4;
+  buf.writeUInt32LE(dataBytes, o); o += 4;
+  return buf;
+}
+
+function interleaveStereoPcm16(left, right) {
+  const n = Math.min(left.length, right.length);
+  const out = Buffer.alloc(n * 4); // 2ch * 16-bit
+  let o = 0;
+  for (let i = 0; i < n; i++) {
+    out.writeInt16LE(left[i], o); o += 2;
+    out.writeInt16LE(right[i], o); o += 2;
+  }
+  return out;
 }
 
 async function elevenlabsTtsToUlaw8000({ text, persona }) {
@@ -916,6 +954,15 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 
 const ttsDir = path.resolve(DATA_DIR, "tts-cache");
 if (!fs.existsSync(ttsDir)) fs.mkdirSync(ttsDir, { recursive: true });
 app.use("/tts", express.static(ttsDir, { fallthrough: false }));
+
+// Media Streams call recordings (stereo WAVs).
+const msRecordingsDir = path.resolve(DATA_DIR, "ms-recordings");
+try {
+  if (!fs.existsSync(msRecordingsDir)) fs.mkdirSync(msRecordingsDir, { recursive: true });
+} catch {}
+// Expose recordings as static files so you can listen from a browser:
+// GET /ms-recordings/<filename>.wav
+app.use("/ms-recordings", express.static(msRecordingsDir, { fallthrough: false }));
 
 let openai = null;
 if (!process.env.OPENAI_API_KEY) {
@@ -3077,6 +3124,92 @@ wssMediaStream.on("connection", (ws, req) => {
   let currentPlay = null;
   let playingSince = 0;
 
+  // Call recording (Media Streams): record both sides to stereo WAV
+  // - Left channel: agent (what we send to Twilio)
+  // - Right channel: caller (what Twilio sends to us)
+  const recordEnabled = MS_RECORD_CALLS;
+  const ULaw_FRAME_BYTES = 160; // 20ms @ 8kHz ulaw
+  const ulawSilenceFrame = Buffer.alloc(ULaw_FRAME_BYTES, 0xff);
+  /** @type {Buffer[]} */
+  let recInUlawQ = [];
+  /** @type {Buffer[]} */
+  let recOutUlawQ = [];
+  let recFd = null;
+  let recPath = "";
+  let recDataBytes = 0;
+  let recTimer = null;
+  let recStartedAt = 0;
+
+  function startRecorderIfNeeded() {
+    if (!recordEnabled) return;
+    if (recFd) return;
+    if (!callSid) return;
+    try {
+      const ts = Date.now();
+      recPath = path.join(msRecordingsDir, `ms-${callSid}-${ts}-stereo.wav`);
+      recFd = fs.openSync(recPath, "w");
+      // Placeholder header; we'll overwrite sizes on finalize.
+      fs.writeSync(recFd, wavHeaderPcm16({ numChannels: 2, sampleRate: 8000, dataBytes: 0 }), 0, 44, 0);
+      recDataBytes = 0;
+      recStartedAt = Date.now();
+
+      recTimer = setInterval(() => {
+        try {
+          if (!recFd) return;
+          // Safety: cap duration to avoid runaway disk usage.
+          if (MS_RECORD_MAX_SECONDS > 0 && Date.now() - recStartedAt > MS_RECORD_MAX_SECONDS * 1000) {
+            finalizeRecorder();
+            return;
+          }
+          const inU = recInUlawQ.length ? recInUlawQ.shift() : ulawSilenceFrame;
+          const outU = recOutUlawQ.length ? recOutUlawQ.shift() : ulawSilenceFrame;
+          const inP = ulawBufferToPcm16(inU);
+          const outP = ulawBufferToPcm16(outU);
+          const stereo = interleaveStereoPcm16(outP, inP);
+          fs.writeSync(recFd, stereo);
+          recDataBytes += stereo.length;
+        } catch {}
+      }, 20);
+
+      msLog("recording started", { callSid, path: `/ms-recordings/${path.basename(recPath)}` });
+    } catch (e) {
+      msLog("recording start failed", e?.message || e);
+      try {
+        if (recTimer) clearInterval(recTimer);
+      } catch {}
+      recTimer = null;
+      try {
+        if (recFd) fs.closeSync(recFd);
+      } catch {}
+      recFd = null;
+      recPath = "";
+      recDataBytes = 0;
+    }
+  }
+
+  function finalizeRecorder() {
+    if (!recFd) return;
+    try {
+      if (recTimer) clearInterval(recTimer);
+    } catch {}
+    recTimer = null;
+    try {
+      // Overwrite header with final sizes.
+      const header = wavHeaderPcm16({ numChannels: 2, sampleRate: 8000, dataBytes: recDataBytes });
+      fs.writeSync(recFd, header, 0, 44, 0);
+    } catch {}
+    try {
+      fs.closeSync(recFd);
+    } catch {}
+    const url = recPath ? `/ms-recordings/${path.basename(recPath)}` : "";
+    msLog("recording finalized", { callSid, bytes: recDataBytes, url });
+    recFd = null;
+    recPath = "";
+    recDataBytes = 0;
+    recInUlawQ = [];
+    recOutUlawQ = [];
+  }
+
   // Inbound VAD / utterance state
   let speechActive = false;
   let lastVoiceAt = 0;
@@ -3317,6 +3450,15 @@ wssMediaStream.on("connection", (ws, req) => {
         const end = Math.min(offset + CHUNK_BYTES, ulawBuf.length);
         const chunk = ulawBuf.subarray(offset, end);
         offset = end;
+        // Recording: capture what we send out (agent channel).
+        if (recordEnabled && chunk && chunk.length) {
+          // Ensure exactly 20ms frames where possible; pad short final chunks with μ-law silence.
+          const b =
+            chunk.length === ULaw_FRAME_BYTES
+              ? Buffer.from(chunk)
+              : Buffer.concat([Buffer.from(chunk), Buffer.alloc(Math.max(0, ULaw_FRAME_BYTES - chunk.length), 0xff)]);
+          recOutUlawQ.push(b);
+        }
         wsSendToTwilio({
           event: "media",
           streamSid,
@@ -3569,6 +3711,10 @@ wssMediaStream.on("connection", (ws, req) => {
 
         const chunk = queued.subarray(0, CHUNK_BYTES);
         queued = queued.subarray(CHUNK_BYTES);
+        // Recording: capture what we send out (agent channel).
+        if (recordEnabled && chunk && chunk.length) {
+          recOutUlawQ.push(Buffer.from(chunk));
+        }
         wsSendToTwilio({
           event: "media",
           streamSid,
@@ -4181,6 +4327,8 @@ wssMediaStream.on("connection", (ws, req) => {
   ws.on("close", () => {
     closed = true;
     stopPlayback({ clear: false });
+    // Finalize recording file (if enabled)
+    try { finalizeRecorder(); } catch {}
     // If the call ended (hangup mid-call) and we never got explicit consent,
     // mark it as not_interested per product requirement.
     try {
@@ -4218,6 +4366,9 @@ wssMediaStream.on("connection", (ws, req) => {
       persona = String(cp?.persona || "male");
       greeting = String(cp?.greeting || "");
       msLog("start", { callSid, streamSid, phone });
+
+      // Start recording as early as possible (captures the whole call).
+      startRecorderIfNeeded();
 
       try {
         if (callSid && phone) createOrGetCall(db, { callSid, phone, persona });
@@ -4317,11 +4468,20 @@ wssMediaStream.on("connection", (ws, req) => {
       const b64 = String(msg?.media?.payload || "");
       if (!b64) return;
 
-      // Echo-safe: while agent is speaking (Twilio still playing our audio), ignore inbound.
+      const ulawBuf = Buffer.from(b64, "base64");
+      // Recording: capture inbound (caller channel) even while agent is speaking.
+      if (recordEnabled && ulawBuf && ulawBuf.length) {
+        const b =
+          ulawBuf.length === ULaw_FRAME_BYTES
+            ? ulawBuf
+            : Buffer.concat([ulawBuf, Buffer.alloc(Math.max(0, ULaw_FRAME_BYTES - ulawBuf.length), 0xff)]);
+        recInUlawQ.push(b);
+      }
+
+      // Echo-safe: while agent is speaking (Twilio still playing our audio), ignore inbound for VAD/STT.
       // This prevents echo from being treated as "user speech" and causing 6–8s waits.
       if (agentSpeaking) return;
 
-      const ulawBuf = Buffer.from(b64, "base64");
       const pcm16 = ulawBufferToPcm16(ulawBuf);
       const rms = rmsFromPcm16(pcm16);
       const now = Date.now();
