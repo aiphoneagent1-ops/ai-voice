@@ -281,8 +281,13 @@ const ELEVENLABS_OUTPUT_FORMAT = String(process.env.ELEVENLABS_OUTPUT_FORMAT || 
 // Leave empty by default to match ElevenLabs UI behavior; set in env if you want to force Hebrew ("he").
 const ELEVENLABS_LANGUAGE_CODE = String(process.env.ELEVENLABS_LANGUAGE_CODE || "").trim();
 
-// Product requirement: agent voice is always male. We still adapt grammar to the callee's gender.
-const AGENT_VOICE_PERSONA = "male";
+// Agent voice gender (TTS). Keep grammar-to-callee separate from agent voice.
+// Configure via env: AGENT_VOICE_PERSONA=male|female
+function normalizeAgentVoicePersona(raw) {
+  const v = String(raw || "").trim().toLowerCase();
+  return v === "female" ? "female" : "male";
+}
+const AGENT_VOICE_PERSONA = normalizeAgentVoicePersona(process.env.AGENT_VOICE_PERSONA || "male");
 
 // ConversationRelay (Realtime voice via Twilio)
 const CR_ENABLED = CR_MODE;
@@ -995,9 +1000,14 @@ const DEFAULT_KNOWLEDGE_BASE = `
 - "איפה/מתי/כמה עולה?" → "אין לי פה את כל הפרטים המדויקים, יחזרו אליך/אלייך לתיאום."
 `.trim();
 
-// הסוכן תמיד בקול גברי; הדקדוק ללקוח/ה מותאם לפי המין שלהם/שלה.
-const DEFAULT_OPENING_MALE = `שלום אחי, מדבר בנוגע להצעה קצרה—יש לך דקה?`;
-const DEFAULT_OPENING_FEMALE = `שלום יקרה, מדבר בנוגע להצעה קצרה—יש לך דקה?`;
+// Default openers (generic). Admin can override; keep defaults consistent with agent voice persona.
+function defaultOpeningForCallee(calleePersona) {
+  const verb = AGENT_VOICE_PERSONA === "female" ? "מדברת" : "מדבר";
+  if (calleePersona === "female") return `שלום יקרה, ${verb} בנוגע להצעה קצרה—יש לך דקה?`;
+  return `שלום אחי, ${verb} בנוגע להצעה קצרה—יש לך דקה?`;
+}
+const DEFAULT_OPENING_MALE = defaultOpeningForCallee("male");
+const DEFAULT_OPENING_FEMALE = defaultOpeningForCallee("female");
 
 // Campaign content is configured via the Admin UI.
 // Keep server defaults generic so the codebase is fully white-label.
@@ -3876,8 +3886,10 @@ wssMediaStream.on("connection", (ws, req) => {
   function buildHandoffSystemPrompt({ persona, knowledgeBase }) {
     const toYou = persona === "female" ? "אלייך" : "אליך";
     // Keep it short, natural, and aligned to product mode.
+    const agentNoun = AGENT_VOICE_PERSONA === "female" ? "נציגת" : "נציג";
+    const agentPronoun = AGENT_VOICE_PERSONA === "female" ? "את" : "אתה";
     return [
-      `אתה נציג אנושי, טבעי וקצר שמתקשר ללקוח/ה בשיחה טלפונית.`,
+      `${agentPronoun} ${agentNoun} אנושי/ת, טבעי/ת וקצר/ה שמתקשר/ת ללקוח/ה בשיחה טלפונית.`,
       `המטרה: מענה ראשוני קצר ואז להגיע לאישור להעברת פרטים כדי שיחזרו ${toYou} לתיאום. לא מנהלים שיחה ארוכה.`,
       `כללי טון: קצר, רגוע, לא לוחץ. בלי "כן או לא עכשיו".`,
       `אסור להמציא פרטים (שעה/מיקום/עלות). אם חסר—תגיד שיחזרו ${toYou} עם כל הפרטים לתיאום.`,
@@ -4955,7 +4967,7 @@ server.listen(PORT, HOST, () => {
       const maleGreeting = sanitizeSayText(buildGreeting({ persona: "male" }));
       const femaleGreeting = sanitizeSayText(buildGreeting({ persona: "female" }));
       await Promise.all([
-        // Prewarm both greeting variants, but always in the agent's (male) voice.
+        // Prewarm both greeting variants in the configured agent voice.
         ttsToPath({ text: maleGreeting, persona: AGENT_VOICE_PERSONA }),
         ttsToPath({ text: femaleGreeting, persona: AGENT_VOICE_PERSONA })
       ]);
