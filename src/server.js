@@ -316,10 +316,11 @@ const MS_GREETING_MAX_CHARS = Number(process.env.MS_GREETING_MAX_CHARS || 70);
 const MS_FORCE_SHORT_GREETING = process.env.MS_FORCE_SHORT_GREETING === "1" || process.env.MS_FORCE_SHORT_GREETING === "true";
 // Auto-hangup after final line (after mark ack)
 const MS_AUTO_HANGUP = process.env.MS_AUTO_HANGUP !== "0" && process.env.MS_AUTO_HANGUP !== "false";
-// Latency tuning: lower silence threshold -> faster "turn taking"
-// Tighten default end-of-speech to reduce perceived delay.
-// You can relax this if callers get cut off: MS_END_SILENCE_MS=350-450.
-const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 300);
+// Endpointing: how much silence we wait before finalizing an utterance.
+// IMPORTANT (Hebrew telephony): if this is too low, we cut sentences mid-phrase and STT becomes unreliable.
+// Target: +700–1200ms more silence vs old defaults to capture full phrases.
+// You can tune per environment with MS_END_SILENCE_MS.
+const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 1000);
 // Faster turn-taking for short utterances (e.g. "כן") without waiting full silence window.
 const MS_FAST_END_SILENCE_MS = Number(process.env.MS_FAST_END_SILENCE_MS || 200);
 const MS_FAST_END_MAX_UTTERANCE_MS = Number(process.env.MS_FAST_END_MAX_UTTERANCE_MS || 1200);
@@ -327,12 +328,15 @@ const MS_FAST_END_MAX_UTTERANCE_MS = Number(process.env.MS_FAST_END_MAX_UTTERANC
 // If you ever want it back: set MS_THINKING_DELAY_MS (e.g. 380).
 const MS_THINKING_DELAY_MS = Number(process.env.MS_THINKING_DELAY_MS || 0);
 const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 250);
-// Fallback: if user pauses briefly, don't wait forever—force finalize after this (once we see a pause).
-// IMPORTANT: too-aggressive values can cut normal phrases and cause bad STT ("תודה" instead of "כן אני מעוניין").
-const MS_FORCE_FINALIZE_AFTER_MS = Number(process.env.MS_FORCE_FINALIZE_AFTER_MS || 1400);
-const MS_FORCE_FINALIZE_PAUSE_MS = Number(process.env.MS_FORCE_FINALIZE_PAUSE_MS || 200);
+// Force-finalize is a safety hatch for very long utterances.
+// Default OFF because it can cut normal phrases mid-sentence and degrade STT.
+const MS_ENABLE_FORCE_FINALIZE = process.env.MS_ENABLE_FORCE_FINALIZE === "1" || process.env.MS_ENABLE_FORCE_FINALIZE === "true";
+// If you enable it, these control when we force-finalize after a short pause.
+const MS_FORCE_FINALIZE_AFTER_MS = Number(process.env.MS_FORCE_FINALIZE_AFTER_MS || 2600);
+const MS_FORCE_FINALIZE_PAUSE_MS = Number(process.env.MS_FORCE_FINALIZE_PAUSE_MS || 350);
 // Safety: cap utterance length so we don't buffer indefinitely.
-const MS_MAX_UTTERANCE_MS = Number(process.env.MS_MAX_UTTERANCE_MS || 2500);
+// Old default (2500ms) could cut long natural sentences; raise for better STT fidelity.
+const MS_MAX_UTTERANCE_MS = Number(process.env.MS_MAX_UTTERANCE_MS || 4500);
 const ELEVENLABS_STREAM_OUTPUT_FORMAT = String(process.env.ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000").trim();
 // When using streaming TTS, we prebuffer a few frames before starting playback to avoid underflow.
 // 10 frames * 20ms = 200ms buffer (good tradeoff for low perceived latency).
@@ -4405,6 +4409,7 @@ wssMediaStream.on("connection", (ws, req) => {
         allowListen &&
         speechActive &&
         utteranceStartAt &&
+        MS_ENABLE_FORCE_FINALIZE &&
         now - utteranceStartAt >= MS_FORCE_FINALIZE_AFTER_MS &&
         lastVoiceAt &&
         now - lastVoiceAt >= MS_FORCE_FINALIZE_PAUSE_MS
