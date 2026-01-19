@@ -485,31 +485,35 @@ function buildMediaStreamTwiML({ wsUrl, customParameters = {} }) {
 // μ-law decode (G.711) to 16-bit PCM
 function mulawToPcmSample(u) {
   // u: 0..255
-  const MULAW_BIAS = 0x84;
-  u = (~u) & 0xff;
-  const sign = u & 0x80;
-  let exponent = (u >> 4) & 0x07;
-  let mantissa = u & 0x0f;
-  let sample = ((mantissa << 4) + MULAW_BIAS) << (exponent + 3);
-  sample -= MULAW_BIAS;
-  return sign ? -sample : sample;
+  // Standard G.711 μ-law decode (Twilio Media Streams inbound payload is μ-law @ 8kHz).
+  // IMPORTANT: must stay within 16-bit range; otherwise recordings/VAD will sound like noise due to Int16 overflow.
+  let x = (~u) & 0xff;
+  const sign = x & 0x80;
+  const exponent = (x >> 4) & 0x07;
+  const mantissa = x & 0x0f;
+  let t = ((mantissa << 3) + 0x84) << exponent;
+  t -= 0x84;
+  return sign ? -t : t;
 }
 
 // 16-bit PCM sample to μ-law byte (G.711)
 function pcmToMulawSample(pcm) {
-  const MULAW_MAX = 0x1fff;
+  // Standard G.711 μ-law encode.
   const MULAW_BIAS = 0x84;
-  let sign = (pcm >> 8) & 0x80;
-  if (sign) pcm = -pcm;
-  if (pcm > MULAW_MAX) pcm = MULAW_MAX;
-  pcm += MULAW_BIAS;
+  const MULAW_CLIP = 32635;
+  let sign = 0;
+  let x = pcm | 0;
+  if (x < 0) {
+    sign = 0x80;
+    x = -x;
+  }
+  if (x > MULAW_CLIP) x = MULAW_CLIP;
+  x += MULAW_BIAS;
 
-  // exponent
   let exponent = 7;
-  for (let expMask = 0x4000; (pcm & expMask) === 0 && exponent > 0; expMask >>= 1) exponent--;
-  let mantissa = (pcm >> (exponent + 3)) & 0x0f;
-  const ulaw = ~(sign | (exponent << 4) | mantissa);
-  return ulaw & 0xff;
+  for (let expMask = 0x4000; (x & expMask) === 0 && exponent > 0; expMask >>= 1) exponent--;
+  const mantissa = (x >> (exponent + 3)) & 0x0f;
+  return (~(sign | (exponent << 4) | mantissa)) & 0xff;
 }
 
 function pcm16ToUlawBuffer(pcm16) {
@@ -3811,8 +3815,22 @@ wssMediaStream.on("connection", (ws, req) => {
           });
           const speech2 = String(transcription2.text || "").trim();
           msLog("timing", { callSid, sttRetryMs: Date.now() - tStt1, model: fallbackModel });
-          // Prefer the retry only if it's clearly more informative.
-          if (speech2 && (speech2.length > speech.length + 2 || isGenericAckTranscript(speech))) {
+          // Prefer the retry if it fixes known failure modes (prompt-echo / garbage),
+          // even when the retry is shorter.
+          const origLooksEcho = looksLikePromptEcho(speech);
+          const retryLooksEcho = looksLikePromptEcho(speech2);
+          const origSuspicious = isSuspiciousTranscript(speech);
+          const retrySuspicious = isSuspiciousTranscript(speech2);
+
+          const shouldUseRetry =
+            // Hard override: original is prompt-echo, retry is not
+            (origLooksEcho && speech2 && !retryLooksEcho) ||
+            // General: original suspicious, retry not suspicious
+            (origSuspicious && speech2 && !retrySuspicious) ||
+            // Old heuristic: retry is clearly more informative OR original was generic ack on long audio
+            (speech2 && (speech2.length > speech.length + 2 || isGenericAckTranscript(speech)));
+
+          if (shouldUseRetry) {
             speech = speech2;
             msLog("stt retry used", { callSid, chars: speech.length });
           } else {
