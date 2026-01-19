@@ -271,6 +271,38 @@ export function renderAdminPage() {
           </div>
 
           <div style="height:12px;"></div>
+          <h3 style="margin:0 0 8px; font-size:14px;">מצב שיחה (Flow)</h3>
+          <p class="status" style="margin-top:0;">
+            <b>Guided</b>: מתאים לתסריט “שלבים” (למשל לפי PDF). <b>Handoff</b>: מצב פשוט ויציב שמטרתו להגיע מהר לאישור להעברת פרטים.
+          </p>
+          <div class="row" style="gap:12px; align-items:flex-start;">
+            <div style="flex:1; min-width:240px;">
+              <label style="margin-top:0;">מצב</label>
+              <select id="campaignMode">
+                <option value="handoff">Handoff (פשוט/יציב)</option>
+                <option value="guided">Guided (תסריט שלבים)</option>
+              </select>
+            </div>
+            <div style="flex:1; min-width:240px;">
+              <label style="margin-top:0;">פונים לנשים בלבד</label>
+              <label style="margin:0; display:flex; gap:8px; align-items:center;">
+                <input type="checkbox" id="femaleOnly" style="width:auto;" />
+                חסום/סיים שיחה לגברים
+              </label>
+            </div>
+          </div>
+          <div class="row" style="gap:12px; align-items:flex-start;">
+            <div style="flex:1; min-width:240px;">
+              <label style="margin-top:0;">מינימום משתתפות (למשל 15)</label>
+              <input id="minParticipants" type="number" min="1" max="200" value="15" />
+            </div>
+            <div style="flex:1; min-width:240px;">
+              <label style="margin-top:0;">מינימום חודשים לאירוע חוזר (למשל 6)</label>
+              <input id="cooldownMonths" type="number" min="0" max="60" value="6" />
+            </div>
+          </div>
+
+          <div style="height:12px;"></div>
           <label>פתיח קבוע (מה אומרים ישר כשעונים)</label>
           <div class="row" style="gap:12px; align-items:flex-start;">
             <div style="flex:1; min-width:240px;">
@@ -373,6 +405,10 @@ export function renderAdminPage() {
           $("openingScriptFemale").value = data.openingScriptFemale || "";
           if($("handoffToPhrase")) $("handoffToPhrase").value = data.handoffToPhrase || "לעמותה";
           if($("handoffFromPhrase")) $("handoffFromPhrase").value = data.handoffFromPhrase || "מהעמותה";
+          if($("campaignMode")) $("campaignMode").value = data.campaignMode || "handoff";
+          if($("femaleOnly")) $("femaleOnly").checked = !!data.femaleOnly;
+          if($("minParticipants")) $("minParticipants").value = data.minParticipants ?? 15;
+          if($("cooldownMonths")) $("cooldownMonths").value = data.cooldownMonths ?? 6;
           $("autoDialEnabled").checked = !!data.autoDialEnabled;
           $("autoDialBatch").value = data.autoDialBatchSize ?? 5;
           $("autoDialInterval").value = data.autoDialIntervalSeconds ?? 30;
@@ -439,7 +475,11 @@ export function renderAdminPage() {
               openingScriptMale: $("openingScriptMale").value,
               openingScriptFemale: $("openingScriptFemale").value,
               handoffToPhrase: $("handoffToPhrase") ? $("handoffToPhrase").value : undefined,
-              handoffFromPhrase: $("handoffFromPhrase") ? $("handoffFromPhrase").value : undefined
+              handoffFromPhrase: $("handoffFromPhrase") ? $("handoffFromPhrase").value : undefined,
+              campaignMode: $("campaignMode") ? $("campaignMode").value : undefined,
+              femaleOnly: $("femaleOnly") ? $("femaleOnly").checked : undefined,
+              minParticipants: $("minParticipants") ? Number($("minParticipants").value || 15) : undefined,
+              cooldownMonths: $("cooldownMonths") ? Number($("cooldownMonths").value || 6) : undefined
             })
           });
           setStatus($("kbStatus"), "נשמר", true);

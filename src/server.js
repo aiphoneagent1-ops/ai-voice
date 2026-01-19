@@ -998,6 +998,11 @@ setDefaultIfEmpty("closingScriptFemale", DEFAULT_CLOSING_FEMALE);
 // Keep them as phrases (not just nouns) so Hebrew grammar stays correct across clients.
 setDefaultIfEmpty("handoffToPhrase", "לצוות");
 setDefaultIfEmpty("handoffFromPhrase", "מהצוות");
+// Campaign / flow knobs (no campaign text here; only generic behavior toggles)
+setDefaultIfEmpty("campaignMode", "handoff"); // "handoff" | "guided"
+setDefaultIfEmpty("femaleOnly", false);
+setDefaultIfEmpty("minParticipants", 15);
+setDefaultIfEmpty("cooldownMonths", 6);
 
 // If the user already edited scripts, keep them—but add a small helpful "explanation" block once.
 // Keep legacy upgrade helpers, but make them generic (white-label).
@@ -1375,6 +1380,99 @@ function tokenizeHe(text) {
     .filter((w) => !stop.has(w));
 }
 
+function extractFlowLinesFromKnowledgeBase(kbRaw) {
+  const kb = String(kbRaw || "");
+  if (!kb) return {};
+  // We support two notations:
+  // 1) Under a [FLOW] section: KEY=VALUE
+  // 2) Anywhere in KB: FLOW_KEY=VALUE
+  const lines = kb.split(/\r?\n/);
+  let inFlow = false;
+  const out = {};
+  for (const raw of lines) {
+    const line = String(raw || "").trim();
+    if (!line) continue;
+    if (/^\[flow\]$/i.test(line)) {
+      inFlow = true;
+      continue;
+    }
+    if (/^\[\/flow\]$/i.test(line)) {
+      inFlow = false;
+      continue;
+    }
+    const m = line.match(/^([A-Z0-9_]+)\s*=\s*(.+)$/);
+    if (!m) continue;
+    const k = String(m[1] || "").trim();
+    const v = String(m[2] || "").trim();
+    if (!k || !v) continue;
+    if (inFlow) out[k] = v;
+    else if (k.startsWith("FLOW_")) out[k] = v;
+  }
+  return out;
+}
+
+function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
+  const flow = extractFlowLinesFromKnowledgeBase(kb);
+  // Provide safe generic defaults (white-label; can be overridden in KB).
+  const defaults = {
+    FLOW_ASK_PURPOSE: "לאיזו מטרה תרצי להקדיש את הערב?",
+    FLOW_ASK_DATE: "למתי תרצי לתאם את הערב?",
+    FLOW_ASK_PARTICIPANTS: "כמה משתתפות יגיעו לערב?",
+    FLOW_PARTICIPANTS_OK: "מצוין. נציגה תחזור אלייך בהקדם עם כל הפרטים.",
+    FLOW_PARTICIPANTS_LOW: `הערב מיועד ל${minParticipants} משתתפות ומעלה. אם כל אחת תביא עוד מישהי, נגיע לזה בקלות. תצליחי לארגן ${minParticipants}?`,
+    FLOW_PARTICIPANTS_LOW_FALLBACK: "מבינה. בכל מקרה נציגה תחזור אלייך ותנסה לעזור לגבי מספר המשתתפות.",
+    FLOW_COOLDOWN_RULE: `אנחנו מתאמים אירוע חוזר רק אחרי מינימום ${cooldownMonths} חודשים.`,
+    FLOW_WOMEN_ONLY: "שלום, אנחנו פונות כרגע לנשים בלבד. יום טוב."
+  };
+  return { ...defaults, ...flow };
+}
+
+function extractHeNumber(text) {
+  const s = normalizeIntentText(text);
+  if (!s) return null;
+  // Digits
+  const dm = s.match(/\b(\d{1,3})\b/);
+  if (dm) {
+    const n = Number(dm[1]);
+    if (Number.isFinite(n)) return n;
+  }
+  // Hebrew words (minimal set for this campaign)
+  const map = new Map([
+    ["אחת", 1],
+    ["אחד", 1],
+    ["שתיים", 2],
+    ["שניים", 2],
+    ["שתי", 2],
+    ["שלוש", 3],
+    ["ארבע", 4],
+    ["חמש", 5],
+    ["שש", 6],
+    ["שבע", 7],
+    ["שמונה", 8],
+    ["תשע", 9],
+    ["עשר", 10],
+    ["עשרה", 10],
+    ["אחת עשרה", 11],
+    ["שתים עשרה", 12],
+    ["שתים-עשרה", 12],
+    ["שלוש עשרה", 13],
+    ["ארבע עשרה", 14],
+    ["חמש עשרה", 15],
+    ["חמשעשרה", 15],
+    ["חמש-עשרה", 15],
+    ["חמש עשר", 15]
+  ]);
+  // Try multi-word matches first
+  for (const [k, v] of map.entries()) {
+    if (k.includes(" ") && s.includes(k)) return v;
+  }
+  // Single-word
+  for (const [k, v] of map.entries()) {
+    if (!k.includes(" ") && s.split(" ").includes(k)) return v;
+  }
+  return null;
+}
+
 function selectRelevantKnowledge({ knowledgeBase, query, maxChars = 1800, maxChunks = 8 }) {
   const kb = String(knowledgeBase || "").trim();
   const q = String(query || "").trim();
@@ -1479,6 +1577,11 @@ function settingsSnapshot() {
     maxWords: 3
   });
 
+  const campaignMode = String(getSetting(db, "campaignMode", "handoff") || "handoff").trim() || "handoff";
+  const femaleOnly = !!getSetting(db, "femaleOnly", false);
+  const minParticipants = Math.max(1, Math.min(200, Number(getSetting(db, "minParticipants", 15)) || 15));
+  const cooldownMonths = Math.max(0, Math.min(60, Number(getSetting(db, "cooldownMonths", 6)) || 6));
+
   return {
     knowledgeBase,
     openingScript,
@@ -1494,7 +1597,11 @@ function settingsSnapshot() {
     autoDialBatchSize,
     autoDialIntervalSeconds,
     handoffToPhrase,
-    handoffFromPhrase
+    handoffFromPhrase,
+    campaignMode,
+    femaleOnly,
+    minParticipants,
+    cooldownMonths
   };
 }
 
@@ -1687,7 +1794,11 @@ app.post("/api/admin/settings", (req, res) => {
     closingScriptMale = "",
     closingScriptFemale = "",
     handoffToPhrase = "",
-    handoffFromPhrase = ""
+    handoffFromPhrase = "",
+    campaignMode = undefined,
+    femaleOnly = undefined,
+    minParticipants = undefined,
+    cooldownMonths = undefined
   } = req.body || {};
   setSetting(db, "knowledgeBase", String(knowledgeBase));
   setSetting(db, "openingScript", String(openingScript));
@@ -1701,6 +1812,10 @@ app.post("/api/admin/settings", (req, res) => {
   setSetting(db, "closingScriptFemale", String(closingScriptFemale));
   if (handoffToPhrase != null) setSetting(db, "handoffToPhrase", String(handoffToPhrase));
   if (handoffFromPhrase != null) setSetting(db, "handoffFromPhrase", String(handoffFromPhrase));
+  if (campaignMode != null) setSetting(db, "campaignMode", String(campaignMode));
+  if (femaleOnly != null) setSetting(db, "femaleOnly", !!femaleOnly);
+  if (minParticipants != null) setSetting(db, "minParticipants", Math.max(1, Math.min(200, Number(minParticipants) || 15)));
+  if (cooldownMonths != null) setSetting(db, "cooldownMonths", Math.max(0, Math.min(60, Number(cooldownMonths) || 6)));
   res.json({ ok: true });
 });
 
@@ -2855,6 +2970,15 @@ wssMediaStream.on("connection", (ws, req) => {
   let confirmCount = 0;
   let persuasionAttempted = false;
 
+  // Guided flow state (campaign-specific logic driven by Admin KB + knobs)
+  /** @type {"ASK_PURPOSE"|"ASK_DATE"|"ASK_PARTICIPANTS"|"PARTICIPANTS_PERSUADE"|"CLOSE"} */
+  let guidedStep = "ASK_PURPOSE";
+  let guidedPurpose = "";
+  let guidedDateText = "";
+  let guidedParticipants = null;
+  let participantsPersuadeAsked = false;
+  let guidedAskedCooldownRule = false;
+
   function confirmQuestionText() {
     // No-apology mode: never say "לא שמעתי/לא קלטתי/תחזור".
     return handoffQuestionTextForPersona(persona);
@@ -3408,6 +3532,145 @@ wssMediaStream.on("connection", (ws, req) => {
       norm: normalizeIntentText(speech).slice(0, 120),
       state: conversationState
     });
+
+    // Campaign mode
+    const snap = settingsSnapshot();
+    const campaignMode = String(snap.campaignMode || "handoff").trim() || "handoff"; // "handoff" | "guided"
+    const femaleOnly = !!snap.femaleOnly;
+    const minParticipants = Number(snap.minParticipants || 15) || 15;
+    const cooldownMonths = Number(snap.cooldownMonths || 6) || 6;
+
+    // Guided flow: deterministic multi-step conversation driven by Admin KB.
+    if (campaignMode === "guided") {
+      const flowText = guidedFlowTextFromKb(snap.knowledgeBase, { minParticipants, cooldownMonths });
+
+      // Women-only enforcement (optional)
+      if (femaleOnly && persona !== "female") {
+        msLog("guided", { callSid, kind: "women_only_block" });
+        await sayFinalAndHangup({ text: flowText.FLOW_WOMEN_ONLY, outcome: "not_interested" });
+        return;
+      }
+
+      // Persist user message
+      try {
+        if (callSid && phone) addMessage(db, { callSid, role: "user", content: speech });
+      } catch {}
+
+      // Opt-out fast path
+      if (detectOptOut(speech)) {
+        confirmCount = 0;
+        msLog("guided", { callSid, kind: "opt_out" });
+        await sayFinalAndHangup({ text: "אין בעיה, הסרתי אותך. יום טוב.", outcome: "do_not_call" });
+        return;
+      }
+
+      // If the user mentions a recent event, enforce cooldown rule (only when it comes up).
+      if (!guidedAskedCooldownRule) {
+        const ns = normalizeIntentText(speech);
+        if (ns.includes("לפני") && (ns.includes("חודש") || ns.includes("חודשים") || ns.includes("שבוע") || ns.includes("שבועות"))) {
+          guidedAskedCooldownRule = true;
+          const t = limitPhoneReply(flowText.FLOW_COOLDOWN_RULE, 160);
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: t });
+          } catch {}
+          await sayText(t, { label: "reply" });
+          return;
+        }
+      }
+
+      // Handle hard NO / goodbye
+      if (detectNotInterested(speech)) {
+        msLog("guided", { callSid, kind: "not_interested" });
+        await sayFinalAndHangup({ text: "אין בעיה, תודה על הזמן. יום טוב ובשורות טובות.", outcome: "not_interested" });
+        return;
+      }
+
+      // Handle CLOSE (handoff confirmation)
+      if (guidedStep === "CLOSE") {
+        if (detectAffirmativeShort(speech) || detectInterested(speech) || detectTransferConsent(speech)) {
+          msLog("guided", { callSid, kind: "handoff_confirm" });
+          await sayFinalAndHangup({ text: handoffConfirmCloseText({ persona }), outcome: "interested" });
+          return;
+        }
+        // If user didn't confirm, ask once more, then end politely.
+        msLog("guided", { callSid, kind: "handoff_not_confirmed" });
+        await sayFinalAndHangup({ text: "סבבה, תודה על הזמן. יום טוב.", outcome: "not_interested" });
+        return;
+      }
+
+      // Step machine
+      if (guidedStep === "ASK_PURPOSE") {
+        // Treat any non-empty response as "purpose" and move on.
+        guidedPurpose = guidedPurpose || String(speech || "").trim();
+        guidedStep = "ASK_DATE";
+        const q = limitPhoneReply(flowText.FLOW_ASK_DATE, 160);
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
+        } catch {}
+        await sayText(q, { label: "reply" });
+        return;
+      }
+
+      if (guidedStep === "ASK_DATE") {
+        guidedDateText = guidedDateText || String(speech || "").trim();
+        guidedStep = "ASK_PARTICIPANTS";
+        const q = limitPhoneReply(flowText.FLOW_ASK_PARTICIPANTS, 160);
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
+        } catch {}
+        await sayText(q, { label: "reply" });
+        return;
+      }
+
+      if (guidedStep === "ASK_PARTICIPANTS") {
+        const n = extractHeNumber(speech);
+        guidedParticipants = n;
+        if (n != null && n >= minParticipants) {
+          msLog("guided", { callSid, kind: "participants_ok", n });
+          // Ask handoff question (rep will call back)
+          guidedStep = "CLOSE";
+          const q = handoffQuestionText();
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
+          } catch {}
+          await sayText(q, { label: "reply" });
+          return;
+        }
+        msLog("guided", { callSid, kind: "participants_low_or_unknown", n });
+        guidedStep = "PARTICIPANTS_PERSUADE";
+        participantsPersuadeAsked = true;
+        const q = limitPhoneReply(flowText.FLOW_PARTICIPANTS_LOW, 200);
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
+        } catch {}
+        await sayText(q, { label: "reply" });
+        return;
+      }
+
+      if (guidedStep === "PARTICIPANTS_PERSUADE") {
+        if (detectAffirmativeShort(speech) || detectInterested(speech)) {
+          msLog("guided", { callSid, kind: "participants_persuade_yes" });
+          guidedStep = "CLOSE";
+          const q = handoffQuestionText();
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
+          } catch {}
+          await sayText(q, { label: "reply" });
+          return;
+        }
+        // Not sure / no → fallback, then still offer a call back for help.
+        msLog("guided", { callSid, kind: "participants_persuade_no_or_unsure" });
+        guidedStep = "CLOSE";
+        const t = limitPhoneReply(flowText.FLOW_PARTICIPANTS_LOW_FALLBACK, 200);
+        const q = handoffQuestionText();
+        const msg = limitPhoneReply(`${t} ${q}`.trim(), 240);
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+        } catch {}
+        await sayText(msg, { label: "reply" });
+        return;
+      }
+    }
 
     // Hebrew phone STT quirk:
     // Whisper often mishears a short "כן" as "כאן." over μ-law phone audio.
