@@ -172,6 +172,11 @@ export function renderAdminPage() {
             <div class="row" style="justify-content:space-between;">
               <div class="row" style="gap:8px;">
                 <input id="search" placeholder="חיפוש (שם/טלפון)..." style="max-width:260px;" />
+                <select id="dialFilter" style="max-width:200px;">
+                  <option value="all">סינון: הכל</option>
+                  <option value="new">לא בוצעה שיחה</option>
+                  <option value="called">בוצעה שיחה</option>
+                </select>
                 <button class="secondary" id="refreshListBtn">רענון</button>
               </div>
               <span class="status" id="listStatus"></span>
@@ -184,9 +189,7 @@ export function renderAdminPage() {
                     <th>פעולות</th>
                     <th>שם</th>
                     <th>טלפון</th>
-                    <th>מין</th>
-                    <th>סטטוס חיוג</th>
-                    <th>אל תתקשרו יותר</th>
+                    <th>סינון</th>
                     <th>ניסיון</th>
                   </tr>
                 </thead>
@@ -234,11 +237,18 @@ export function renderAdminPage() {
           <div class="row">
             <div style="flex:1; min-width:220px;">
               <label>קצב (כמה מספרים בכל ריצה)</label>
-              <input id="autoDialBatch" type="number" min="1" max="50" value="5" />
+              <select id="autoDialBatch">
+                <option value="1">1</option>
+                <option value="3">3</option>
+                <option value="5">5</option>
+              </select>
             </div>
             <div style="flex:1; min-width:220px;">
-              <label>הפרש בין ריצות (שניות)</label>
-              <input id="autoDialInterval" type="number" min="5" max="3600" value="30" />
+              <label>הפרש בין ריצות</label>
+              <select id="autoDialInterval">
+                <option value="300">כל 5 דקות</option>
+                <option value="600">כל 10 דקות</option>
+              </select>
             </div>
           </div>
           <div class="row" style="margin-top:10px;">
@@ -376,6 +386,30 @@ export function renderAdminPage() {
       </div>
     </div>
 
+    <div class="modalOverlay" id="leadEditModal">
+      <div class="modal">
+        <div class="row" style="justify-content:space-between; align-items:center;">
+          <h3>עריכת ליד</h3>
+          <button class="secondary" id="closeLeadEditBtn">סגור</button>
+        </div>
+        <div class="status" style="margin-top:4px;">אפשר לעדכן שם/טלפון/סטטוס ידנית.</div>
+        <input type="hidden" id="leadOldPhone" />
+        <label>שם</label>
+        <input id="leadFirstName" placeholder="שם" />
+        <label>טלפון</label>
+        <input id="leadPhone" placeholder="05XXXXXXXX או +972..." />
+        <label>סטטוס</label>
+        <select id="leadStatus">
+          <option value="waiting">מעוניינת / מחכה לשיחה</option>
+          <option value="not_interested">לא מעוניינת</option>
+        </select>
+        <div class="row" style="margin-top:12px;">
+          <button id="saveLeadEditBtn">שמור</button>
+          <span class="status" id="leadEditStatus"></span>
+        </div>
+      </div>
+    </div>
+
     <script>
       const $ = (id) => document.getElementById(id);
       function setStatus(el, msg, ok=true){ el.textContent = msg; el.className = "status " + (ok ? "ok" : "err"); }
@@ -410,8 +444,8 @@ export function renderAdminPage() {
           if($("minParticipants")) $("minParticipants").value = data.minParticipants ?? 15;
           if($("cooldownMonths")) $("cooldownMonths").value = data.cooldownMonths ?? 6;
           $("autoDialEnabled").checked = !!data.autoDialEnabled;
-          $("autoDialBatch").value = data.autoDialBatchSize ?? 5;
-          $("autoDialInterval").value = data.autoDialIntervalSeconds ?? 30;
+          $("autoDialBatch").value = String(data.autoDialBatchSize ?? 5);
+          $("autoDialInterval").value = String(data.autoDialIntervalSeconds ?? 300);
           setStatus($("topStatus"), "מחובר. עודכן: " + (data.updatedAt || "—"), true);
           try{
             const s = await api("/api/contacts/stats");
@@ -504,7 +538,7 @@ export function renderAdminPage() {
             body: JSON.stringify({
               autoDialEnabled: $("autoDialEnabled").checked,
               autoDialBatchSize: Number($("autoDialBatch").value || 5),
-              autoDialIntervalSeconds: Number($("autoDialInterval").value || 30)
+              autoDialIntervalSeconds: Number($("autoDialInterval").value || 300)
             })
           });
           setStatus($("dialerStatus"), "נשמר", true);
@@ -600,19 +634,30 @@ export function renderAdminPage() {
       async function loadContacts(){
         try{
           const out = await api("/api/contacts/list?limit=500&offset=0");
+          const dialFilter = ($("dialFilter")?.value || "all").trim();
           const q = ($("search").value || "").trim();
           const rows = (out.rows || []).filter((r) => {
             if(!q) return true;
             const s = ((r.first_name||"") + " " + (r.phone||"") + " " + (r.gender||"")).toLowerCase();
             return s.includes(q.toLowerCase());
+          }).filter((r) => {
+            if(dialFilter === "all") return true;
+            const isNew = (r.dial_status || "new") === "new";
+            return dialFilter === "new" ? isNew : !isNew;
           });
           const body = $("contactsBody");
           body.innerHTML = "";
           for(const r of rows){
             const tr = document.createElement("tr");
-            const gender = r.gender === "female" ? "נקבה" : r.gender === "male" ? "זכר" : "—";
-            const dnc = r.do_not_call ? '<span class="badge bad">כן</span>' : '<span class="badge good">לא</span>';
-            const status = '<span class="badge">'+(r.dial_status || "—")+'</span>';
+            const isNew = (r.dial_status || "new") === "new";
+            const status = isNew ? '<span class="badge good">לא בוצעה שיחה</span>' : '<span class="badge bad">בוצעה שיחה</span>';
+            const dncBadge = r.do_not_call ? '<span class="badge bad">לא להתקשר</span>' : '<span class="badge good">אפשר להתקשר</span>';
+            const dncBtn =
+              '<button class="iconBtn dncBtn" data-phone="'+(r.phone||"")+'" data-dnc="'+(r.do_not_call?1:0)+'" title="שנה סטטוס התקשרות">' +
+              '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+              '<path d="M12 6v6l4 2" stroke="rgba(255,255,255,.9)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+              '<path d="M21 12a9 9 0 1 1-3-6.7" stroke="rgba(255,255,255,.9)" stroke-width="1.6" stroke-linecap="round"/>' +
+              '</svg></button>';
             const dialBtn = r.do_not_call
               ? '<span class="badge bad">אל תתקשרו יותר</span>'
               : '<button class="iconBtn dialBtn" data-phone="'+(r.phone||"")+'" title="חייג עכשיו">' +
@@ -627,12 +672,10 @@ export function renderAdminPage() {
               '</svg></button>';
 
             tr.innerHTML =
-              '<td><div class="row" style="gap:6px;">'+ dialBtn + delBtn +'</div></td>' +
+              '<td><div class="row" style="gap:6px;">'+ dialBtn + dncBtn + delBtn +'</div></td>' +
               '<td><strong>'+(r.first_name || "—")+'</strong></td>' +
               '<td>'+ (r.phone || "—") +'</td>' +
-              '<td>'+ gender +'</td>' +
               '<td>'+ status +'</td>' +
-              '<td>'+ dnc +'</td>' +
               '<td>'+ (r.dial_attempts ?? 0) +'</td>';
             body.appendChild(tr);
           }
@@ -654,6 +697,12 @@ export function renderAdminPage() {
             const st = r.status === "waiting"
               ? '<span class="badge good">מחכה לשיחה</span>'
               : '<span class="badge bad">לא מעוניין</span>';
+            const editBtn =
+              '<button class="iconBtn leadEditBtn" data-phone="'+(r.phone||"")+'" data-name="'+(r.firstName||"")+'" data-status="'+(r.status||"")+'" title="ערוך ליד">' +
+              '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+              '<path d="M4 20h4l10.5-10.5a2 2 0 0 0 0-3L16.5 4a2 2 0 0 0-3 0L3 14.5V20Z" stroke="rgba(255,255,255,.9)" stroke-width="1.6" stroke-linejoin="round"/>' +
+              '<path d="M13.5 6.5 17.5 10.5" stroke="rgba(255,255,255,.9)" stroke-width="1.6" stroke-linecap="round"/>' +
+              '</svg></button>';
             const delBtn =
               '<button class="iconBtn leadDelBtn" data-phone="'+(r.phone||"")+'" title="מחק ליד">' +
               '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
@@ -661,7 +710,7 @@ export function renderAdminPage() {
               '</svg></button>';
             const when = r.updatedAt ? String(r.updatedAt).replace("T"," ").replace("Z","") : "—";
             tr.innerHTML =
-              '<td><div class="row" style="gap:6px;">'+ delBtn +'</div></td>' +
+              '<td><div class="row" style="gap:6px;">'+ editBtn + delBtn +'</div></td>' +
               '<td><strong>'+(r.firstName || "—")+'</strong></td>' +
               '<td>'+ (r.phone || "—") +'</td>' +
               '<td>'+ st +'</td>' +
@@ -711,7 +760,26 @@ export function renderAdminPage() {
       // Dial click (event delegation)
       $("contactsBody").addEventListener("click", async (e) => {
         const btn = e.target.closest?.(".dialBtn");
+        const dnc = e.target.closest?.(".dncBtn");
         const del = e.target.closest?.(".delBtn");
+
+        if(dnc){
+          const phone = dnc.getAttribute("data-phone");
+          const cur = Number(dnc.getAttribute("data-dnc") || 0);
+          if(!phone) return;
+          dnc.disabled = true;
+          try{
+            await api("/api/contacts/set-dnc", { method:"POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ phone, doNotCall: cur ? 0 : 1 }) });
+            toast("עודכן", (cur ? "אפשר להתקשר" : "לא להתקשר יותר") + " • " + phone, true);
+            if($("listSection").style.display !== "none") await loadContacts();
+            await loadAll();
+          }catch(err){
+            toast("שגיאה", err.message || String(err), false);
+          } finally {
+            dnc.disabled = false;
+          }
+          return;
+        }
 
         if(btn){
           const phone = btn.getAttribute("data-phone");
@@ -749,7 +817,22 @@ export function renderAdminPage() {
       });
 
       $("leadsBody").addEventListener("click", async (e) => {
+        const edit = e.target.closest?.(".leadEditBtn");
         const del = e.target.closest?.(".leadDelBtn");
+
+        if (edit) {
+          const phone = edit.getAttribute("data-phone") || "";
+          const name = edit.getAttribute("data-name") || "";
+          const status = edit.getAttribute("data-status") || "waiting";
+          $("leadOldPhone").value = phone;
+          $("leadPhone").value = phone;
+          $("leadFirstName").value = name;
+          $("leadStatus").value = status === "not_interested" ? "not_interested" : "waiting";
+          $("leadEditStatus").textContent = "";
+          $("leadEditModal").style.display = "block";
+          return;
+        }
+
         if(!del) return;
         const phone = del.getAttribute("data-phone");
         if(!phone) return;
@@ -767,6 +850,37 @@ export function renderAdminPage() {
         }
       });
 
+      // Lead edit modal
+      const leadEditModal = $("leadEditModal");
+      function closeLeadEdit(){
+        leadEditModal.style.display = "none";
+      }
+      $("closeLeadEditBtn").addEventListener("click", closeLeadEdit);
+      leadEditModal.addEventListener("click", (e) => { if (e.target === leadEditModal) closeLeadEdit(); });
+      $("saveLeadEditBtn").addEventListener("click", async () => {
+        const oldPhone = ($("leadOldPhone").value || "").trim();
+        const newPhone = ($("leadPhone").value || "").trim();
+        const firstName = ($("leadFirstName").value || "").trim();
+        const status = ($("leadStatus").value || "waiting").trim();
+        if(!oldPhone) return setStatus($("leadEditStatus"), "חסר טלפון", false);
+        try{
+          await api("/api/leads/update", {
+            method:"POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({ oldPhone, newPhone, firstName, status })
+          });
+          setStatus($("leadEditStatus"), "נשמר", true);
+          toast("נשמר", "הליד עודכן", true);
+          closeLeadEdit();
+          if($("leadsSection").style.display !== "none") await loadLeads();
+          if($("listSection").style.display !== "none") await loadContacts();
+          await loadAll();
+        }catch(err){
+          setStatus($("leadEditStatus"), "שגיאה: " + (err.message || String(err)), false);
+          toast("שגיאה", err.message || String(err), false);
+        }
+      });
+
       $("showListBtn").addEventListener("click", async () => {
         const sec = $("listSection");
         sec.style.display = sec.style.display === "none" ? "block" : "none";
@@ -774,6 +888,7 @@ export function renderAdminPage() {
       });
       $("refreshListBtn").addEventListener("click", loadContacts);
       $("search").addEventListener("input", () => { if($("listSection").style.display !== "none") loadContacts(); });
+      if($("dialFilter")) $("dialFilter").addEventListener("change", () => { if($("listSection").style.display !== "none") loadContacts(); });
 
       $("showLeadsBtn").addEventListener("click", async () => {
         const sec = $("leadsSection");

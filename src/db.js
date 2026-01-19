@@ -212,6 +212,47 @@ export function markDoNotCall(db, phone) {
   db.prepare(`UPDATE contacts SET do_not_call = 1 WHERE phone = ?`).run(normalized);
 }
 
+export function setDoNotCall(db, phone, doNotCall) {
+  const normalized = normalizePhoneE164IL(phone);
+  if (!normalized) return;
+  db.prepare(`UPDATE contacts SET do_not_call = ? WHERE phone = ?`).run(doNotCall ? 1 : 0, normalized);
+}
+
+export function updateContactName(db, phone, firstName) {
+  const normalized = normalizePhoneE164IL(phone);
+  if (!normalized) return;
+  db.prepare(`UPDATE contacts SET first_name = ? WHERE phone = ?`).run(firstName ?? null, normalized);
+}
+
+export function updateLeadStatus(db, phone, status) {
+  const normalized = normalizePhoneE164IL(phone);
+  if (!normalized) return;
+  const s = String(status || "").toLowerCase();
+  const st = s === "waiting" || s === "won" ? "waiting" : "not_interested";
+  db.prepare(`UPDATE leads SET status = ?, updated_at = datetime('now') WHERE phone = ?`).run(st, normalized);
+}
+
+export function renamePhoneEverywhere(db, { oldPhone, newPhone }) {
+  const oldN = normalizePhoneE164IL(oldPhone);
+  const newN = normalizePhoneE164IL(newPhone);
+  if (!oldN || !newN) return { ok: false, error: "invalid_phone" };
+  if (oldN === newN) return { ok: true, oldPhone: oldN, newPhone: newN };
+  const tx = db.transaction(() => {
+    // Contacts (unique)
+    const existing = db.prepare(`SELECT phone FROM contacts WHERE phone = ?`).get(newN);
+    if (existing) throw new Error("phone_exists");
+    db.prepare(`UPDATE contacts SET phone = ? WHERE phone = ?`).run(newN, oldN);
+    db.prepare(`UPDATE leads SET phone = ? WHERE phone = ?`).run(newN, oldN);
+    db.prepare(`UPDATE calls SET phone = ? WHERE phone = ?`).run(newN, oldN);
+  });
+  try {
+    tx();
+    return { ok: true, oldPhone: oldN, newPhone: newN };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
 export function createOrGetCall(db, { callSid, phone, persona }) {
   const existing = db.prepare(`SELECT * FROM calls WHERE call_sid = ?`).get(callSid);
   if (existing) return existing;

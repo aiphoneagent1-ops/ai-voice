@@ -19,12 +19,16 @@ import {
   addMessage,
   getMessages,
   markDoNotCall,
+  setDoNotCall,
   getSetting,
   setSetting,
   getKnowledge,
   setKnowledge,
   upsertContact,
+  updateContactName,
+  updateLeadStatus,
   upsertLead,
+  renamePhoneEverywhere,
   listLeads,
   deleteLead,
   fetchNextContactsToDial,
@@ -1310,6 +1314,27 @@ function looksLikeDateAnswer(text) {
   return patterns.some((p) => t.includes(p));
 }
 
+function looksLikeDateUnknownOrAvailability(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  const patterns = [
+    "לא יודעת",
+    "לא יודע",
+    "לא בטוחה",
+    "לא סגורה",
+    "אין לי תאריך",
+    "אין לי תאריך עדיין",
+    "מתי פנוי",
+    "מתי פנויה",
+    "מה פנוי",
+    "מה פנויה",
+    "מה האפשרויות",
+    "מתי אפשר",
+    "לא משנה מתי"
+  ];
+  return patterns.some((p) => t.includes(p));
+}
+
 function isGenericAckTranscript(text) {
   const ns = normalizeIntentText(text);
   return (
@@ -1747,39 +1772,77 @@ function extractHeNumber(text) {
     const n = Number(dm[1]);
     if (Number.isFinite(n)) return n;
   }
-  // Hebrew words (minimal set for this campaign)
-  const map = new Map([
-    ["אחת", 1],
-    ["אחד", 1],
-    ["שתיים", 2],
-    ["שניים", 2],
-    ["שתי", 2],
-    ["שלוש", 3],
-    ["ארבע", 4],
-    ["חמש", 5],
-    ["שש", 6],
-    ["שבע", 7],
-    ["שמונה", 8],
-    ["תשע", 9],
-    ["עשר", 10],
-    ["עשרה", 10],
-    ["אחת עשרה", 11],
-    ["שתים עשרה", 12],
-    ["שתים-עשרה", 12],
-    ["שלוש עשרה", 13],
-    ["ארבע עשרה", 14],
-    ["חמש עשרה", 15],
-    ["חמשעשרה", 15],
-    ["חמש-עשרה", 15],
-    ["חמש עשר", 15]
-  ]);
-  // Try multi-word matches first
-  for (const [k, v] of map.entries()) {
-    if (k.includes(" ") && s.includes(k)) return v;
+  // Hebrew words parsing (phone conversations): handle 1-59 including forms like:
+  // "שש עשרה", "שש-עשרה", "עשרים", "עשרים ושתיים".
+  const unit = (w) => {
+    switch (w) {
+      case "אחת":
+      case "אחד":
+        return 1;
+      case "שתיים":
+      case "שניים":
+      case "שתי":
+        return 2;
+      case "שלוש":
+        return 3;
+      case "ארבע":
+        return 4;
+      case "חמש":
+        return 5;
+      case "שש":
+        return 6;
+      case "שבע":
+        return 7;
+      case "שמונה":
+        return 8;
+      case "תשע":
+        return 9;
+      default:
+        return null;
+    }
+  };
+  // 10
+  if (s.includes("עשר") || s.includes("עשרה")) return 10;
+  // 11-19: "<unit> עשרה/עשר"
+  {
+    const m = s.match(/\b(אחת|אחד|שתיים|שניים|שתי|שלוש|ארבע|חמש|שש|שבע|שמונה|תשע)\s*[- ]\s*עשר(?:ה)?\b/);
+    if (m) {
+      const u = unit(m[1]);
+      if (u != null) return 10 + u;
+    }
   }
-  // Single-word
-  for (const [k, v] of map.entries()) {
-    if (!k.includes(" ") && s.split(" ").includes(k)) return v;
+  // 15 common fused forms
+  if (s.includes("חמשעשרה") || s.includes("חמש-עשרה") || s.includes("חמש עשרה") || s.includes("חמש עשר")) return 15;
+  // Tens
+  const tensMap = new Map([
+    ["עשרים", 20],
+    ["שלושים", 30],
+    ["ארבעים", 40],
+    ["חמישים", 50]
+  ]);
+  let tens = null;
+  for (const [k, v] of tensMap.entries()) {
+    if (s.includes(k)) {
+      tens = v;
+      break;
+    }
+  }
+  if (tens != null) {
+    // exact tens ("עשרים")
+    const after = s.replace(/.*\b(עשרים|שלושים|ארבעים|חמישים)\b/, "").trim();
+    if (!after) return tens;
+    // allow optional "ו"
+    const m2 = after.match(/\bו?\s*(אחת|אחד|שתיים|שניים|שתי|שלוש|ארבע|חמש|שש|שבע|שמונה|תשע)\b/);
+    if (m2) {
+      const u = unit(m2[1]);
+      if (u != null) return tens + u;
+    }
+    return tens;
+  }
+  // Single-unit
+  for (const w of s.split(" ")) {
+    const u = unit(w);
+    if (u != null) return u;
   }
   return null;
 }
@@ -2264,7 +2327,13 @@ function toGoogleCsvUrl(url) {
   const m = u.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
   if (!m) return u;
   const sheetId = m[1];
-  return `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
+  // Preserve gid if present (sheet tab)
+  let gid = "";
+  try {
+    const um = u.match(/[?#&]gid=(\d+)/);
+    if (um) gid = um[1];
+  } catch {}
+  return `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv${gid ? `&gid=${gid}` : ""}`;
 }
 
 // Import contacts: Google Sheets public CSV
@@ -2273,16 +2342,49 @@ app.post("/api/contacts/import-sheet", async (req, res) => {
   if (!url) return res.status(400).json({ error: "missing url" });
 
   const r = await fetch(url);
-  if (!r.ok) return res.status(400).json({ error: `failed to fetch sheet: ${r.status}` });
+  if (!r.ok) {
+    if (r.status === 401 || r.status === 403) {
+      return res.status(400).json({
+        error:
+          `failed to fetch sheet: ${r.status}. ` +
+          `הגיליון כנראה לא ציבורי. ב-Google Sheets לחץ Share → General access → 'Anyone with the link' → Viewer, ואז נסה שוב.`
+      });
+    }
+    return res.status(400).json({ error: `failed to fetch sheet: ${r.status}` });
+  }
   const csv = await r.text();
 
   const records = csvParse(csv, { columns: true, skip_empty_lines: true });
   let imported = 0;
   for (const row of records) {
-    const phone = String(row.phone || row.Phone || row.PHONE || "").trim();
+    const phoneRaw = String(
+      row.phone ||
+        row.Phone ||
+        row.PHONE ||
+        row["טלפון"] ||
+        row["טלפון "] ||
+        row["מספר"] ||
+        row["מספר טלפון"] ||
+        ""
+    ).trim();
+    let phone = phoneRaw;
+    // Common Israel Sheets format: 9 digits starting with 5 (e.g. 502347812) -> prepend 0.
+    if (/^5\d{8}$/.test(phone)) phone = `0${phone}`;
     if (!phone) continue;
-    const gender = parseGender(row.gender || row.Gender || "");
-    const firstName = String(row.first_name || row.firstName || row.name || row.Name || "").trim() || null;
+    const gender =
+      parseGender(row.gender || row.Gender || row["מין"] || "") ||
+      // If this campaign is women-only, default to female for imported rows.
+      "female";
+    const firstName =
+      String(
+        row.first_name ||
+          row.firstName ||
+          row.name ||
+          row.Name ||
+          row["שם"] ||
+          row["שם "] ||
+          ""
+      ).trim() || null;
     upsertContact(db, { phone, gender, firstName });
     imported++;
   }
@@ -2326,6 +2428,51 @@ app.post("/api/leads/delete", (req, res) => {
   if (!rawPhone) return res.status(400).json({ error: "missing phone" });
   const out = deleteLead(db, rawPhone);
   res.json({ ok: true, ...out });
+});
+
+// Edit lead: update name/phone/status (admin)
+app.post("/api/leads/update", (req, res) => {
+  const oldPhoneRaw = String(req.body?.oldPhone ?? req.body?.phone ?? "").trim();
+  const newPhoneRaw = String(req.body?.newPhone ?? "").trim();
+  const firstName = String(req.body?.firstName ?? req.body?.first_name ?? "").trim();
+  const status = String(req.body?.status ?? "").trim() || "waiting";
+  if (!oldPhoneRaw) return res.status(400).json({ error: "missing phone" });
+
+  // If phone changes, rename everywhere first
+  let finalPhone = oldPhoneRaw;
+  if (newPhoneRaw) {
+    const r = renamePhoneEverywhere(db, { oldPhone: oldPhoneRaw, newPhone: newPhoneRaw });
+    if (!r.ok) return res.status(400).json({ error: r.error || "failed to update phone" });
+    finalPhone = r.newPhone || newPhoneRaw;
+  }
+
+  // Update name (contacts)
+  if (firstName) {
+    try {
+      updateContactName(db, finalPhone, firstName);
+    } catch {}
+  }
+
+  // Update lead status
+  try {
+    updateLeadStatus(db, finalPhone, status);
+  } catch {
+    // If lead row doesn't exist yet, create it
+    try {
+      upsertLead(db, { phone: finalPhone, status });
+    } catch {}
+  }
+
+  res.json({ ok: true, phone: finalPhone });
+});
+
+// Toggle DNC (do_not_call) for a contact
+app.post("/api/contacts/set-dnc", (req, res) => {
+  const rawPhone = String(req.body?.phone ?? "").trim();
+  const value = req.body?.doNotCall;
+  if (!rawPhone) return res.status(400).json({ error: "missing phone" });
+  setDoNotCall(db, rawPhone, !!value);
+  res.json({ ok: true });
 });
 
 // Add single contact (used by admin "test dial" modal)
@@ -4155,7 +4302,9 @@ wssMediaStream.on("connection", (ws, req) => {
 
       // Handle CLOSE (handoff confirmation)
       if (guidedStep === "CLOSE") {
-        if (detectAffirmativeShort(speech) || detectInterested(speech) || detectTransferConsent(speech)) {
+        const ns = normalizeIntentText(speech);
+        const yesMisheardAsKan = ns === "כאן" && String(speech || "").trim().length <= 4;
+        if (detectAffirmativeShort(speech) || detectInterested(speech) || detectTransferConsent(speech) || yesMisheardAsKan) {
           msLog("guided", { callSid, kind: "handoff_confirm" });
           await sayFinalAndHangup({ text: handoffConfirmCloseText({ persona }), outcome: "interested" });
           return;
@@ -4233,6 +4382,23 @@ wssMediaStream.on("connection", (ws, req) => {
           ns === "אוקי" ||
           ns === "כן" ||
           ns === "כאן";
+        // If user says "לא יודעת / מתי פנוי" (availability question), don't say "מצוין".
+        // Use a dedicated configurable line, then continue the flow.
+        if (!ackLike && looksLikeDateUnknownOrAvailability(ns)) {
+          guidedDateText = guidedDateText || s;
+          guidedStep = "ASK_PARTICIPANTS";
+          const flex = limitPhoneReply(
+            flowText.FLOW_DATE_FLEX_CONFIRM || "אין בעיה. נציגה תחזור אלייך בהקדם כדי לתאם תאריך שנוח לך.",
+            200
+          );
+          const q = limitPhoneReply(`${flex} ${flowText.FLOW_ASK_PARTICIPANTS}`.trim(), 260);
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
+          } catch {}
+          guidedLastQuestionAt = Date.now();
+          await sayText(q, { label: "reply" });
+          return;
+        }
         // Don't advance on acknowledgments; re-ask current question.
         // (Do NOT use length gating here; real date answers can be short like "מחר", "רביעי", "בערב".)
         if (ackLike || !looksLikeDateAnswer(ns)) {
@@ -4272,7 +4438,32 @@ wssMediaStream.on("connection", (ws, req) => {
           ns === "אוקי" ||
           ns === "כן" ||
           ns === "כאן";
+        // If user didn't provide a number:
+        // - If it's a generic ack -> re-ask
+        // - If it's "לא יודעת/לא בטוחה" -> fallback + proceed to handoff (rep can help)
+        if (n == null && looksLikeDateUnknownOrAvailability(ns)) {
+          msLog("guided", { callSid, kind: "participants_unknown", n: null });
+          guidedStep = "CLOSE";
+          const t = limitPhoneReply(flowText.FLOW_PARTICIPANTS_LOW_FALLBACK, 200);
+          const q = handoffQuestionText();
+          const msg = limitPhoneReply(`${t} ${q}`.trim(), 240);
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+          } catch {}
+          await sayText(msg, { label: "reply" });
+          return;
+        }
         if (n == null && ackLike) {
+          const q0 = limitPhoneReply(flowText.FLOW_ASK_PARTICIPANTS, 160);
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
+          } catch {}
+          guidedLastQuestionAt = Date.now();
+          await sayText(q0, { label: "reply" });
+          return;
+        }
+        if (n == null) {
+          // Not a number and not a clear "I don't know" -> re-ask (prevents wrong <15 branch).
           const q0 = limitPhoneReply(flowText.FLOW_ASK_PARTICIPANTS, 160);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
