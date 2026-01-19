@@ -380,6 +380,33 @@ const MS_RECORD_CALLS = process.env.MS_RECORD_CALLS === "1" || process.env.MS_RE
 // Safety: cap recording duration (seconds) to avoid unbounded disk usage in production.
 const MS_RECORD_MAX_SECONDS = Number(process.env.MS_RECORD_MAX_SECONDS || 300); // 5 minutes default
 
+// Google Sheets live sync (optional): send lead outcomes to a Sheets webhook (Apps Script).
+const GS_WEBHOOK_URL = String(process.env.GS_WEBHOOK_URL || process.env.GOOGLE_SHEETS_WEBHOOK_URL || "").trim();
+const GS_WEBHOOK_SECRET = String(process.env.GS_WEBHOOK_SECRET || "").trim();
+
+async function postLeadToGoogleSheets(payload) {
+  if (!GS_WEBHOOK_URL) return { ok: false, skipped: true };
+  try {
+    const res = await fetch(GS_WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(GS_WEBHOOK_SECRET ? { "X-Webhook-Secret": GS_WEBHOOK_SECRET } : {})
+      },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      console.warn("[sheets] webhook failed", { status: res.status, body: t.slice(0, 300) });
+      return { ok: false, status: res.status };
+    }
+    return { ok: true };
+  } catch (e) {
+    console.warn("[sheets] webhook error", e?.message || e);
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
 // Cache for ElevenLabs ulaw outputs:
 // - Memory cache helps within a single process lifetime.
 // - Disk cache (Render persistent disk) makes greeting fast even after cold starts/deploys.
@@ -2876,6 +2903,18 @@ app.all("/twilio/record", async (req, res) => {
       try {
         upsertLead(db, { phone, status: "not_interested", callSid, persona });
       } catch {}
+      // Sync to Google Sheets (best-effort)
+      void postLeadToGoogleSheets({
+        event: "lead",
+        ts: new Date().toISOString(),
+        phone,
+        firstName: String(getContactByPhone(db, phone)?.first_name || ""),
+        status: "not_interested",
+        callSid,
+        persona,
+        doNotCall: true,
+        campaignMode: String(settingsSnapshot()?.campaignMode || "")
+      });
       await respondWithPlayAndMaybeHangup(req, res, {
         text: "אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב.",
         persona,
@@ -2946,6 +2985,17 @@ app.all("/twilio/record", async (req, res) => {
       try {
         upsertLead(db, { phone, status: interested ? "waiting" : "not_interested", callSid, persona });
       } catch {}
+      void postLeadToGoogleSheets({
+        event: "lead",
+        ts: new Date().toISOString(),
+        phone,
+        firstName: String(getContactByPhone(db, phone)?.first_name || ""),
+        status: interested ? "waiting" : "not_interested",
+        callSid,
+        persona,
+        doNotCall: false,
+        campaignMode: String(settingsSnapshot()?.campaignMode || "")
+      });
       const picked =
         (interested
           ? handoffConfirmCloseText({ persona })
@@ -2986,6 +3036,20 @@ app.all("/twilio/record", async (req, res) => {
 
     if (detectOptOut(answer)) {
       markDoNotCall(db, phone);
+      try {
+        upsertLead(db, { phone, status: "not_interested", callSid, persona });
+      } catch {}
+      void postLeadToGoogleSheets({
+        event: "lead",
+        ts: new Date().toISOString(),
+        phone,
+        firstName: String(getContactByPhone(db, phone)?.first_name || ""),
+        status: "not_interested",
+        callSid,
+        persona,
+        doNotCall: true,
+        campaignMode: String(settingsSnapshot()?.campaignMode || "")
+      });
       await respondWithPlayAndMaybeHangup(req, res, { text: "אין בעיה, הסרתי אותך. יום טוב.", persona, hangup: true });
       return;
     }
@@ -3554,6 +3618,27 @@ wssMediaStream.on("connection", (ws, req) => {
   let participantsPersuadeAsked = false;
   let guidedAskedCooldownRule = false;
   let guidedLastQuestionAt = 0;
+  // Google Sheets sync guard (avoid duplicate rows on ws close after explicit outcome)
+  let sheetsSynced = false;
+
+  function syncLeadToSheetsOnce({ status, doNotCall }) {
+    if (sheetsSynced) return;
+    sheetsSynced = true;
+    void postLeadToGoogleSheets({
+      event: "lead",
+      ts: new Date().toISOString(),
+      phone,
+      firstName: String(getContactByPhone(db, phone)?.first_name || ""),
+      status,
+      callSid,
+      persona,
+      doNotCall: !!doNotCall,
+      campaignMode: String(settingsSnapshot()?.campaignMode || ""),
+      purpose: guidedPurpose || "",
+      dateText: guidedDateText || "",
+      participants: guidedParticipants ?? null
+    });
+  }
 
   function confirmQuestionText() {
     // No-apology mode: never say "לא שמעתי/לא קלטתי/תחזור".
@@ -3574,13 +3659,16 @@ wssMediaStream.on("connection", (ws, req) => {
         if (callSid && phone) upsertLead(db, { phone, status: "waiting", callSid, persona });
         leadWaiting = true;
         lastOutcome = "interested";
+        syncLeadToSheetsOnce({ status: "waiting", doNotCall: false });
       } else if (outcome === "not_interested") {
         if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
         lastOutcome = "not_interested";
+        syncLeadToSheetsOnce({ status: "not_interested", doNotCall: false });
       } else if (outcome === "do_not_call") {
         if (phone) markDoNotCall(db, phone);
         if (callSid && phone) upsertLead(db, { phone, status: "not_interested", callSid, persona });
         lastOutcome = "do_not_call";
+        syncLeadToSheetsOnce({ status: "not_interested", doNotCall: true });
       }
     } catch {}
 
@@ -4765,6 +4853,8 @@ wssMediaStream.on("connection", (ws, req) => {
     try {
       if (callSid && phone && !leadWaiting) {
         upsertLead(db, { phone, status: "not_interested", callSid, persona });
+        // Sync to Google Sheets (best-effort) - once per call
+        if (!sheetsSynced) syncLeadToSheetsOnce({ status: "not_interested", doNotCall: false });
       }
     } catch {}
     msLog("ws closed", { callSid, streamSid, phone });
