@@ -386,6 +386,20 @@ const MS_RECORD_MAX_SECONDS = Number(process.env.MS_RECORD_MAX_SECONDS || 300); 
 // Google Sheets live sync (optional): send lead outcomes to a Sheets webhook (Apps Script).
 const GS_WEBHOOK_URL = String(process.env.GS_WEBHOOK_URL || process.env.GOOGLE_SHEETS_WEBHOOK_URL || "").trim();
 const GS_WEBHOOK_SECRET = String(process.env.GS_WEBHOOK_SECRET || "").trim();
+const GS_SUMMARY_MODE = String(process.env.GS_SUMMARY_MODE || "heuristic").trim().toLowerCase(); // heuristic | none
+
+function buildHeLeadSummary({ status, doNotCall, purpose, dateText, participants }) {
+  if (doNotCall) return "ביקש/ה להסיר את המספר. לא להתקשר יותר.";
+  if (status === "waiting") {
+    const bits = ["מעוניינת/ת. ביקש/ה שיחזרו לתיאום."];
+    if (purpose) bits.push(`מטרה: ${String(purpose).trim()}.`);
+    if (dateText) bits.push(`תאריך/זמן: ${String(dateText).trim()}.`);
+    if (participants != null && participants !== "") bits.push(`משתתפים: ${String(participants).trim()}.`);
+    return bits.join(" ").trim();
+  }
+  if (status === "not_interested") return "לא מעוניינת/ת (או השיחה הסתיימה בלי סגירה).";
+  return "";
+}
 
 async function postLeadToGoogleSheets(payload) {
   if (!GS_WEBHOOK_URL) {
@@ -2264,6 +2278,7 @@ app.post("/api/admin/sheets/test", async (req, res) => {
       callSid: String(body.callSid || `TEST_${Date.now()}`),
       persona: "female",
       doNotCall: false,
+      summary: "בדיקת מערכת: webhook לשיטס עובד.",
       campaignMode: String(settingsSnapshot()?.campaignMode || "")
     };
     const r = await postLeadToGoogleSheets(payload);
@@ -3712,6 +3727,16 @@ wssMediaStream.on("connection", (ws, req) => {
   function syncLeadToSheetsOnce({ status, doNotCall }) {
     if (sheetsSynced) return;
     sheetsSynced = true;
+    const summary =
+      GS_SUMMARY_MODE === "none"
+        ? ""
+        : buildHeLeadSummary({
+            status,
+            doNotCall: !!doNotCall,
+            purpose: guidedPurpose || "",
+            dateText: guidedDateText || "",
+            participants: guidedParticipants ?? ""
+          });
     void postLeadToGoogleSheets({
       event: "lead",
       ts: new Date().toISOString(),
@@ -3721,6 +3746,7 @@ wssMediaStream.on("connection", (ws, req) => {
       callSid,
       persona,
       doNotCall: !!doNotCall,
+      summary,
       campaignMode: String(settingsSnapshot()?.campaignMode || ""),
       purpose: guidedPurpose || "",
       dateText: guidedDateText || "",
