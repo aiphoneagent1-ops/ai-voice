@@ -221,7 +221,12 @@ const OPENAI_STT_MODEL = process.env.OPENAI_STT_MODEL || "whisper-1";
 const OPENAI_STT_MODEL_FALLBACK = String(process.env.OPENAI_STT_MODEL_FALLBACK || "").trim();
 const OPENAI_STT_PROMPT =
   process.env.OPENAI_STT_PROMPT ||
-  "תמלול שיחה טלפונית בעברית. מילים נפוצות: כן, מעוניין, מעוניינת, סבבה, יאללה, תעביר, פרטים, שיחזרו, תודה, לא, לא תודה, להסיר, אל תתקשרו.";
+  // Keep this generic (white-label) but tuned for Israeli phone Hebrew: short confirmations, polite filler,
+  // and common “handoff” phrases that matter for intent detection.
+  "תמלול שיחה טלפונית בעברית (ישראל). שמור ניסוח מלא ככל האפשר ואל תחליף משפטים ב'תודה/כן' אם לא נאמר. " +
+  "מילים/ביטויים נפוצים: כן, לא, לא תודה, תודה, תודה רבה, סבבה, בסדר, אוקיי, מעולה, מצוין, הכל טוב, מה שלומך, " +
+  "מעוניין, מעוניינת, רוצה, אשמח, תעביר, תעבירו, תעביר את הפרטים, תעבירו את הפרטים, פרטים, שיחזרו, לחזור אלי, " +
+  "מה השעות שלכם, איזו שעה, מתי, להסיר, אל תתקשרו, תפסיקו להתקשר.";
 const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
 const OPENAI_TTS_VOICE_MALE = process.env.OPENAI_TTS_VOICE_MALE || "alloy";
 const OPENAI_TTS_VOICE_FEMALE = process.env.OPENAI_TTS_VOICE_FEMALE || "alloy";
