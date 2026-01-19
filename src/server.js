@@ -372,8 +372,11 @@ const MS_TEST_TONE = process.env.MS_TEST_TONE === "1" || process.env.MS_TEST_TON
 // Barge-in tuning: avoid clearing agent speech on line noise/echo.
 const MS_BARGE_IN_FRAMES = Number(process.env.MS_BARGE_IN_FRAMES || 15); // 15 frames * 20ms = 300ms
 const MS_BARGE_IN_GRACE_MS = Number(process.env.MS_BARGE_IN_GRACE_MS || 400); // don't barge-in instantly after agent starts
+const MS_BARGE_IN_MIN_RMS = Number(process.env.MS_BARGE_IN_MIN_RMS || 2200); // extra safety: ignore low-level line noise/echo
 // Default: turn-taking like a normal call (no interruptions). You can enable barge-in later.
 const MS_ENABLE_BARGE_IN = process.env.MS_ENABLE_BARGE_IN === "1" || process.env.MS_ENABLE_BARGE_IN === "true";
+// Guided flow: prevent rapid re-asks while caller is still talking (avoids "looping the same question").
+const GUIDED_REASK_MIN_MS = Number(process.env.GUIDED_REASK_MIN_MS || 2500);
 // Call recording (Media Streams): record both sides (agent + caller) into a stereo WAV (8k PCM16).
 // Enabled via MS_RECORD_CALLS=1 on Render.
 const MS_RECORD_CALLS = process.env.MS_RECORD_CALLS === "1" || process.env.MS_RECORD_CALLS === "true";
@@ -1876,6 +1879,36 @@ function extractHeNumber(text) {
     const u = unit(w);
     if (u != null) return u;
   }
+  return null;
+}
+
+// Heuristic: if user lists people instead of giving a number ("אמא שלי, אחותי, סבתא שלי"),
+// infer an approximate count to keep the guided flow moving.
+function inferParticipantsCountFromList(ns) {
+  const s = String(ns || "").trim();
+  if (!s) return null;
+  // Only attempt if it looks like a list + contains common "people" signals
+  const hasPeopleSignals =
+    /אמא|אימא|אבא|אחות|אחי|סבתא|סבא|דוד|דודה|חברה|חברות|שכנה|שכנות|גיסה|חמות|בן דודה|בת דודה|אשת/.test(s);
+  if (!hasPeopleSignals) return null;
+  const looksLikeList = s.includes(",") || s.includes(" וגם ") || s.includes(" ו");
+  if (!looksLikeList) return null;
+
+  let t = s;
+  // remove common fillers
+  t = t.replace(/^(אני (חושב|חושבת) )?משהו כמו\s+/, "");
+  t = t.replace(/^(אני (חושב|חושבת) )?בערך\s+/, "");
+  t = t.replace(/^(אני (חושב|חושבת) )?נגיד\s+/, "");
+  t = t.replace(/^(אני (חושב|חושבת) )?כאילו\s+/, "");
+
+  const rawParts = t
+    .split(/,|\sוגם\s|\sוגם\s|\sוגם\s| וגם | ו/gi)
+    .map((p) => String(p || "").trim())
+    .filter(Boolean);
+
+  // filter out tiny fragments
+  const parts = rawParts.filter((p) => p.length >= 2 && p !== "שלי");
+  if (parts.length >= 2 && parts.length <= 12) return parts.length;
   return null;
 }
 
@@ -4552,9 +4585,10 @@ wssMediaStream.on("connection", (ws, req) => {
       }
 
       if (guidedStep === "ASK_PARTICIPANTS") {
-        const n = extractHeNumber(speech);
-        guidedParticipants = n;
         const ns = normalizeIntentText(speech);
+        // Try to extract a number; if caller lists people, infer an approximate count.
+        const n = extractHeNumber(speech) ?? inferParticipantsCountFromList(ns);
+        guidedParticipants = n;
         const ackLike =
           ns === "תודה" ||
           ns === "תודה רבה" ||
@@ -4580,6 +4614,8 @@ wssMediaStream.on("connection", (ws, req) => {
           return;
         }
         if (n == null && ackLike) {
+          // Avoid rapid loops while the caller is still talking.
+          if (guidedLastQuestionAt && Date.now() - guidedLastQuestionAt < GUIDED_REASK_MIN_MS) return;
           const q0 = limitPhoneReply(flowText.FLOW_ASK_PARTICIPANTS, 160);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
@@ -4590,6 +4626,7 @@ wssMediaStream.on("connection", (ws, req) => {
         }
         if (n == null) {
           // Not a number and not a clear "I don't know" -> re-ask (prevents wrong <15 branch).
+          if (guidedLastQuestionAt && Date.now() - guidedLastQuestionAt < GUIDED_REASK_MIN_MS) return;
           const q0 = limitPhoneReply(flowText.FLOW_ASK_PARTICIPANTS, 160);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
@@ -4999,10 +5036,6 @@ wssMediaStream.on("connection", (ws, req) => {
         recInUlawQ.push(b);
       }
 
-      // Echo-safe: while agent is speaking (Twilio still playing our audio), ignore inbound for VAD/STT.
-      // This prevents echo from being treated as "user speech" and causing 6–8s waits.
-      if (agentSpeaking) return;
-
       const pcm16 = ulawBufferToPcm16(ulawBuf);
       const rms = rmsFromPcm16(pcm16);
       const now = Date.now();
@@ -5013,6 +5046,46 @@ wssMediaStream.on("connection", (ws, req) => {
       const adaptiveThr = Math.max(MS_VAD_MIN_RMS, noiseFloor * MS_VAD_NOISE_MULT + MS_VAD_NOISE_MARGIN);
       const calibrating = allowListen && calibrateUntil && now < calibrateUntil;
       const voiced = !calibrating && rms >= adaptiveThr;
+
+      // While agent is speaking, we normally ignore inbound for STT to avoid echo.
+      // BUT if barge-in is enabled, we still run a stricter VAD just to stop playback and let the caller talk.
+      if (agentSpeaking) {
+        if (MS_ENABLE_BARGE_IN && playing && allowBargeIn) {
+          const inGrace = playingSince && now - playingSince < MS_BARGE_IN_GRACE_MS;
+          const bargeThr = Math.max(adaptiveThr, MS_BARGE_IN_MIN_RMS);
+          const bargeVoiced = !inGrace && rms >= bargeThr;
+          if (bargeVoiced) {
+            bargeInFrames++;
+            if (bargeInFrames >= Math.max(1, MS_BARGE_IN_FRAMES)) {
+              msLog("barge-in: clear", {
+                label: currentPlay?.label || "",
+                rms: Math.round(rms),
+                thr: Math.round(bargeThr),
+                frames: bargeInFrames
+              });
+              bargeInFrames = 0;
+              // Stop agent playback immediately and start listening for the caller.
+              stopPlayback({ clear: true });
+              allowListen = true;
+              allowBargeIn = MS_ENABLE_BARGE_IN;
+              calibrateUntil = Date.now() + MS_NOISE_CALIBRATION_MS;
+              // Start a fresh utterance from this frame (best-effort; avoids echo bleed).
+              awaitingReply = false;
+              thinkingPlayed = false;
+              clearThinkingTimer();
+              speechActive = true;
+              utterancePcm8kChunks = [pcm16];
+              utteranceStartAt = now;
+              utteranceVoicedFrames = 1;
+              lastVoiceAt = now;
+              msLog("speech start (after barge-in)", { callSid, rms: Math.round(rms), thr: Math.round(bargeThr) });
+            }
+          } else if (bargeInFrames > 0) {
+            bargeInFrames = Math.max(0, bargeInFrames - 1);
+          }
+        }
+        return;
+      }
       if (voiced) {
         inboundVoicedFrames++;
         lastVoiceAt = now;
