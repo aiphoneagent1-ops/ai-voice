@@ -1335,6 +1335,13 @@ function looksLikeDateUnknownOrAvailability(text) {
   return patterns.some((p) => t.includes(p));
 }
 
+function looksLikeUnknownAnswer(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  const patterns = ["לא יודעת", "לא יודע", "לא בטוחה", "לא סגורה", "אין לי מושג", "לא זוכרת"];
+  return patterns.some((p) => t.includes(p));
+}
+
 function isGenericAckTranscript(text) {
   const ns = normalizeIntentText(text);
   return (
@@ -1714,10 +1721,8 @@ function detectRabbinicalInquiry(text) {
   if (!t) return false;
   // "רבנית X", "מדריכה X", "הרבנית מגיעה?", "מי הרבנית?"
   const triggers = ["רבנית", "רב", "מדריכה", "מדריכות", "רבניות", "שם הרבנית", "מי הרבנית"];
-  if (triggers.some((p) => t.includes(p))) return true;
-  // Common question forms about names
-  const q = ["מי", "האם", "יש", "קוראים", "איך קוראים", "מגיעה", "מגיע"];
-  return q.some((p) => t.includes(p));
+  // Must include a rabbi/instructor-related trigger. Do NOT treat generic "האם/יש" as a names inquiry.
+  return triggers.some((p) => t.includes(p));
 }
 
 function matchApprovedNameInText({ kb, userText }) {
@@ -4318,7 +4323,8 @@ wssMediaStream.on("connection", (ws, req) => {
       }
 
       // Handle hard NO / goodbye
-      if (detectNotInterested(speech)) {
+      // Treat "לא יודעת/לא בטוחה" as an unknown answer (not a hard NO).
+      if (detectNotInterested(speech) && !looksLikeUnknownAnswer(speech)) {
         msLog("guided", { callSid, kind: "not_interested" });
         await sayFinalAndHangup({ text: "אין בעיה, תודה על הזמן. יום טוב ובשורות טובות.", outcome: "not_interested" });
         return;
@@ -4381,11 +4387,19 @@ wssMediaStream.on("connection", (ws, req) => {
         }
 
         // Otherwise, treat this response as the purpose and move on.
-        guidedPurpose = guidedPurpose || s;
+        // If user says "לא יודעת/לא בטוחה", don't get stuck. Continue to date and let a rep handle details.
+        if (!guidedPurpose && looksLikeUnknownAnswer(ns)) {
+          guidedPurpose = "";
+        } else {
+          guidedPurpose = guidedPurpose || s;
+        }
         guidedAskedPurposeQ = true;
         guidedStep = "ASK_DATE";
         const ack = limitPhoneReply(flowText.FLOW_ACK_PURPOSE || flowText.FLOW_ACK_GENERAL || "", 40);
-        const q = limitPhoneReply(`${ack ? ack + " " : ""}${flowText.FLOW_ASK_DATE}`.trim(), 200);
+        const unknownPrefix = !guidedPurpose && looksLikeUnknownAnswer(ns)
+          ? limitPhoneReply(flowText.FLOW_PURPOSE_UNKNOWN || "הבנתי. נציגה תוכל לעזור לסגור את זה. בואי נתקדם רגע.", 140)
+          : "";
+        const q = limitPhoneReply(`${unknownPrefix ? unknownPrefix + " " : ""}${ack ? ack + " " : ""}${flowText.FLOW_ASK_DATE}`.trim(), 240);
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
         } catch {}
