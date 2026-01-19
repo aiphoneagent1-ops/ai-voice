@@ -1333,7 +1333,7 @@ function quickReplyByRules({ speech, persona }) {
     const toYou = persona === "female" ? "אלייך" : "אליך";
     return {
       text:
-        `את הפרטים המדויקים—שעה, מקום ואם יש עלות—העמותה נותנת בשיחה. רוצה שיחזרו ${toYou} עם כל הפרטים המסודרים?`,
+        `את הפרטים המדויקים—שעה, מקום ואם יש עלות—הגורם הרלוונטי נותן בשיחה. רוצה שיחזרו ${toYou} עם כל הפרטים המסודרים?`,
       end: false
     };
   }
@@ -1464,16 +1464,17 @@ function extractFlowLinesFromKnowledgeBase(kbRaw) {
 
 function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
   const flow = extractFlowLinesFromKnowledgeBase(kb);
-  // Provide safe generic defaults (white-label; can be overridden in KB).
+  // Provide safe GENERIC defaults (white-label; can be overridden in KB).
+  // Important: these defaults must NOT mention any specific campaign (religion/city/organization/etc.).
   const defaults = {
-    FLOW_ASK_PURPOSE: "לאיזו מטרה תרצי להקדיש את הערב?",
-    FLOW_ASK_DATE: "למתי תרצי לתאם את הערב?",
-    FLOW_ASK_PARTICIPANTS: "כמה משתתפות יגיעו לערב?",
+    FLOW_ASK_PURPOSE: "בגדול—מה המטרה/הבקשה שלך?",
+    FLOW_ASK_DATE: "מתי נוח לך?",
+    FLOW_ASK_PARTICIPANTS: "כמה משתתפים צפויים בערך?",
     FLOW_PARTICIPANTS_OK: "מצוין. נציגה תחזור אלייך בהקדם עם כל הפרטים.",
-    FLOW_PARTICIPANTS_LOW: `הערב מיועד ל${minParticipants} משתתפות ומעלה. אם כל אחת תביא עוד מישהי, נגיע לזה בקלות. תצליחי לארגן ${minParticipants}?`,
-    FLOW_PARTICIPANTS_LOW_FALLBACK: "מבינה. בכל מקרה נציגה תחזור אלייך ותנסה לעזור לגבי מספר המשתתפות.",
-    FLOW_COOLDOWN_RULE: `אנחנו מתאמים אירוע חוזר רק אחרי מינימום ${cooldownMonths} חודשים.`,
-    FLOW_WOMEN_ONLY: "שלום, אנחנו פונות כרגע לנשים בלבד. יום טוב."
+    FLOW_PARTICIPANTS_LOW: `כדי שזה יעבוד אנחנו צריכים מינימום ${minParticipants} משתתפים. תצליחי להגיע ל־${minParticipants}?`,
+    FLOW_PARTICIPANTS_LOW_FALLBACK: "מבין. בכל מקרה נציגה תחזור אלייך בהקדם ותנסה לעזור לגבי הפרטים.",
+    FLOW_COOLDOWN_RULE: `בדרך כלל אפשר לקבוע שוב רק אחרי מינימום ${cooldownMonths} חודשים.`,
+    FLOW_WOMEN_ONLY: "שלום, כרגע השיחה מיועדת לנשים בלבד. יום טוב."
   };
   return { ...defaults, ...flow };
 }
@@ -1614,7 +1615,7 @@ function settingsSnapshot() {
   const autoDialBatchSize = Number(getSetting(db, "autoDialBatchSize", 5));
   const autoDialIntervalSeconds = Number(getSetting(db, "autoDialIntervalSeconds", 30));
 
-  // White-label phrases MUST be short ("לצוות", "מהצוות", "לעמותה", "מהעמותה").
+  // White-label phrases MUST be short (examples: "לצוות", "מהצוות", "למוקד", "מהמוקד").
   // If someone pastes the whole greeting here, it creates a repetition loop like:
   // "רוצה שיחזרו אליך <greeting> עם פרטים מסודרים?"
   const handoffToPhrase = normalizeShortPhrase(getSetting(db, "handoffToPhrase", "לצוות"), {
