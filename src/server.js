@@ -1241,6 +1241,65 @@ function detectWaitRequest(text) {
   return patterns.some((p) => t.includes(p));
 }
 
+function detectRepeatRequest(text) {
+  const t = normalizeIntentText(text);
+  const patterns = [
+    "מה אמרת",
+    "מה אמרת לי",
+    "מה נאמר",
+    "לא הבנתי",
+    "לא הבנתי אותך",
+    "תחזור",
+    "תחזרי",
+    "תאמר שוב",
+    "תגיד שוב",
+    "תגידי שוב",
+    "עוד פעם",
+    "שוב פעם"
+  ];
+  return patterns.some((p) => t.includes(p));
+}
+
+function detectSmalltalk(text) {
+  const t = normalizeIntentText(text);
+  // common Israeli smalltalk right after pickup
+  const patterns = ["מה נשמע", "מה שלומך", "מה קורה", "מה העניינים", "הכל טוב", "שלום לך", "שלום מה נשמע"];
+  return patterns.some((p) => t.includes(p));
+}
+
+function looksLikeDateAnswer(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  // digits often indicate a date/time
+  if (/\d/.test(t)) return true;
+  const patterns = [
+    "היום",
+    "מחר",
+    "מחרתיים",
+    "עוד",
+    "שבוע",
+    "שבועיים",
+    "חודש",
+    "חודשים",
+    "תאריך",
+    "יום",
+    "ראשון",
+    "שני",
+    "שלישי",
+    "רביעי",
+    "חמישי",
+    "שישי",
+    "שבת",
+    "בבוקר",
+    "בצהריים",
+    "בצהרים",
+    "בערב",
+    "בלילה",
+    "אחרי"
+  ];
+  return patterns.some((p) => t.includes(p));
+}
+
 function isGenericAckTranscript(text) {
   const ns = normalizeIntentText(text);
   return (
@@ -3917,6 +3976,33 @@ wssMediaStream.on("connection", (ws, req) => {
         if (callSid && phone) addMessage(db, { callSid, role: "user", content: speech });
       } catch {}
 
+      // Smalltalk/clarification layer: keep the call natural without breaking the deterministic flow.
+      // - If user says "מה נשמע/מה שלומך" → respond politely and re-ask the current step question.
+      // - If user says "מה אמרת/מה נאמר/לא הבנתי" → repeat the current step question.
+      const ns0 = normalizeIntentText(speech);
+      if (detectRepeatRequest(ns0) || detectSmalltalk(ns0)) {
+        let prefix = "";
+        if (detectSmalltalk(ns0)) {
+          // Optional override in KB (white-label friendly):
+          // FLOW_SMALLTALK_REPLY=הכל טוב, תודה. :)
+          prefix = String(flowText.FLOW_SMALLTALK_REPLY || "הכל טוב, תודה.").trim();
+        }
+        let q0 = "";
+        if (guidedStep === "ASK_PURPOSE") q0 = flowText.FLOW_ASK_PURPOSE;
+        else if (guidedStep === "ASK_DATE") q0 = flowText.FLOW_ASK_DATE;
+        else if (guidedStep === "ASK_PARTICIPANTS") q0 = flowText.FLOW_ASK_PARTICIPANTS;
+        else if (guidedStep === "PARTICIPANTS_PERSUADE") q0 = flowText.FLOW_PARTICIPANTS_LOW;
+        else if (guidedStep === "CLOSE") q0 = handoffQuestionText();
+        const msg = limitPhoneReply(`${prefix ? prefix + " " : ""}${q0 || ""}`.trim() || q0, 240);
+        msLog("guided", { callSid, kind: detectSmalltalk(ns0) ? "smalltalk" : "repeat_request", step: guidedStep });
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+        } catch {}
+        guidedLastQuestionAt = Date.now();
+        await sayText(msg, { label: "reply" });
+        return;
+      }
+
       // FAQ layer (from KB "question → answer" lines):
       // If user asks a known question, answer it and then continue the current guided step.
       // This is how we support "not exact words" matching.
@@ -4051,7 +4137,7 @@ wssMediaStream.on("connection", (ws, req) => {
           ns === "כאן";
         // Don't advance on acknowledgments; re-ask current question.
         // (Do NOT use length gating here; real date answers can be short like "מחר", "רביעי", "בערב".)
-        if (ackLike) {
+        if (ackLike || !looksLikeDateAnswer(ns)) {
           const q0 = limitPhoneReply(flowText.FLOW_ASK_DATE, 160);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
