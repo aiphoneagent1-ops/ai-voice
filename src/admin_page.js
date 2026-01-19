@@ -55,6 +55,7 @@ export function renderAdminPage() {
       .tab{ padding: 8px 10px; border-radius: 999px; border:1px solid rgba(255,255,255,.10); background: rgba(255,255,255,.03); color: var(--muted); font-size: 12px; cursor:pointer; }
       .tab.active{ border-color: rgba(109,140,255,.55); background: rgba(109,140,255,.18); color: #fff; }
       .tableWrap{ overflow:auto; border-radius: 14px; border:1px solid rgba(255,255,255,.08); background: rgba(0,0,0,.16); }
+      .tableWrap.fixed5 { max-height: 320px; } /* ~5 rows + header; scroll inside */
       table{ width:100%; border-collapse: collapse; min-width: 820px; }
       th, td{ text-align:right; padding: 10px 12px; border-bottom:1px solid rgba(255,255,255,.06); font-size: 12px; color: var(--muted); }
       th{ color:#fff; font-weight:600; background: rgba(255,255,255,.03); position: sticky; top:0; }
@@ -182,7 +183,7 @@ export function renderAdminPage() {
               <span class="status" id="listStatus"></span>
             </div>
             <div style="height:10px;"></div>
-            <div class="tableWrap">
+            <div class="tableWrap fixed5">
               <table>
                 <thead>
                   <tr>
