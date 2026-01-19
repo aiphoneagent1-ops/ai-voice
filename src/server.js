@@ -388,7 +388,14 @@ const GS_WEBHOOK_URL = String(process.env.GS_WEBHOOK_URL || process.env.GOOGLE_S
 const GS_WEBHOOK_SECRET = String(process.env.GS_WEBHOOK_SECRET || "").trim();
 
 async function postLeadToGoogleSheets(payload) {
-  if (!GS_WEBHOOK_URL) return { ok: false, skipped: true };
+  if (!GS_WEBHOOK_URL) {
+    console.warn("[sheets] webhook skipped (GS_WEBHOOK_URL not set)");
+    return { ok: false, skipped: true, reason: "missing_url" };
+  }
+  if (typeof fetch !== "function") {
+    console.warn("[sheets] webhook skipped (global fetch is not available in this Node runtime)");
+    return { ok: false, skipped: true, reason: "missing_fetch" };
+  }
   try {
     const res = await fetch(GS_WEBHOOK_URL, {
       method: "POST",
@@ -403,6 +410,8 @@ async function postLeadToGoogleSheets(payload) {
       console.warn("[sheets] webhook failed", { status: res.status, body: t.slice(0, 300) });
       return { ok: false, status: res.status };
     }
+    // Keep this quiet by default; enable via MS_DEBUG if needed.
+    if (MS_DEBUG) console.log("[sheets] webhook ok", { event: String(payload?.event || ""), callSid: payload?.callSid || "" });
     return { ok: true };
   } catch (e) {
     console.warn("[sheets] webhook error", e?.message || e);
@@ -1889,7 +1898,9 @@ function inferParticipantsCountFromList(ns) {
   if (!s) return null;
   // Only attempt if it looks like a list + contains common "people" signals
   const hasPeopleSignals =
-    /אמא|אימא|אבא|אחות|אחי|סבתא|סבא|דוד|דודה|חברה|חברות|שכנה|שכנות|גיסה|חמות|בן דודה|בת דודה|אשת/.test(s);
+    /אמא|אימא|אבא|אחות|אחי|סבתא|סבא|דוד|דודים|דודה|דודות|חבר|חברים|חברה|חברות|שכן|שכנים|שכנה|שכנות|גיסה|גיסות|חמות|חם|משפחה|נשים|מוזמנות|בן דודה|בת דודה|אשת/.test(
+      s
+    );
   if (!hasPeopleSignals) return null;
   const looksLikeList = s.includes(",") || s.includes(" וגם ") || s.includes(" ו");
   if (!looksLikeList) return null;
@@ -2216,6 +2227,29 @@ app.get("/admin", (req, res) => {
 app.get("/api/admin/state", (req, res) => {
   const s = settingsSnapshot();
   res.json({ ...s, updatedAt: new Date().toISOString() });
+});
+
+// Quick sanity check for Google Sheets webhook wiring (no call needed).
+// POST body can include { phone, firstName, status } but defaults are fine.
+app.post("/api/admin/sheets/test", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const payload = {
+      event: "lead_test",
+      ts: new Date().toISOString(),
+      phone: String(body.phone || "+972500000000"),
+      firstName: String(body.firstName || "בדיקה"),
+      status: String(body.status || "waiting"),
+      callSid: String(body.callSid || `TEST_${Date.now()}`),
+      persona: "female",
+      doNotCall: false,
+      campaignMode: String(settingsSnapshot()?.campaignMode || "")
+    };
+    const r = await postLeadToGoogleSheets(payload);
+    res.json({ ok: true, result: r, gsWebhookUrlSet: !!GS_WEBHOOK_URL, gsSecretSet: !!GS_WEBHOOK_SECRET });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
 });
 
 app.post("/api/admin/settings", (req, res) => {
