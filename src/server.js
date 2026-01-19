@@ -216,6 +216,9 @@ if (!IS_RENDER && process.platform === "darwin" && (RAW_DATA_DIR === "/var/data"
 // IMPORTANT: normalize common human-entered values (e.g. "GPT-5.2 Mini") → valid model id.
 const OPENAI_MODEL = normalizeOpenAIModel(process.env.OPENAI_MODEL || "gpt-4.1") || "gpt-4.1";
 const OPENAI_STT_MODEL = process.env.OPENAI_STT_MODEL || "whisper-1";
+// Optional fallback model for "suspicious" transcriptions (long audio but very short/generic text).
+// Example: gpt-4o-mini-transcribe
+const OPENAI_STT_MODEL_FALLBACK = String(process.env.OPENAI_STT_MODEL_FALLBACK || "").trim();
 const OPENAI_STT_PROMPT =
   process.env.OPENAI_STT_PROMPT ||
   "תמלול שיחה טלפונית בעברית. מילים נפוצות: כן, מעוניין, מעוניינת, סבבה, יאללה, תעביר, פרטים, שיחזרו, תודה, לא, לא תודה, להסיר, אל תתקשרו.";
@@ -1173,6 +1176,32 @@ function detectWaitRequest(text) {
   const t = normalizeIntentText(text);
   const patterns = ["תמתין", "תמתין רגע", "רגע", "שנייה", "שניה", "דקה", "חכה", "חכי", "רק רגע"];
   return patterns.some((p) => t.includes(p));
+}
+
+function isGenericAckTranscript(text) {
+  const ns = normalizeIntentText(text);
+  return (
+    ns === "תודה" ||
+    ns === "תודה רבה" ||
+    ns === "כן" ||
+    ns === "כאן" ||
+    ns === "אוקיי" ||
+    ns === "אוקי" ||
+    ns === "סבבה" ||
+    ns === "בסדר"
+  );
+}
+
+function shouldRetryStt({ speech, pcm8kLen }) {
+  // If we have meaningful audio duration but the transcript is extremely short/generic,
+  // it's often a cut/partial decode. Retry once with a fallback model if configured.
+  const audioMs = (Number(pcm8kLen || 0) / 8000) * 1000;
+  const s = String(speech || "").trim();
+  if (!s) return audioMs >= 700;
+  if (audioMs < 800) return false; // keep fast for truly short utterances
+  if (s.length <= 4) return true;
+  if (isGenericAckTranscript(s) && audioMs >= 900) return true;
+  return false;
 }
 
 function getThinkingText() {
@@ -3569,6 +3598,37 @@ wssMediaStream.on("connection", (ws, req) => {
       msLog("timing", { callSid, sttMs: Date.now() - tStt0 });
     } catch (e) {
       console.warn("[ms] transcription failed", e?.message || e);
+    }
+
+    // Smart retry: long audio but short/generic transcript.
+    // This is critical at scale (many accents/noise/line conditions).
+    if (openai && shouldRetryStt({ speech, pcm8kLen: pcm8kAll.length })) {
+      const fallbackModel = OPENAI_STT_MODEL_FALLBACK || OPENAI_STT_MODEL;
+      if (fallbackModel) {
+        try {
+          const tStt1 = Date.now();
+          const prompt2 =
+            "תמלול שיחה טלפונית בעברית. חשוב: אל תחליף משפטים ב'תודה' אם לא נאמר. נסה לשמר ניסוח מלא. " +
+            "מילים נפוצות: כן, אני מעוניין/ת, במה מדובר, מה זה, לא בטוח/ה, אולי, תעבירו את הפרטים, אל תתקשרו.";
+          const transcription2 = await openai.audio.transcriptions.create({
+            model: fallbackModel,
+            file: fs.createReadStream(tmpPath),
+            language: "he",
+            prompt: prompt2
+          });
+          const speech2 = String(transcription2.text || "").trim();
+          msLog("timing", { callSid, sttRetryMs: Date.now() - tStt1, model: fallbackModel });
+          // Prefer the retry only if it's clearly more informative.
+          if (speech2 && (speech2.length > speech.length + 2 || isGenericAckTranscript(speech))) {
+            speech = speech2;
+            msLog("stt retry used", { callSid, chars: speech.length });
+          } else {
+            msLog("stt retry skipped", { callSid, origChars: speech.length, retryChars: speech2.length });
+          }
+        } catch (e) {
+          msLog("stt retry failed", { callSid, err: e?.message || String(e) });
+        }
+      }
     }
     try {
       fs.unlinkSync(tmpPath);
