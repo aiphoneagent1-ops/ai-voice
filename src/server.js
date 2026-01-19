@@ -310,7 +310,8 @@ const MS_LOG_EVERY_FRAME = process.env.MS_LOG_EVERY_FRAME === "1" || process.env
 const MS_VAD_MIN_RMS = Number(process.env.MS_VAD_MIN_RMS || 700);
 const MS_VAD_NOISE_MULT = Number(process.env.MS_VAD_NOISE_MULT || 1.8);
 const MS_VAD_NOISE_MARGIN = Number(process.env.MS_VAD_NOISE_MARGIN || 250);
-const MS_NOISE_CALIBRATION_MS = Number(process.env.MS_NOISE_CALIBRATION_MS || 300);
+// If calibration is too long, we miss the beginning of the user's first reply (common right after greeting).
+const MS_NOISE_CALIBRATION_MS = Number(process.env.MS_NOISE_CALIBRATION_MS || 120);
 // Greeting latency: keep the pickup snappy (avoid 4–6s intros).
 const MS_GREETING_MAX_CHARS = Number(process.env.MS_GREETING_MAX_CHARS || 70);
 const MS_FORCE_SHORT_GREETING = process.env.MS_FORCE_SHORT_GREETING === "1" || process.env.MS_FORCE_SHORT_GREETING === "true";
@@ -322,8 +323,10 @@ const MS_AUTO_HANGUP = process.env.MS_AUTO_HANGUP !== "0" && process.env.MS_AUTO
 // You can tune per environment with MS_END_SILENCE_MS.
 const MS_END_SILENCE_MS = Number(process.env.MS_END_SILENCE_MS || 1000);
 // Faster turn-taking for short utterances (e.g. "כן") without waiting full silence window.
-const MS_FAST_END_SILENCE_MS = Number(process.env.MS_FAST_END_SILENCE_MS || 200);
-const MS_FAST_END_MAX_UTTERANCE_MS = Number(process.env.MS_FAST_END_MAX_UTTERANCE_MS || 1200);
+// Fast-end should apply ONLY to single-word acknowledgments.
+// Defaults are conservative to avoid cutting real phrases.
+const MS_FAST_END_SILENCE_MS = Number(process.env.MS_FAST_END_SILENCE_MS || 380);
+const MS_FAST_END_MAX_UTTERANCE_MS = Number(process.env.MS_FAST_END_MAX_UTTERANCE_MS || 550);
 // Disable the "thinking" backchannel by default (it can feel interruptive on real calls).
 // If you ever want it back: set MS_THINKING_DELAY_MS (e.g. 380).
 const MS_THINKING_DELAY_MS = Number(process.env.MS_THINKING_DELAY_MS || 0);
@@ -3096,6 +3099,7 @@ wssMediaStream.on("connection", (ws, req) => {
   let guidedParticipants = null;
   let participantsPersuadeAsked = false;
   let guidedAskedCooldownRule = false;
+  let guidedLastQuestionAt = 0;
 
   function confirmQuestionText() {
     // No-apology mode: never say "לא שמעתי/לא קלטתי/תחזור".
@@ -3696,6 +3700,8 @@ wssMediaStream.on("connection", (ws, req) => {
       // If STT returned garbage/non-Hebrew/prompt-echo, do not advance the flow. Just repeat the current question.
       if (isSuspiciousTranscript(speech)) {
         msLog("guided", { callSid, kind: "stt_suspicious", step: guidedStep, text: String(speech || "").slice(0, 60) });
+        // Cooldown to avoid spamming the same question if STT keeps returning garbage.
+        if (Date.now() - guidedLastQuestionAt < 1400) return;
         let q0 = "";
         if (guidedStep === "ASK_PURPOSE") q0 = flowText.FLOW_ASK_PURPOSE;
         else if (guidedStep === "ASK_DATE") q0 = flowText.FLOW_ASK_DATE;
@@ -3706,6 +3712,7 @@ wssMediaStream.on("connection", (ws, req) => {
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
         } catch {}
+        guidedLastQuestionAt = Date.now();
         await sayText(q0, { label: "reply" });
         return;
       }
@@ -3815,6 +3822,7 @@ wssMediaStream.on("connection", (ws, req) => {
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
           } catch {}
+          guidedLastQuestionAt = Date.now();
           await sayText(q0, { label: "reply" });
           return;
         }
@@ -3825,6 +3833,7 @@ wssMediaStream.on("connection", (ws, req) => {
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
           } catch {}
+          guidedLastQuestionAt = Date.now();
           await sayText(q0, { label: "reply" });
           return;
         }
@@ -3838,6 +3847,7 @@ wssMediaStream.on("connection", (ws, req) => {
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
         } catch {}
+        guidedLastQuestionAt = Date.now();
         await sayText(q, { label: "reply" });
         return;
       }
@@ -3860,6 +3870,7 @@ wssMediaStream.on("connection", (ws, req) => {
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
           } catch {}
+          guidedLastQuestionAt = Date.now();
           await sayText(q0, { label: "reply" });
           return;
         }
@@ -3871,6 +3882,7 @@ wssMediaStream.on("connection", (ws, req) => {
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
         } catch {}
+        guidedLastQuestionAt = Date.now();
         await sayText(q, { label: "reply" });
         return;
       }
@@ -3893,6 +3905,7 @@ wssMediaStream.on("connection", (ws, req) => {
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
           } catch {}
+          guidedLastQuestionAt = Date.now();
           await sayText(q0, { label: "reply" });
           return;
         }
@@ -4365,9 +4378,10 @@ wssMediaStream.on("connection", (ws, req) => {
       // Otherwise we risk cutting mid-sentence and degrading STT.
       const fastSilenceOk =
         utteranceStartAt &&
-        now - utteranceStartAt <= Math.min(MS_FAST_END_MAX_UTTERANCE_MS, 800) &&
+        // Only if it's very short overall (single-word vibe)
+        now - utteranceStartAt <= Math.min(MS_FAST_END_MAX_UTTERANCE_MS, 550) &&
         utteranceVoicedFrames > 0 &&
-        utteranceVoicedFrames <= 25 &&
+        utteranceVoicedFrames <= 12 &&
         lastVoiceAt &&
         now - lastVoiceAt >= MS_FAST_END_SILENCE_MS;
       const normalSilenceOk = lastVoiceAt && now - lastVoiceAt >= MS_END_SILENCE_MS;
@@ -4380,7 +4394,13 @@ wssMediaStream.on("connection", (ws, req) => {
         utteranceVoicedFrames = 0;
         lastVoiceAt = 0;
 
-        if (durMs < MS_MIN_UTTERANCE_MS) return;
+        // In Guided mode we require longer utterances to avoid "I'm th..." partials from fast endpointing.
+        let minMs = MS_MIN_UTTERANCE_MS;
+        try {
+          const mode = String(settingsSnapshot()?.campaignMode || "handoff").trim() || "handoff";
+          if (mode === "guided") minMs = Math.max(minMs, 450);
+        } catch {}
+        if (durMs < minMs) return;
         // mark end-of-speech moment for latency measurement + conditional backchannel
         lastUtteranceEndAt = Date.now();
         awaitingReply = true;
