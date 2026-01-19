@@ -1380,6 +1380,57 @@ function tokenizeHe(text) {
     .filter((w) => !stop.has(w));
 }
 
+function extractFaqPairsFromKnowledgeBase(kbRaw) {
+  const kb = String(kbRaw || "");
+  if (!kb) return [];
+  const lines = kb.split(/\r?\n/);
+  const out = [];
+  for (const raw of lines) {
+    const line = String(raw || "").trim();
+    if (!line) continue;
+    // Support "question → answer" (recommended) and "question -> answer"
+    const arrowIdx = line.includes("→") ? line.indexOf("→") : line.indexOf("->");
+    if (arrowIdx <= 0) continue;
+    const left = line.slice(0, arrowIdx).trim();
+    const right = line.slice(arrowIdx + (line[arrowIdx] === "→" ? 1 : 2)).trim();
+    if (!left || !right) continue;
+
+    // Allow multiple variants on the left: separated by | or /
+    const variants = left
+      .split(/[|/]/g)
+      .map((s) => s.trim().replace(/^"|"$/g, ""))
+      .filter(Boolean);
+    if (!variants.length) continue;
+
+    out.push({
+      variants,
+      answer: right.replace(/^"|"$/g, "").trim()
+    });
+  }
+  return out;
+}
+
+function matchFaqAnswerFromKb({ kb, userText, minScore = 2 }) {
+  const qa = extractFaqPairsFromKnowledgeBase(kb);
+  if (!qa.length) return null;
+  const uTokens = new Set(tokenizeHe(userText));
+  if (!uTokens.size) return null;
+
+  let best = null;
+  for (const item of qa) {
+    let bestScoreForItem = 0;
+    for (const v of item.variants) {
+      const vTokens = tokenizeHe(v);
+      let score = 0;
+      for (const t of vTokens) if (uTokens.has(t)) score++;
+      if (score > bestScoreForItem) bestScoreForItem = score;
+    }
+    if (!best || bestScoreForItem > best.score) best = { score: bestScoreForItem, answer: item.answer };
+  }
+  if (!best || best.score < minScore) return null;
+  return best.answer;
+}
+
 function extractFlowLinesFromKnowledgeBase(kbRaw) {
   const kb = String(kbRaw || "");
   if (!kb) return {};
@@ -3555,6 +3606,27 @@ wssMediaStream.on("connection", (ws, req) => {
       try {
         if (callSid && phone) addMessage(db, { callSid, role: "user", content: speech });
       } catch {}
+
+      // FAQ layer (from KB "question → answer" lines):
+      // If user asks a known question, answer it and then continue the current guided step.
+      // This is how we support "not exact words" matching.
+      const faqAnswer = matchFaqAnswerFromKb({ kb: snap.knowledgeBase, userText: speech, minScore: 2 });
+      if (faqAnswer) {
+        const a = limitPhoneReply(sanitizeSayText(faqAnswer), 220);
+        let followUp = "";
+        if (guidedStep === "ASK_PURPOSE") followUp = flowText.FLOW_ASK_PURPOSE;
+        else if (guidedStep === "ASK_DATE") followUp = flowText.FLOW_ASK_DATE;
+        else if (guidedStep === "ASK_PARTICIPANTS") followUp = flowText.FLOW_ASK_PARTICIPANTS;
+        else if (guidedStep === "PARTICIPANTS_PERSUADE") followUp = flowText.FLOW_PARTICIPANTS_LOW;
+        else if (guidedStep === "CLOSE") followUp = handoffQuestionText();
+        const msg = followUp ? limitPhoneReply(`${a} ${followUp}`.trim(), 260) : a;
+        msLog("guided", { callSid, kind: "faq", step: guidedStep });
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+        } catch {}
+        await sayText(msg, { label: "reply" });
+        return;
+      }
 
       // Opt-out fast path
       if (detectOptOut(speech)) {
