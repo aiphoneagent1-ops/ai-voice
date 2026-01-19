@@ -325,8 +325,9 @@ const MS_FAST_END_MAX_UTTERANCE_MS = Number(process.env.MS_FAST_END_MAX_UTTERANC
 const MS_THINKING_DELAY_MS = Number(process.env.MS_THINKING_DELAY_MS || 0);
 const MS_MIN_UTTERANCE_MS = Number(process.env.MS_MIN_UTTERANCE_MS || 250);
 // Fallback: if user pauses briefly, don't wait forever—force finalize after this (once we see a pause).
-const MS_FORCE_FINALIZE_AFTER_MS = Number(process.env.MS_FORCE_FINALIZE_AFTER_MS || 900);
-const MS_FORCE_FINALIZE_PAUSE_MS = Number(process.env.MS_FORCE_FINALIZE_PAUSE_MS || 120);
+// IMPORTANT: too-aggressive values can cut normal phrases and cause bad STT ("תודה" instead of "כן אני מעוניין").
+const MS_FORCE_FINALIZE_AFTER_MS = Number(process.env.MS_FORCE_FINALIZE_AFTER_MS || 1400);
+const MS_FORCE_FINALIZE_PAUSE_MS = Number(process.env.MS_FORCE_FINALIZE_PAUSE_MS || 200);
 // Safety: cap utterance length so we don't buffer indefinitely.
 const MS_MAX_UTTERANCE_MS = Number(process.env.MS_MAX_UTTERANCE_MS || 2500);
 const ELEVENLABS_STREAM_OUTPUT_FORMAT = String(process.env.ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000").trim();
@@ -3013,6 +3014,7 @@ wssMediaStream.on("connection", (ws, req) => {
   /** @type {Int16Array[]} */
   let utterancePcm8kChunks = [];
   let utteranceStartAt = 0;
+  let utteranceVoicedFrames = 0;
   let inFlight = null; // Promise
 
   // Sales/flow state (kept per call connection)
@@ -4191,8 +4193,10 @@ wssMediaStream.on("connection", (ws, req) => {
           speechActive = true;
           utterancePcm8kChunks = [];
           utteranceStartAt = now;
+          utteranceVoicedFrames = 0;
           msLog("speech start", { callSid, rms: Math.round(rms), thr: Math.round(adaptiveThr) });
         }
+        utteranceVoicedFrames++;
         utterancePcm8kChunks.push(pcm16);
 
         // Optional barge-in (disabled by default)
@@ -4243,9 +4247,13 @@ wssMediaStream.on("connection", (ws, req) => {
       }
 
       // End-of-speech: normal silence threshold OR faster threshold for short utterances ("כן", "אוקיי")
+      // Fast end is ONLY for truly short utterances ("כן", "אוקיי"), not for multi-word phrases.
+      // Otherwise we risk cutting mid-sentence and degrading STT.
       const fastSilenceOk =
         utteranceStartAt &&
-        now - utteranceStartAt <= MS_FAST_END_MAX_UTTERANCE_MS &&
+        now - utteranceStartAt <= Math.min(MS_FAST_END_MAX_UTTERANCE_MS, 800) &&
+        utteranceVoicedFrames > 0 &&
+        utteranceVoicedFrames <= 25 &&
         lastVoiceAt &&
         now - lastVoiceAt >= MS_FAST_END_SILENCE_MS;
       const normalSilenceOk = lastVoiceAt && now - lastVoiceAt >= MS_END_SILENCE_MS;
@@ -4255,6 +4263,7 @@ wssMediaStream.on("connection", (ws, req) => {
         speechActive = false;
         utterancePcm8kChunks = [];
         utteranceStartAt = 0;
+        utteranceVoicedFrames = 0;
         lastVoiceAt = 0;
 
         if (durMs < MS_MIN_UTTERANCE_MS) return;
@@ -4296,6 +4305,7 @@ wssMediaStream.on("connection", (ws, req) => {
           speechActive = false;
           utterancePcm8kChunks = [];
           utteranceStartAt = 0;
+          utteranceVoicedFrames = 0;
           lastVoiceAt = 0;
           let total = 0;
           for (const c of chunks) total += c.length;
@@ -4324,6 +4334,7 @@ wssMediaStream.on("connection", (ws, req) => {
         speechActive = false;
         utterancePcm8kChunks = [];
         utteranceStartAt = 0;
+        utteranceVoicedFrames = 0;
         lastVoiceAt = 0;
         let total = 0;
         for (const c of chunks) total += c.length;
