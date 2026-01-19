@@ -3604,7 +3604,22 @@ wssMediaStream.on("connection", (ws, req) => {
         return;
       }
 
-      // Persist user message
+      // Opt-out fast path
+      if (detectOptOut(speech)) {
+        confirmCount = 0;
+        msLog("guided", { callSid, kind: "opt_out" });
+        await sayFinalAndHangup({ text: "אין בעיה, הסרתי אותך. יום טוב.", outcome: "do_not_call" });
+        return;
+      }
+
+      // Explicit consent to transfer details should close immediately (regardless of step).
+      if (detectTransferConsent(speech)) {
+        msLog("guided", { callSid, kind: "handoff_consent_direct" });
+        await sayFinalAndHangup({ text: handoffConfirmCloseText({ persona }), outcome: "interested" });
+        return;
+      }
+
+      // Persist user message (after critical guards so we don't create confusing transcripts)
       try {
         if (callSid && phone) addMessage(db, { callSid, role: "user", content: speech });
       } catch {}
@@ -3627,14 +3642,6 @@ wssMediaStream.on("connection", (ws, req) => {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
         } catch {}
         await sayText(msg, { label: "reply" });
-        return;
-      }
-
-      // Opt-out fast path
-      if (detectOptOut(speech)) {
-        confirmCount = 0;
-        msLog("guided", { callSid, kind: "opt_out" });
-        await sayFinalAndHangup({ text: "אין בעיה, הסרתי אותך. יום טוב.", outcome: "do_not_call" });
         return;
       }
 
@@ -3676,11 +3683,31 @@ wssMediaStream.on("connection", (ws, req) => {
       if (guidedStep === "ASK_PURPOSE") {
         const s = String(speech || "").trim();
         const ns = normalizeIntentText(s);
-        const isShortYesLike = ns.length <= 6 && (detectAffirmativeShort(s) || ns === "כאן" || ns === "כן");
+        const ackLike =
+          ns === "תודה" ||
+          ns === "תודה רבה" ||
+          ns === "בסדר" ||
+          ns === "סבבה" ||
+          ns === "אוקיי" ||
+          ns === "אוקי" ||
+          ns === "כן" ||
+          ns === "כאן";
+        const isYesLike = detectAffirmativeShort(s) || detectInterested(s) || ns === "כאן" || ns === "כן";
+        const shouldAskPurposeFirst = !guidedPurpose && !guidedAskedPurposeQ && (isYesLike || ackLike || ns.length <= 6);
 
         // If the user just said "כן"/short acknowledgment, ask the purpose question first.
-        if (!guidedPurpose && !guidedAskedPurposeQ && isShortYesLike) {
+        if (shouldAskPurposeFirst) {
           guidedAskedPurposeQ = true;
+          const q0 = limitPhoneReply(flowText.FLOW_ASK_PURPOSE, 160);
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
+          } catch {}
+          await sayText(q0, { label: "reply" });
+          return;
+        }
+
+        // If we already asked and still got an ack/very short response, re-ask (avoid advancing on "תודה").
+        if (!guidedPurpose && guidedAskedPurposeQ && (ackLike || ns.length <= 6)) {
           const q0 = limitPhoneReply(flowText.FLOW_ASK_PURPOSE, 160);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
@@ -3702,7 +3729,28 @@ wssMediaStream.on("connection", (ws, req) => {
       }
 
       if (guidedStep === "ASK_DATE") {
-        guidedDateText = guidedDateText || String(speech || "").trim();
+        const s = String(speech || "").trim();
+        const ns = normalizeIntentText(s);
+        const ackLike =
+          ns === "תודה" ||
+          ns === "תודה רבה" ||
+          ns === "בסדר" ||
+          ns === "סבבה" ||
+          ns === "אוקיי" ||
+          ns === "אוקי" ||
+          ns === "כן" ||
+          ns === "כאן";
+        // Don't advance on acknowledgments; re-ask current question.
+        if (ackLike || ns.length <= 6) {
+          const q0 = limitPhoneReply(flowText.FLOW_ASK_DATE, 160);
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
+          } catch {}
+          await sayText(q0, { label: "reply" });
+          return;
+        }
+
+        guidedDateText = guidedDateText || s;
         guidedStep = "ASK_PARTICIPANTS";
         const q = limitPhoneReply(flowText.FLOW_ASK_PARTICIPANTS, 160);
         try {
@@ -3715,6 +3763,24 @@ wssMediaStream.on("connection", (ws, req) => {
       if (guidedStep === "ASK_PARTICIPANTS") {
         const n = extractHeNumber(speech);
         guidedParticipants = n;
+        const ns = normalizeIntentText(speech);
+        const ackLike =
+          ns === "תודה" ||
+          ns === "תודה רבה" ||
+          ns === "בסדר" ||
+          ns === "סבבה" ||
+          ns === "אוקיי" ||
+          ns === "אוקי" ||
+          ns === "כן" ||
+          ns === "כאן";
+        if (n == null && (ackLike || ns.length <= 6)) {
+          const q0 = limitPhoneReply(flowText.FLOW_ASK_PARTICIPANTS, 160);
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
+          } catch {}
+          await sayText(q0, { label: "reply" });
+          return;
+        }
         if (n != null && n >= minParticipants) {
           msLog("guided", { callSid, kind: "participants_ok", n });
           // Ask handoff question (rep will call back)
