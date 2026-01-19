@@ -410,9 +410,17 @@ async function postLeadToGoogleSheets(payload) {
       console.warn("[sheets] webhook failed", { status: res.status, body: t.slice(0, 300) });
       return { ok: false, status: res.status };
     }
+    // Read body once (Apps Script returns JSON). Helps debug "writes but I can't see it".
+    let responseBody = null;
+    try {
+      const t = await res.text();
+      responseBody = t ? JSON.parse(t) : null;
+    } catch {
+      responseBody = null;
+    }
     // Keep this quiet by default; enable via MS_DEBUG if needed.
     if (MS_DEBUG) console.log("[sheets] webhook ok", { event: String(payload?.event || ""), callSid: payload?.callSid || "" });
-    return { ok: true };
+    return responseBody ? { ok: true, responseBody } : { ok: true };
   } catch (e) {
     console.warn("[sheets] webhook error", e?.message || e);
     return { ok: false, error: String(e?.message || e) };
@@ -1579,8 +1587,8 @@ function quickReplyByRules({ speech, persona }) {
     };
   }
   if (faq.what) {
-    return {
-      text:
+      return {
+        text:
         persona === "female"
           ? "בגדול זו הצעה/שירות קצר. אין לי את כל הפרטים כאן—רוצה שיחזרו אלייך עם פרטים מסודרים?"
           : "בגדול זו הצעה/שירות קצר. אין לי את כל הפרטים כאן—רוצה שיחזרו אליך עם פרטים מסודרים?",
@@ -2187,10 +2195,10 @@ async function ttsToPath({ text, persona }) {
   // Only ElevenLabs in this build (keep OpenAI TTS as a last-resort safety fallback).
   const out = await elevenlabsTtsToFile({ text, persona });
   debug("elevenlabs", out);
-  if (out) return out;
-  const fb = await openaiTtsToFile({ text, persona });
+    if (out) return out;
+    const fb = await openaiTtsToFile({ text, persona });
   debug("openai(fallback)", fb);
-  return fb;
+    return fb;
 }
 
 function getPublicBaseUrl(req) {
@@ -4005,6 +4013,19 @@ wssMediaStream.on("connection", (ws, req) => {
     if (cached && cached.length) {
       if (!_ulawMemCache.get(cacheKey)) _ulawMemCache.set(cacheKey, cached);
       const pr = await playUlaw(cached, { label });
+        if (MS_DEBUG) {
+          const toFirstAudioMs =
+            pr?.firstChunkAt && lastUtteranceEndAt ? Number(pr.firstChunkAt) - Number(lastUtteranceEndAt) : null;
+          msLog("timing", {
+            callSid,
+            kind: "tts",
+            mode: "cache",
+            label,
+            genMs: 0,
+            firstChunkDelayMs: pr?.firstChunkDelayMs ?? null,
+            toFirstAudioMs
+          });
+        }
       return { ...pr, genMs: 0, cached: true };
     }
 
@@ -4018,6 +4039,19 @@ wssMediaStream.on("connection", (ws, req) => {
       _ulawMemCache.set(cacheKey, ulaw);
       putUlawToDisk(cacheKey, ulaw);
       const pr = await playUlaw(ulaw, { label });
+      if (MS_DEBUG) {
+        const toFirstAudioMs =
+          pr?.firstChunkAt && lastUtteranceEndAt ? Number(pr.firstChunkAt) - Number(lastUtteranceEndAt) : null;
+        msLog("timing", {
+          callSid,
+          kind: "tts",
+          mode: "buffered_fallback",
+          label,
+          genMs: Date.now() - tGen0,
+          firstChunkDelayMs: pr?.firstChunkDelayMs ?? null,
+          toFirstAudioMs
+        });
+      }
       return { ...pr, genMs: Date.now() - tGen0, streamed: false, streamFallback: true };
     }
 
@@ -4026,6 +4060,19 @@ wssMediaStream.on("connection", (ws, req) => {
       _ulawMemCache.set(cacheKey, stream.buffered);
       putUlawToDisk(cacheKey, stream.buffered);
       const pr = await playUlaw(stream.buffered, { label });
+      if (MS_DEBUG) {
+        const toFirstAudioMs =
+          pr?.firstChunkAt && lastUtteranceEndAt ? Number(pr.firstChunkAt) - Number(lastUtteranceEndAt) : null;
+        msLog("timing", {
+          callSid,
+          kind: "tts",
+          mode: "buffered",
+          label,
+          genMs,
+          firstChunkDelayMs: pr?.firstChunkDelayMs ?? null,
+          toFirstAudioMs
+        });
+      }
       return { ...pr, genMs, streamed: false };
     }
 
@@ -4199,6 +4246,17 @@ wssMediaStream.on("connection", (ws, req) => {
         if (framesSent === 1) {
           if (currentPlay?.meta) currentPlay.meta.firstChunkAt = Date.now();
           msLog("sent first audio chunk (streaming)", { callSid, streamSid, label });
+          if (MS_DEBUG) {
+            const toFirstAudioMs = lastUtteranceEndAt ? Date.now() - Number(lastUtteranceEndAt) : null;
+            msLog("timing", {
+              callSid,
+              kind: "tts",
+              mode: "streaming",
+              label,
+              genMs,
+              toFirstAudioMs
+            });
+          }
         }
       };
 
