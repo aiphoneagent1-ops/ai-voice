@@ -1192,6 +1192,30 @@ function isGenericAckTranscript(text) {
   );
 }
 
+function hasHebrewLetters(text) {
+  return /[\u0590-\u05FF]/.test(String(text || ""));
+}
+
+function looksLikePromptEcho(text) {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  // We never expect the model to output our own prompt; this indicates a bad decode/edge-case.
+  return (
+    t.startsWith("תמלול שיחה טלפונית בעברית") ||
+    t.includes("מילים נפוצות") ||
+    (OPENAI_STT_PROMPT && t.includes(String(OPENAI_STT_PROMPT).slice(0, 24)))
+  );
+}
+
+function isSuspiciousTranscript(text) {
+  const s = String(text || "").trim();
+  if (!s) return true;
+  if (looksLikePromptEcho(s)) return true;
+  // If it's mostly non-Hebrew and very short, it's often garbage (e.g. "I'm on the").
+  if (!hasHebrewLetters(s) && s.length <= 24) return true;
+  return false;
+}
+
 function shouldRetryStt({ speech, pcm8kLen }) {
   // If we have meaningful audio duration but the transcript is extremely short/generic,
   // it's often a cut/partial decode. Retry once with a fallback model if configured.
@@ -1201,6 +1225,7 @@ function shouldRetryStt({ speech, pcm8kLen }) {
   if (audioMs < 800) return false; // keep fast for truly short utterances
   if (s.length <= 4) return true;
   if (isGenericAckTranscript(s) && audioMs >= 900) return true;
+  if (looksLikePromptEcho(s) && audioMs >= 700) return true;
   return false;
 }
 
@@ -1504,7 +1529,12 @@ function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
     FLOW_PARTICIPANTS_LOW: `כדי שזה יעבוד אנחנו צריכים מינימום ${minParticipants} משתתפים. תצליחי להגיע ל־${minParticipants}?`,
     FLOW_PARTICIPANTS_LOW_FALLBACK: "מבין. בכל מקרה נציגה תחזור אלייך בהקדם ותנסה לעזור לגבי הפרטים.",
     FLOW_COOLDOWN_RULE: `בדרך כלל אפשר לקבוע שוב רק אחרי מינימום ${cooldownMonths} חודשים.`,
-    FLOW_WOMEN_ONLY: "שלום, כרגע השיחה מיועדת לנשים בלבד. יום טוב."
+    FLOW_WOMEN_ONLY: "שלום, כרגע השיחה מיועדת לנשים בלבד. יום טוב.",
+    // Optional: acknowledgments to make the conversation feel like active listening (override in KB if desired)
+    FLOW_ACK_PURPOSE: "הבנתי.",
+    FLOW_ACK_DATE: "מעולה.",
+    FLOW_ACK_PARTICIPANTS: "סבבה.",
+    FLOW_ACK_GENERAL: "סבבה."
   };
   return { ...defaults, ...flow };
 }
@@ -3659,6 +3689,23 @@ wssMediaStream.on("connection", (ws, req) => {
     if (campaignMode === "guided") {
       const flowText = guidedFlowTextFromKb(snap.knowledgeBase, { minParticipants, cooldownMonths });
 
+      // If STT returned garbage/non-Hebrew/prompt-echo, do not advance the flow. Just repeat the current question.
+      if (isSuspiciousTranscript(speech)) {
+        msLog("guided", { callSid, kind: "stt_suspicious", step: guidedStep, text: String(speech || "").slice(0, 60) });
+        let q0 = "";
+        if (guidedStep === "ASK_PURPOSE") q0 = flowText.FLOW_ASK_PURPOSE;
+        else if (guidedStep === "ASK_DATE") q0 = flowText.FLOW_ASK_DATE;
+        else if (guidedStep === "ASK_PARTICIPANTS") q0 = flowText.FLOW_ASK_PARTICIPANTS;
+        else if (guidedStep === "PARTICIPANTS_PERSUADE") q0 = flowText.FLOW_PARTICIPANTS_LOW;
+        else if (guidedStep === "CLOSE") q0 = handoffQuestionText();
+        q0 = limitPhoneReply(q0 || handoffQuestionText(), 200);
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
+        } catch {}
+        await sayText(q0, { label: "reply" });
+        return;
+      }
+
       // Women-only enforcement (optional)
       if (femaleOnly && persona !== "female") {
         msLog("guided", { callSid, kind: "women_only_block" });
@@ -3782,7 +3829,8 @@ wssMediaStream.on("connection", (ws, req) => {
         guidedPurpose = guidedPurpose || s;
         guidedAskedPurposeQ = true;
         guidedStep = "ASK_DATE";
-        const q = limitPhoneReply(flowText.FLOW_ASK_DATE, 160);
+        const ack = limitPhoneReply(flowText.FLOW_ACK_PURPOSE || flowText.FLOW_ACK_GENERAL || "", 40);
+        const q = limitPhoneReply(`${ack ? ack + " " : ""}${flowText.FLOW_ASK_DATE}`.trim(), 200);
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
         } catch {}
@@ -3814,7 +3862,8 @@ wssMediaStream.on("connection", (ws, req) => {
 
         guidedDateText = guidedDateText || s;
         guidedStep = "ASK_PARTICIPANTS";
-        const q = limitPhoneReply(flowText.FLOW_ASK_PARTICIPANTS, 160);
+        const ack = limitPhoneReply(flowText.FLOW_ACK_DATE || flowText.FLOW_ACK_GENERAL || "", 40);
+        const q = limitPhoneReply(`${ack ? ack + " " : ""}${flowText.FLOW_ASK_PARTICIPANTS}`.trim(), 200);
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
         } catch {}
@@ -3847,7 +3896,8 @@ wssMediaStream.on("connection", (ws, req) => {
           msLog("guided", { callSid, kind: "participants_ok", n });
           // Ask handoff question (rep will call back)
           guidedStep = "CLOSE";
-          const q = handoffQuestionText();
+          const ack = limitPhoneReply(flowText.FLOW_ACK_PARTICIPANTS || flowText.FLOW_ACK_GENERAL || "", 40);
+          const q = limitPhoneReply(`${ack ? ack + " " : ""}${handoffQuestionText()}`.trim(), 220);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
           } catch {}
