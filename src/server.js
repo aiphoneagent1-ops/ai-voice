@@ -1541,7 +1541,11 @@ function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
     FLOW_ACK_PURPOSE: "הבנתי.",
     FLOW_ACK_DATE: "מעולה.",
     FLOW_ACK_PARTICIPANTS: "סבבה.",
-    FLOW_ACK_GENERAL: "סבבה."
+    FLOW_ACK_GENERAL: "סבבה.",
+    // Optional: extra confirmation line after the date (matches the PDF style).
+    FLOW_DATE_CONFIRM: "מצוין. אנחנו נבדוק את התאריך ביומן ונציגה תחזור אלייך בהקדם עם כל הפרטים.",
+    // Optional: what to do when user asks about time/when; keep it short and promise a callback.
+    FLOW_WHEN_UNKNOWN: "כרגע אין לי את כל השעות המדויקות. נציגה תחזור אלייך לתיאום עם כל הפרטים."
   };
   return { ...defaults, ...flow };
 }
@@ -3747,7 +3751,17 @@ wssMediaStream.on("connection", (ws, req) => {
       // FAQ layer (from KB "question → answer" lines):
       // If user asks a known question, answer it and then continue the current guided step.
       // This is how we support "not exact words" matching.
-      const faqAnswer = matchFaqAnswerFromKb({ kb: snap.knowledgeBase, userText: speech, minScore: 2 });
+      // For short question-style utterances ("מה השעות שלכם", "מתי זה"), we allow a looser match.
+      const nsFaq = normalizeIntentText(speech);
+      const looksLikeShortQuestion =
+        nsFaq.includes("מתי") ||
+        nsFaq.includes("שעה") ||
+        nsFaq.includes("שעות") ||
+        nsFaq.includes("איפה") ||
+        nsFaq.includes("כמה") ||
+        nsFaq.includes("מחיר") ||
+        nsFaq.includes("עלות");
+      const faqAnswer = matchFaqAnswerFromKb({ kb: snap.knowledgeBase, userText: speech, minScore: looksLikeShortQuestion ? 1 : 2 });
       if (faqAnswer) {
         const a = limitPhoneReply(sanitizeSayText(faqAnswer), 220);
         let followUp = "";
@@ -3813,7 +3827,9 @@ wssMediaStream.on("connection", (ws, req) => {
           ns === "כן" ||
           ns === "כאן";
         const isYesLike = detectAffirmativeShort(s) || detectInterested(s) || ns === "כאן" || ns === "כן";
-        const shouldAskPurposeFirst = !guidedPurpose && !guidedAskedPurposeQ && (isYesLike || ackLike || ns.length <= 6);
+        // Important: purpose answers are often short single words (e.g. "בריאות", "פרנסה").
+        // We should NOT treat "short length" as ack; only explicit acknowledgements/yes-like.
+        const shouldAskPurposeFirst = !guidedPurpose && !guidedAskedPurposeQ && (isYesLike || ackLike);
 
         // If the user just said "כן"/short acknowledgment, ask the purpose question first.
         if (shouldAskPurposeFirst) {
@@ -3827,8 +3843,8 @@ wssMediaStream.on("connection", (ws, req) => {
           return;
         }
 
-        // If we already asked and still got an ack/very short response, re-ask (avoid advancing on "תודה").
-        if (!guidedPurpose && guidedAskedPurposeQ && (ackLike || ns.length <= 6)) {
+        // If we already asked and still got an ack-like response, re-ask (avoid advancing on "תודה").
+        if (!guidedPurpose && guidedAskedPurposeQ && ackLike) {
           const q0 = limitPhoneReply(flowText.FLOW_ASK_PURPOSE, 160);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
@@ -3865,7 +3881,8 @@ wssMediaStream.on("connection", (ws, req) => {
           ns === "כן" ||
           ns === "כאן";
         // Don't advance on acknowledgments; re-ask current question.
-        if (ackLike || ns.length <= 6) {
+        // (Do NOT use length gating here; real date answers can be short like "מחר", "רביעי", "בערב".)
+        if (ackLike) {
           const q0 = limitPhoneReply(flowText.FLOW_ASK_DATE, 160);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
@@ -3878,7 +3895,9 @@ wssMediaStream.on("connection", (ws, req) => {
         guidedDateText = guidedDateText || s;
         guidedStep = "ASK_PARTICIPANTS";
         const ack = limitPhoneReply(flowText.FLOW_ACK_DATE || flowText.FLOW_ACK_GENERAL || "", 40);
-        const q = limitPhoneReply(`${ack ? ack + " " : ""}${flowText.FLOW_ASK_PARTICIPANTS}`.trim(), 200);
+        const confirm = limitPhoneReply(flowText.FLOW_DATE_CONFIRM || "", 180);
+        const combined = `${ack ? ack + " " : ""}${confirm ? confirm + " " : ""}${flowText.FLOW_ASK_PARTICIPANTS}`.trim();
+        const q = limitPhoneReply(combined, 260);
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
         } catch {}
@@ -3900,7 +3919,7 @@ wssMediaStream.on("connection", (ws, req) => {
           ns === "אוקי" ||
           ns === "כן" ||
           ns === "כאן";
-        if (n == null && (ackLike || ns.length <= 6)) {
+        if (n == null && ackLike) {
           const q0 = limitPhoneReply(flowText.FLOW_ASK_PARTICIPANTS, 160);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
