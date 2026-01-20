@@ -401,6 +401,36 @@ function buildHeLeadSummary({ status, doNotCall, purpose, dateText, participants
   return "";
 }
 
+function detectBusyNow(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  const patterns = [
+    "אין לי זמן",
+    "אני עסוקה",
+    "אני עסוק",
+    "לא עכשיו",
+    "לא יכולה עכשיו",
+    "לא יכול עכשיו",
+    "אחר כך",
+    "תתקשרו אחר כך",
+    "תחזרו אחר כך",
+    "דברי איתי אחר כך",
+    "דבר איתי אחר כך"
+  ];
+  return patterns.some((p) => t.includes(p));
+}
+
+function looksLikeCallbackTimeAnswer(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  // allow: today/tomorrow/day names, morning/evening, "בשעה", digits like "5", "17:30"
+  if (looksLikeDateAnswer(t)) return true;
+  if (/\b\d{1,2}(:\d{2})?\b/.test(t)) return true;
+  if (t.includes("בבוקר") || t.includes("בערב") || t.includes("בצהריים") || t.includes("מחר") || t.includes("היום")) return true;
+  if (t.includes("עוד") && (t.includes("דקה") || t.includes("שעה") || t.includes("שעות"))) return true;
+  return false;
+}
+
 async function postLeadToGoogleSheets(payload) {
   if (!GS_WEBHOOK_URL) {
     console.warn("[sheets] webhook skipped (GS_WEBHOOK_URL not set)");
@@ -3712,7 +3742,7 @@ wssMediaStream.on("connection", (ws, req) => {
   let persuasionAttempted = false;
 
   // Guided flow state (campaign-specific logic driven by Admin KB + knobs)
-  /** @type {"ASK_PURPOSE"|"ASK_DATE"|"ASK_PARTICIPANTS"|"PARTICIPANTS_PERSUADE"|"CLOSE"} */
+  /** @type {"ASK_PURPOSE"|"ASK_DATE"|"ASK_PARTICIPANTS"|"PARTICIPANTS_PERSUADE"|"ASK_CALLBACK_TIME"|"CLOSE"} */
   let guidedStep = "ASK_PURPOSE";
   let guidedPurpose = "";
   let guidedAskedPurposeQ = false;
@@ -3721,6 +3751,8 @@ wssMediaStream.on("connection", (ws, req) => {
   let participantsPersuadeAsked = false;
   let guidedAskedCooldownRule = false;
   let guidedLastQuestionAt = 0;
+  let guidedCallbackTime = "";
+  let guidedCloseAttempts = 0;
   // Google Sheets sync guard (avoid duplicate rows on ws close after explicit outcome)
   let sheetsSynced = false;
 
@@ -3734,7 +3766,7 @@ wssMediaStream.on("connection", (ws, req) => {
             status,
             doNotCall: !!doNotCall,
             purpose: guidedPurpose || "",
-            dateText: guidedDateText || "",
+            dateText: (guidedCallbackTime ? `לחזור: ${guidedCallbackTime}. ` : "") + (guidedDateText || ""),
             participants: guidedParticipants ?? ""
           });
     void postLeadToGoogleSheets({
@@ -4529,6 +4561,18 @@ wssMediaStream.on("connection", (ws, req) => {
         return;
       }
 
+      // Busy-now flow: capture a preferred callback time (and reflect it later in summary/Sheets).
+      if (guidedStep !== "ASK_CALLBACK_TIME" && detectBusyNow(speech)) {
+        guidedStep = "ASK_CALLBACK_TIME";
+        const q0 = limitPhoneReply(flowText.FLOW_ASK_CALLBACK_TIME || "ברור לגמרי. מתי נוח לך שנציגה תחזור אלייך?", 200);
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
+        } catch {}
+        guidedLastQuestionAt = Date.now();
+        await sayText(q0, { label: "reply" });
+        return;
+      }
+
       // FAQ layer (from KB "question → answer" lines):
       // If user asks a known question, answer it and then continue the current guided step.
       // This is how we support "not exact words" matching.
@@ -4558,6 +4602,91 @@ wssMediaStream.on("connection", (ws, req) => {
         } catch {}
         await sayText(msg, { label: "reply" });
         return;
+      }
+
+      // If the user asked a question that's NOT covered by FAQ, answer briefly via LLM and then return to the step.
+      // This gives "human-like" flexibility while keeping the guided flow deterministic.
+      {
+        const nsq = normalizeIntentText(speech);
+        const looksQuestion =
+          nsq.includes("?") ||
+          nsq.startsWith("מה ") ||
+          nsq.startsWith("למה ") ||
+          nsq.startsWith("איך ") ||
+          nsq.startsWith("אפשר ") ||
+          nsq.startsWith("תוכלי ") ||
+          nsq.startsWith("את יכולה ") ||
+          nsq.startsWith("האם ") ||
+          nsq.includes("במה מדובר") ||
+          nsq.includes("פרטים");
+        if (looksQuestion) {
+          let followUp = "";
+          if (guidedStep === "ASK_PURPOSE") followUp = flowText.FLOW_ASK_PURPOSE;
+          else if (guidedStep === "ASK_DATE") followUp = flowText.FLOW_ASK_DATE;
+          else if (guidedStep === "ASK_PARTICIPANTS") followUp = flowText.FLOW_ASK_PARTICIPANTS;
+          else if (guidedStep === "PARTICIPANTS_PERSUADE") followUp = flowText.FLOW_PARTICIPANTS_LOW;
+          else if (guidedStep === "ASK_CALLBACK_TIME") followUp = flowText.FLOW_ASK_CALLBACK_TIME || "מתי נוח לך שנציגה תחזור אלייך?";
+          else if (guidedStep === "CLOSE") followUp = handoffQuestionText();
+
+          try {
+            const { knowledgeBase } = settingsSnapshot();
+            const knowledgeForThisTurn = selectRelevantKnowledge({
+              knowledgeBase,
+              query: speech,
+              maxChars: 1400,
+              maxChunks: 8
+            });
+            const sys = [
+              "את נציגת AI טלפונית בעברית. עונה קצר (1–2 משפטים) ובטון אנושי.",
+              "חוקים: לא להמציא פרטים (שעה/כתובת/עלות/שמות). אם חסר—תגידי שנציגה תחזור עם כל הפרטים.",
+              "המטרה: לענות לשאלה ואז לחזור לשאלה של השלב.",
+              knowledgeForThisTurn ? `מידע (אם רלוונטי):\n${knowledgeForThisTurn}` : ""
+            ]
+              .filter(Boolean)
+              .join("\n");
+            const tLlm0 = Date.now();
+            msLog("llm start (guided_faq_fallback)", { callSid, timeoutMs: MS_LLM_TIMEOUT_MS, model: OPENAI_MODEL });
+            const llmPromise = createLlmText({
+              model: OPENAI_MODEL,
+              messages: [
+                { role: "system", content: sys },
+                { role: "user", content: speech }
+              ],
+              temperature: 0.2,
+              maxTokens: 120
+            });
+            const timeoutPromise = new Promise((resolve) =>
+              setTimeout(() => resolve({ __timeout: true }), Math.max(300, MS_LLM_TIMEOUT_MS))
+            );
+            const raced = await Promise.race([llmPromise, timeoutPromise]);
+            const llmTimedOut = !!raced && typeof raced === "object" && raced.__timeout === true;
+            if (llmTimedOut) {
+              msLog("llm timeout (guided_faq_fallback)", { callSid, ms: Date.now() - tLlm0 });
+              // If LLM is slow, just give a safe generic.
+              const a = limitPhoneReply(flowText.FLOW_WHEN_UNKNOWN || "נציגה תחזור אלייך בהקדם עם כל הפרטים.", 160);
+              const msg = followUp ? limitPhoneReply(`${a} ${followUp}`.trim(), 240) : a;
+              try {
+                if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+              } catch {}
+              await sayText(msg, { label: "reply" });
+              return;
+            }
+            const llm = raced;
+            msLog("timing", { callSid, llmMs: Date.now() - tLlm0, kind: "guided_llm_fallback" });
+            let a = sanitizeSayText(String(llm?.rawText || "").trim());
+            if (!a) a = flowText.FLOW_WHEN_UNKNOWN || "נציגה תחזור אלייך בהקדם עם כל הפרטים.";
+            a = limitPhoneReply(a, 180);
+            const msg = followUp ? limitPhoneReply(`${a} ${followUp}`.trim(), 260) : a;
+            try {
+              if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+            } catch {}
+            await sayText(msg, { label: "reply" });
+            return;
+          } catch (e) {
+            msLog("guided llm fallback failed", e?.message || e);
+            // Fall back to re-asking.
+          }
+        }
       }
 
       // If the user mentions a recent event, enforce cooldown rule (only when it comes up).
@@ -4591,9 +4720,63 @@ wssMediaStream.on("connection", (ws, req) => {
           await sayFinalAndHangup({ text: handoffConfirmCloseText({ persona }), outcome: "interested" });
           return;
         }
-        // If user didn't confirm, ask once more, then end politely.
-        msLog("guided", { callSid, kind: "handoff_not_confirmed" });
-        await sayFinalAndHangup({ text: "סבבה, תודה על הזמן. יום טוב.", outcome: "not_interested" });
+        // If user didn't confirm, do NOT hang up immediately (they may be asking questions).
+        // Re-ask the handoff question; only end on explicit "לא מעוניינת".
+        if (detectNotInterested(speech)) {
+          msLog("guided", { callSid, kind: "handoff_declined" });
+          await sayFinalAndHangup({ text: "הבנתי, אין בעיה. תודה על הזמן, יום טוב.", outcome: "not_interested" });
+          return;
+        }
+        guidedCloseAttempts++;
+        const q = handoffQuestionText();
+        const prefix = guidedCloseAttempts <= 1 ? "סבבה. רק כדי שאוכל להעביר מסודר—" : "רק לוודא—";
+        const msg = limitPhoneReply(`${prefix} ${q}`.trim(), 200);
+        msLog("guided", { callSid, kind: "handoff_reask", attempt: guidedCloseAttempts });
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+        } catch {}
+        guidedLastQuestionAt = Date.now();
+        await sayText(msg, { label: "reply" });
+        return;
+      }
+
+      // Callback-time step
+      if (guidedStep === "ASK_CALLBACK_TIME") {
+        const s = String(speech || "").trim();
+        if (looksLikeUnknownAnswer(s)) {
+          // If they can't specify a time, still continue to consent.
+          guidedCallbackTime = guidedCallbackTime || "";
+          guidedStep = "CLOSE";
+          guidedCloseAttempts = 0;
+          const msg = limitPhoneReply(`סבבה. ${handoffQuestionText()}`.trim(), 200);
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+          } catch {}
+          await sayText(msg, { label: "reply" });
+          return;
+        }
+        if (!looksLikeCallbackTimeAnswer(s)) {
+          if (guidedLastQuestionAt && Date.now() - guidedLastQuestionAt < GUIDED_REASK_MIN_MS) return;
+          const q0 = limitPhoneReply(flowText.FLOW_ASK_CALLBACK_TIME || "מתי נוח לך שנחזור אלייך?", 180);
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
+          } catch {}
+          guidedLastQuestionAt = Date.now();
+          await sayText(q0, { label: "reply" });
+          return;
+        }
+        guidedCallbackTime = s;
+        guidedStep = "CLOSE";
+        guidedCloseAttempts = 0;
+        const confirm = limitPhoneReply(
+          (flowText.FLOW_CALLBACK_TIME_CONFIRM || `מעולה. אני מעדכנת שיחזרו אלייך ${s}.`).trim(),
+          180
+        );
+        const msg = limitPhoneReply(`${confirm} ${handoffQuestionText()}`.trim(), 240);
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+        } catch {}
+        await sayText(msg, { label: "reply" });
         return;
       }
 
