@@ -4618,17 +4618,23 @@ wssMediaStream.on("connection", (ws, req) => {
       // This gives "human-like" flexibility while keeping the guided flow deterministic.
       {
         const nsq = normalizeIntentText(speech);
+        // Don't treat scheduling answers as "questions" (e.g. "אפשר שבוע הבא ביום ראשון").
+        const isLikelyDateAnswer = guidedStep === "ASK_DATE" && looksLikeDateAnswer(nsq);
+        const isPossibleInfoRequest =
+          nsq.startsWith("אפשר ") &&
+          (nsq.includes("פרטים") || nsq.includes("להסביר") || nsq.includes("לספר") || nsq.includes("לדעת"));
         const looksQuestion =
-          nsq.includes("?") ||
-          nsq.startsWith("מה ") ||
-          nsq.startsWith("למה ") ||
-          nsq.startsWith("איך ") ||
-          nsq.startsWith("אפשר ") ||
-          nsq.startsWith("תוכלי ") ||
-          nsq.startsWith("את יכולה ") ||
-          nsq.startsWith("האם ") ||
-          nsq.includes("במה מדובר") ||
-          nsq.includes("פרטים");
+          !isLikelyDateAnswer &&
+          (nsq.includes("?") ||
+            nsq.startsWith("מה ") ||
+            nsq.startsWith("למה ") ||
+            nsq.startsWith("איך ") ||
+            isPossibleInfoRequest ||
+            nsq.startsWith("תוכלי ") ||
+            nsq.startsWith("את יכולה ") ||
+            nsq.startsWith("האם ") ||
+            nsq.includes("במה מדובר") ||
+            nsq.includes("פרטים"));
         if (looksQuestion) {
           let followUp = "";
           if (guidedStep === "ASK_PURPOSE") followUp = flowText.FLOW_ASK_PURPOSE;
@@ -4802,7 +4808,12 @@ wssMediaStream.on("connection", (ws, req) => {
           ns === "אוקיי" ||
           ns === "אוקי" ||
           ns === "כן" ||
-          ns === "כאן";
+          ns === "כאן" ||
+          ns === "בהחלט" ||
+          ns === "בטח" ||
+          ns === "ברור" ||
+          ns === "כמובן" ||
+          ns === "לגמרי";
         const isYesLike = detectAffirmativeShort(s) || detectInterested(s) || ns === "כאן" || ns === "כן";
         // Important: purpose answers are often short single words (e.g. "בריאות", "פרנסה").
         // We should NOT treat "short length" as ack; only explicit acknowledgements/yes-like.
@@ -4864,7 +4875,12 @@ wssMediaStream.on("connection", (ws, req) => {
           ns === "אוקיי" ||
           ns === "אוקי" ||
           ns === "כן" ||
-          ns === "כאן";
+          ns === "כאן" ||
+          ns === "בהחלט" ||
+          ns === "בטח" ||
+          ns === "ברור" ||
+          ns === "כמובן" ||
+          ns === "לגמרי";
         // If user says "לא יודעת / מתי פנוי" (availability question), don't say "מצוין".
         // Use a dedicated configurable line, then continue the flow.
         if (!ackLike && looksLikeDateUnknownOrAvailability(ns)) {
