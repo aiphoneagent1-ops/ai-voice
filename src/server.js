@@ -1821,10 +1821,20 @@ function extractApprovedNamesFromKnowledgeBase(kbRaw) {
 function detectRabbinicalInquiry(text) {
   const t = normalizeIntentText(text);
   if (!t) return false;
-  // "רבנית X", "מדריכה X", "הרבנית מגיעה?", "מי הרבנית?"
-  const triggers = ["רבנית", "רב", "מדריכה", "מדריכות", "רבניות", "שם הרבנית", "מי הרבנית"];
-  // Must include a rabbi/instructor-related trigger. Do NOT treat generic "האם/יש" as a names inquiry.
-  return triggers.some((p) => t.includes(p));
+  // IMPORTANT: do NOT match "רב" as a substring inside other words (e.g. "הערב", "הרבה").
+  // We only treat this as a rabbinical/instructor inquiry if the trigger appears as a standalone token/phrase.
+  const hasWholeToken = (token) =>
+    new RegExp(`(^|[^\\u0590-\\u05FF])${String(token).replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}($|[^\\u0590-\\u05FF])`).test(
+      t
+    );
+
+  // Strong triggers (standalone words/phrases)
+  if (t.includes("שם הרבנית") || t.includes("מי הרבנית") || t.includes("מי הרבניות")) return true;
+  if (hasWholeToken("רבנית") || hasWholeToken("רבניות")) return true;
+  if (hasWholeToken("מדריכה") || hasWholeToken("מדריכות")) return true;
+  // Allow "רב"/"הרב" only as standalone tokens (not inside "הערב")
+  if (hasWholeToken("הרב") || hasWholeToken("רב")) return true;
+  return false;
 }
 
 function matchApprovedNameInText({ kb, userText }) {
