@@ -278,6 +278,68 @@ function parseFiniteEnvNumber(raw, fallback) {
 // Eleven v3 UI exposes only Stability.
 const ELEVENLABS_STABILITY = parseFiniteEnvNumber(process.env.ELEVENLABS_STABILITY, 0.5);
 
+// Optional expressive controls (some voices/accounts may ignore unsupported fields).
+// Ranges are typically 0..1. Leave empty to keep provider defaults.
+function clamp01OrNull(raw) {
+  const v = Number(raw);
+  if (!Number.isFinite(v)) return null;
+  return Math.max(0, Math.min(1, v));
+}
+function parseTriBool(raw) {
+  const s = String(raw || "").trim().toLowerCase();
+  if (!s) return null;
+  if (s === "1" || s === "true" || s === "yes" || s === "on") return true;
+  if (s === "0" || s === "false" || s === "no" || s === "off") return false;
+  return null;
+}
+
+const ELEVENLABS_SIMILARITY_BOOST = clamp01OrNull(String(process.env.ELEVENLABS_SIMILARITY_BOOST || "").trim());
+const ELEVENLABS_STYLE = clamp01OrNull(String(process.env.ELEVENLABS_STYLE || "").trim());
+const ELEVENLABS_SPEAKER_BOOST = parseTriBool(process.env.ELEVENLABS_SPEAKER_BOOST);
+
+// "Excited" preset: enabled per-phrase via tags in the text:
+// [[!]] / [[excited]] / [[נלהב]] / [[נלהבת]]
+const ELEVENLABS_EXCITED_STABILITY = clamp01OrNull(String(process.env.ELEVENLABS_EXCITED_STABILITY || "").trim());
+const ELEVENLABS_EXCITED_SIMILARITY_BOOST = clamp01OrNull(
+  String(process.env.ELEVENLABS_EXCITED_SIMILARITY_BOOST || "").trim()
+);
+const ELEVENLABS_EXCITED_STYLE = clamp01OrNull(String(process.env.ELEVENLABS_EXCITED_STYLE || "").trim());
+const ELEVENLABS_EXCITED_SPEAKER_BOOST = parseTriBool(process.env.ELEVENLABS_EXCITED_SPEAKER_BOOST);
+
+function extractTtsDirectives(rawText) {
+  const t = String(rawText || "");
+  // Allow simple per-phrase override without changing the LLM:
+  // add [[!]] anywhere in the script to make it more expressive.
+  const excitedRe = /\[\[(?:!|excited|נלהב|נלהבת)\]\]/gi;
+  const excited = excitedRe.test(t);
+  const cleaned = t.replace(excitedRe, " ");
+  return { text: cleaned, variant: excited ? "excited" : "default" };
+}
+
+function buildElevenVoiceSettings({ variant = "default" } = {}) {
+  const isExcited = String(variant || "default") === "excited";
+  const stability =
+    (isExcited ? ELEVENLABS_EXCITED_STABILITY : null) != null
+      ? ELEVENLABS_EXCITED_STABILITY
+      : Math.max(0, Math.min(1, ELEVENLABS_STABILITY));
+  const similarity =
+    (isExcited ? ELEVENLABS_EXCITED_SIMILARITY_BOOST : null) != null
+      ? ELEVENLABS_EXCITED_SIMILARITY_BOOST
+      : ELEVENLABS_SIMILARITY_BOOST;
+  const style =
+    (isExcited ? ELEVENLABS_EXCITED_STYLE : null) != null ? ELEVENLABS_EXCITED_STYLE : ELEVENLABS_STYLE;
+  const speakerBoost =
+    (isExcited ? ELEVENLABS_EXCITED_SPEAKER_BOOST : null) != null
+      ? ELEVENLABS_EXCITED_SPEAKER_BOOST
+      : ELEVENLABS_SPEAKER_BOOST;
+
+  const out = { stability };
+  if (similarity != null) out.similarity_boost = similarity;
+  if (style != null) out.style = style;
+  if (speakerBoost != null) out.use_speaker_boost = speakerBoost;
+  return out;
+}
+
 // Force a deterministic MP3 output (helps Twilio playback quality; avoids VBR surprises).
 // ElevenLabs docs: codec_sample_rate_bitrate (e.g. mp3_44100_128, mp3_22050_32, etc.)
 const ELEVENLABS_OUTPUT_FORMAT = String(process.env.ELEVENLABS_OUTPUT_FORMAT || "mp3_44100_128").trim();
@@ -388,6 +450,65 @@ const MS_RECORD_MAX_SECONDS = Number(process.env.MS_RECORD_MAX_SECONDS || 300); 
 const GS_WEBHOOK_URL = String(process.env.GS_WEBHOOK_URL || process.env.GOOGLE_SHEETS_WEBHOOK_URL || "").trim();
 const GS_WEBHOOK_SECRET = String(process.env.GS_WEBHOOK_SECRET || "").trim();
 const GS_SUMMARY_MODE = String(process.env.GS_SUMMARY_MODE || "heuristic").trim().toLowerCase(); // heuristic | none
+
+// Public base URL for links we send to Google Sheets (e.g. transcript viewer).
+// Prefer PUBLIC_BASE_URL, otherwise fall back to VOICE_WEBHOOK_URL (stripping /twilio/voice if present).
+const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || "").trim();
+function publicBaseUrlFromEnv() {
+  const explicit = PUBLIC_BASE_URL.replace(/\/$/, "");
+  if (explicit) return explicit;
+  const v = String(process.env.VOICE_WEBHOOK_URL || "").trim().replace(/\/$/, "");
+  if (!v) return "";
+  return v.endsWith("/twilio/voice") ? v.slice(0, -"/twilio/voice".length) : v;
+}
+
+function transcriptSig(callSid) {
+  const sid = String(callSid || "").trim();
+  if (!sid) return "";
+  // Reuse GS secret so the link isn't publicly guessable.
+  // If GS_WEBHOOK_SECRET is empty, links will still work but won't be protected.
+  const secret = String(GS_WEBHOOK_SECRET || "").trim();
+  if (!secret) return "";
+  return crypto.createHmac("sha256", secret).update(sid).digest("hex").slice(0, 16);
+}
+
+function buildFullTranscriptText(callSid) {
+  const sid = String(callSid || "").trim();
+  if (!sid) return "";
+  try {
+    const rows = db
+      .prepare(
+        `SELECT role, content, created_at AS createdAt
+         FROM call_messages
+         WHERE call_sid = ?
+         ORDER BY id ASC
+         LIMIT 800`
+      )
+      .all(sid);
+    if (!rows || !rows.length) return "";
+    const lines = [];
+    for (const r of rows) {
+      const role = String(r.role || "");
+      const who = role === "assistant" ? "סוכן" : role === "user" ? "לקוחה" : role;
+      const content = sanitizeSayText(String(r.content || "").trim());
+      if (!content) continue;
+      lines.push(`${who}: ${content}`);
+    }
+    return lines.join("\n").trim();
+  } catch {
+    return "";
+  }
+}
+
+function buildTranscriptUrl(callSid) {
+  const base = publicBaseUrlFromEnv();
+  if (!base) return "";
+  const sid = String(callSid || "").trim();
+  if (!sid) return "";
+  const sig = transcriptSig(sid);
+  const qs = `callSid=${encodeURIComponent(sid)}${sig ? `&sig=${encodeURIComponent(sig)}` : ""}`;
+  return `${base}/public/transcript?${qs}`;
+}
 
 function buildHeLeadSummary({ status, doNotCall, purpose, dateText, participants }) {
   if (doNotCall) return "ביקש/ה להסיר את המספר. לא להתקשר יותר.";
@@ -513,19 +634,28 @@ function putUlawToDisk(key, buf) {
   } catch {}
 }
 
-function computeElevenUlawCacheKey({ text, persona }) {
+function computeElevenUlawCacheKey({ text, persona, variant = "default" }) {
+  const v = String(variant || "default");
   const voiceId =
     (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
+  const voiceSettings = buildElevenVoiceSettings({ variant: v });
+  const settingsSig = [
+    ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000",
+    ELEVENLABS_MODEL_ID,
+    String(ELEVENLABS_LANGUAGE_CODE || ""),
+    `variant=${v}`,
+    `stability=${String(voiceSettings?.stability ?? "")}`,
+    `similarity=${String(voiceSettings?.similarity_boost ?? "")}`,
+    `style=${String(voiceSettings?.style ?? "")}`,
+    `speaker_boost=${String(voiceSettings?.use_speaker_boost ?? "")}`
+  ].join("|");
   return crypto
     .createHash("sha256")
     .update(
       [
         "elevenlabs_ulaw",
-        ELEVENLABS_STREAM_OUTPUT_FORMAT || "ulaw_8000",
         voiceId || "",
-        ELEVENLABS_MODEL_ID,
-        String(ELEVENLABS_LANGUAGE_CODE || ""),
-        String(ELEVENLABS_STABILITY),
+        settingsSig,
         String(text || "")
       ].join("::")
     )
@@ -533,19 +663,23 @@ function computeElevenUlawCacheKey({ text, persona }) {
 }
 
 function isUlawCached({ text, persona }) {
-  const safe = sanitizeSayText(String(text || "").trim());
+  const raw = sanitizeSayTextKeepDirectives(String(text || "").trim());
+  const d = extractTtsDirectives(raw);
+  const safe = sanitizeSayText(String(d.text || "").trim());
   if (!safe) return true;
-  const key = computeElevenUlawCacheKey({ text: safe, persona });
+  const key = computeElevenUlawCacheKey({ text: safe, persona, variant: d.variant });
   return !!(_ulawMemCache.get(key) || getUlawFromDisk(key));
 }
 
 async function prefetchUlaw({ text, persona }) {
-  const safe = sanitizeSayText(String(text || "").trim());
+  const raw = sanitizeSayTextKeepDirectives(String(text || "").trim());
+  const d = extractTtsDirectives(raw);
+  const safe = sanitizeSayText(String(d.text || "").trim());
   if (!safe) return;
-  if (isUlawCached({ text: safe, persona })) return;
-  // Best-effort: generate full ulaw and cache (runs in background while greeting plays).
+  if (isUlawCached({ text: raw, persona })) return;
+  // Best-effort: generate full ulaw and cache.
   try {
-    await elevenlabsTtsToUlaw8000({ text: safe, persona });
+    await elevenlabsTtsToUlaw8000({ text: safe, persona, variant: d.variant });
   } catch {}
 }
 
@@ -746,14 +880,16 @@ function interleaveStereoPcm16(left, right) {
   return out;
 }
 
-async function elevenlabsTtsToUlaw8000({ text, persona }) {
+async function elevenlabsTtsToUlaw8000({ text, persona, variant = "" }) {
   if (!ELEVENLABS_API_KEY) return null;
+  const d = variant ? { text, variant: String(variant || "default") } : extractTtsDirectives(text);
+  const safeText = sanitizeSayText(d.text);
   const voiceId =
     (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
   if (!voiceId) return null;
 
   // Hot-path cache (memory)
-  const cacheKey = computeElevenUlawCacheKey({ text, persona });
+  const cacheKey = computeElevenUlawCacheKey({ text: safeText, persona, variant: d.variant });
   const cached = _ulawMemCache.get(cacheKey);
   if (cached) return cached;
   // Warm-path cache (disk)
@@ -773,10 +909,10 @@ async function elevenlabsTtsToUlaw8000({ text, persona }) {
       : `${baseUrl}&optimize_streaming_latency=${encodeURIComponent(String(ELEVENLABS_OPTIMIZE_STREAMING_LATENCY))}`;
 
   const bodyJson = JSON.stringify({
-    text,
+    text: safeText,
     model_id: ELEVENLABS_MODEL_ID,
     ...(ELEVENLABS_LANGUAGE_CODE ? { language_code: ELEVENLABS_LANGUAGE_CODE } : {}),
-    voice_settings: { stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)) }
+    voice_settings: buildElevenVoiceSettings({ variant: d.variant })
   });
 
   const doFetch = (u) =>
@@ -850,8 +986,10 @@ async function elevenlabsTtsToUlaw8000({ text, persona }) {
   return buf; // raw mulaw/8000 bytes
 }
 
-async function elevenlabsTtsToUlaw8000Stream({ text, persona }) {
+async function elevenlabsTtsToUlaw8000Stream({ text, persona, variant = "" }) {
   if (!ELEVENLABS_API_KEY) return null;
+  const d = variant ? { text, variant: String(variant || "default") } : extractTtsDirectives(text);
+  const safeText = sanitizeSayText(d.text);
   const voiceId =
     (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
   if (!voiceId) return null;
@@ -865,10 +1003,10 @@ async function elevenlabsTtsToUlaw8000Stream({ text, persona }) {
       : `${baseUrl}&optimize_streaming_latency=${encodeURIComponent(String(ELEVENLABS_OPTIMIZE_STREAMING_LATENCY))}`;
 
   const bodyJson = JSON.stringify({
-    text,
+    text: safeText,
     model_id: ELEVENLABS_MODEL_ID,
     ...(ELEVENLABS_LANGUAGE_CODE ? { language_code: ELEVENLABS_LANGUAGE_CODE } : {}),
-    voice_settings: { stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)) }
+    voice_settings: buildElevenVoiceSettings({ variant: d.variant })
   });
 
   const doFetch = (u) =>
@@ -1205,6 +1343,14 @@ setDefaultIfEmpty("femaleOnly", false);
 setDefaultIfEmpty("minParticipants", 15);
 setDefaultIfEmpty("cooldownMonths", 6);
 
+// Auto dialer defaults (Israel business hours)
+setDefaultIfEmpty("autoDialEnabled", false);
+setDefaultIfEmpty("autoDialBatchSize", 5);
+setDefaultIfEmpty("autoDialIntervalSeconds", 300);
+setDefaultIfEmpty("autoDialHoursEnabled", true);
+setDefaultIfEmpty("autoDialStartTime", "09:00");
+setDefaultIfEmpty("autoDialEndTime", "17:00");
+
 // If the user already edited scripts, keep them—but add a small helpful "explanation" block once.
 // Keep legacy upgrade helpers, but make them generic (white-label).
 appendIfMissing("middleScriptMale", {
@@ -1225,6 +1371,23 @@ function normalizePhone(raw) {
 
 function sanitizeSayText(text) {
   // Twilio לפעמים נופל על תווים מיוחדים; נשאיר עברית אבל נחליף תווים בעייתיים.
+  return String(text || "")
+    // Strip optional TTS directive tags (never speak them, never store them).
+    .replace(/\[\[(?:!|excited|נלהב|נלהבת)\]\]/gi, "")
+    // Strip Hebrew niqqud/cantillation marks (often hurts TTS pronunciation/latency and gets read aloud).
+    .replace(/[\u0591-\u05C7]/g, "")
+    .replaceAll("—", "-")
+    .replaceAll("–", "-")
+    .replaceAll("\u202A", "")
+    .replaceAll("\u202B", "")
+    .replaceAll("\u202C", "")
+    .replaceAll("\u200E", "")
+    .replaceAll("\u200F", "")
+    .trim();
+}
+
+function sanitizeSayTextKeepDirectives(text) {
+  // Same as sanitizeSayText(), but preserves [[!]] tags so we can control TTS expressiveness per-phrase.
   return String(text || "")
     // Strip Hebrew niqqud/cantillation marks (often hurts TTS pronunciation/latency and gets read aloud).
     .replace(/[\u0591-\u05C7]/g, "")
@@ -1602,11 +1765,14 @@ function shortGreetingByPersona(persona) {
 }
 
 function normalizeGreetingForLatency({ greeting, persona }) {
-  const g = sanitizeSayText(String(greeting || "").trim());
-  if (!g) return sanitizeSayText(buildGreeting({ persona }));
+  const raw = sanitizeSayTextKeepDirectives(String(greeting || "").trim());
+  const d = extractTtsDirectives(raw);
+  const gNoTags = sanitizeSayText(String(d.text || "").trim());
+  if (!gNoTags) return sanitizeSayText(buildGreeting({ persona }));
   if (MS_FORCE_SHORT_GREETING) return sanitizeSayText(shortGreetingByPersona(persona));
-  if (g.length > MS_GREETING_MAX_CHARS) return sanitizeSayText(shortGreetingByPersona(persona));
-  return g;
+  if (gNoTags.length > MS_GREETING_MAX_CHARS) return sanitizeSayText(shortGreetingByPersona(persona));
+  // Return the raw greeting (may include [[!]]), so sayText() can use it for expressive TTS.
+  return raw;
 }
 
 function extractClosingLine(script, { interested }) {
@@ -1852,6 +2018,12 @@ function detectRabbinicalInquiry(text) {
   // Strong triggers (standalone words/phrases)
   if (t.includes("שם הרבנית") || t.includes("מי הרבנית") || t.includes("מי הרבניות")) return true;
   if (hasWholeToken("רבנית") || hasWholeToken("רבניות")) return true;
+  // People/team phrasing (common in campaigns): "מי הבנות שעובדות איתכם", "מי הצוות", etc.
+  if (t.includes("מי הבנות") || t.includes("מי הבנות שעובדות") || t.includes("מי הבנות שעובדות איתכם")) return true;
+  if (hasWholeToken("בנות") || hasWholeToken("צוות") || hasWholeToken("נציגות") || hasWholeToken("עובדות")) {
+    // Only treat as inquiry if it includes "מי" (so we don't misfire on unrelated mentions).
+    if (t.includes("מי")) return true;
+  }
   if (hasWholeToken("מדריכה") || hasWholeToken("מדריכות")) return true;
   // Allow "רב"/"הרב" only as standalone tokens (not inside "הערב")
   if (hasWholeToken("הרב") || hasWholeToken("רב")) return true;
@@ -2132,6 +2304,9 @@ function settingsSnapshot() {
   const autoDialEnabled = !!getSetting(db, "autoDialEnabled", false);
   const autoDialBatchSize = Number(getSetting(db, "autoDialBatchSize", 5));
   const autoDialIntervalSeconds = Number(getSetting(db, "autoDialIntervalSeconds", 30));
+  const autoDialHoursEnabled = !!getSetting(db, "autoDialHoursEnabled", true);
+  const autoDialStartTime = String(getSetting(db, "autoDialStartTime", "09:00") || "09:00").trim() || "09:00";
+  const autoDialEndTime = String(getSetting(db, "autoDialEndTime", "17:00") || "17:00").trim() || "17:00";
 
   // White-label phrases MUST be short (examples: "לצוות", "מהצוות", "למוקד", "מהמוקד").
   // If someone pastes the whole greeting here, it creates a repetition loop like:
@@ -2166,6 +2341,9 @@ function settingsSnapshot() {
     autoDialEnabled,
     autoDialBatchSize,
     autoDialIntervalSeconds,
+    autoDialHoursEnabled,
+    autoDialStartTime,
+    autoDialEndTime,
     handoffToPhrase,
     handoffFromPhrase,
     campaignMode,
@@ -2194,12 +2372,14 @@ function handoffConfirmCloseText({ persona }) {
 
 async function elevenlabsTtsToFile({ text, persona }) {
   if (!ELEVENLABS_API_KEY) return null;
+  const d = extractTtsDirectives(text);
+  const safeText = sanitizeSayText(d.text);
   const voiceId =
     (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
   if (!voiceId) return null;
 
   // IMPORTANT: must match computeTtsCacheKey() so polling + static /tts lookup work.
-  const key = computeTtsCacheKey({ provider: "elevenlabs", text, persona });
+  const key = computeTtsCacheKey({ provider: "elevenlabs", text: safeText, persona, variant: d.variant });
   const filename = `${key}.mp3`;
   const outPath = path.join(ttsDir, filename);
   // ה-URL הציבורי נבנה מה-request בפועל, לכן כאן נחזיר path יחסי.
@@ -2216,10 +2396,10 @@ async function elevenlabsTtsToFile({ text, persona }) {
       Accept: "audio/mpeg"
     },
     body: JSON.stringify({
-      text,
+      text: safeText,
       model_id: ELEVENLABS_MODEL_ID,
       ...(ELEVENLABS_LANGUAGE_CODE ? { language_code: ELEVENLABS_LANGUAGE_CODE } : {}),
-      voice_settings: { stability: Math.max(0, Math.min(1, ELEVENLABS_STABILITY)) }
+      voice_settings: buildElevenVoiceSettings({ variant: d.variant })
     })
   });
 
@@ -2258,13 +2438,24 @@ async function openaiTtsToFile({ text, persona }) {
   return `/tts/${filename}`;
 }
 
-function computeTtsCacheKey({ provider, text, persona }) {
+function computeTtsCacheKey({ provider, text, persona, variant = "default" }) {
   const p = String(provider || "").toLowerCase();
   if (p === "elevenlabs") {
     const voiceId =
       (persona === "female" ? ELEVENLABS_VOICE_FEMALE : ELEVENLABS_VOICE_MALE) || ELEVENLABS_VOICE_ID;
-    // Include model + stability so changing env doesn't keep serving stale cached audio.
-    const settingsSig = [ELEVENLABS_MODEL_ID, ELEVENLABS_OUTPUT_FORMAT || "", ELEVENLABS_LANGUAGE_CODE || "", ELEVENLABS_STABILITY].join("|");
+    const v = String(variant || "default");
+    const voiceSettings = buildElevenVoiceSettings({ variant: v });
+    // Include voice settings so changing env doesn't keep serving stale cached audio.
+    const settingsSig = [
+      ELEVENLABS_MODEL_ID,
+      ELEVENLABS_OUTPUT_FORMAT || "",
+      ELEVENLABS_LANGUAGE_CODE || "",
+      `variant=${v}`,
+      `stability=${String(voiceSettings?.stability ?? "")}`,
+      `similarity=${String(voiceSettings?.similarity_boost ?? "")}`,
+      `style=${String(voiceSettings?.style ?? "")}`,
+      `speaker_boost=${String(voiceSettings?.use_speaker_boost ?? "")}`
+    ].join("|");
     return crypto.createHash("sha256").update(`${voiceId}::${settingsSig}::${text}`).digest("hex");
   }
   // openai
@@ -2344,6 +2535,44 @@ app.get("/admin", (req, res) => {
   res.type("text/html").send(renderAdminPage());
 });
 
+// Public transcript viewer (for Google Sheets "click here").
+// If GS_WEBHOOK_SECRET is set, links must include a valid sig generated by transcriptSig(callSid).
+app.get("/public/transcript", (req, res) => {
+  const callSid = String(req.query?.callSid || "").trim();
+  const sig = String(req.query?.sig || "").trim();
+  if (!callSid) return res.status(400).type("text/plain").send("missing callSid");
+
+  const secret = String(GS_WEBHOOK_SECRET || "").trim();
+  if (secret) {
+    const expected = transcriptSig(callSid);
+    if (!expected || sig !== expected) {
+      return res.status(403).type("text/plain").send("forbidden");
+    }
+  }
+
+  const t = buildFullTranscriptText(callSid);
+  const safe = t || "אין תמלול לשיחה הזאת (עדיין).";
+  res
+    .status(200)
+    .type("text/html")
+    .send(
+      `<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>תמלול שיחה</title>
+      <style>
+        body{font-family:system-ui,-apple-system,Arial;margin:18px;background:#0b1020;color:#fff}
+        .card{max-width:980px;margin:0 auto;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:14px}
+        h1{margin:0 0 10px;font-size:16px}
+        .meta{opacity:.75;font-size:12px;margin-bottom:10px}
+        textarea{width:100%;min-height:70vh;resize:vertical;border-radius:12px;border:1px solid rgba(255,255,255,.12);background:rgba(0,0,0,.25);color:#fff;padding:12px;line-height:1.55;white-space:pre}
+        .btn{display:inline-block;margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(109,140,255,.25);color:#fff;cursor:pointer}
+      </style></head><body><div class="card">
+        <h1>תמלול שיחה מלא</h1>
+        <div class="meta">CallSid: <code>${escapeXmlAttr(callSid)}</code></div>
+        <textarea id="t" readonly>${escapeXmlText(safe)}</textarea>
+        <button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('t').value)">העתק הכל</button>
+      </div></body></html>`
+    );
+});
+
 app.get("/api/admin/state", (req, res) => {
   const s = settingsSnapshot();
   res.json({ ...s, updatedAt: new Date().toISOString() });
@@ -2354,17 +2583,20 @@ app.get("/api/admin/state", (req, res) => {
 app.post("/api/admin/sheets/test", async (req, res) => {
   try {
     const body = req.body || {};
+    const callSidForTest = String(body.callSid || `TEST_${Date.now()}`);
     const payload = {
       event: "lead_test",
       ts: new Date().toISOString(),
       phone: String(body.phone || "+972500000000"),
       firstName: String(body.firstName || "בדיקה"),
       status: String(body.status || "waiting"),
-      callSid: String(body.callSid || `TEST_${Date.now()}`),
+      callSid: callSidForTest,
       persona: "female",
       doNotCall: false,
       summary: "בדיקת מערכת: webhook לשיטס עובד.",
-      campaignMode: String(settingsSnapshot()?.campaignMode || "")
+      campaignMode: String(settingsSnapshot()?.campaignMode || ""),
+      fullTranscriptUrl: buildTranscriptUrl(callSidForTest),
+      fullTranscript: buildFullTranscriptText(callSidForTest)
     };
     const r = await postLeadToGoogleSheets(payload);
     res.json({ ok: true, result: r, gsWebhookUrlSet: !!GS_WEBHOOK_URL, gsSecretSet: !!GS_WEBHOOK_SECRET });
@@ -2410,6 +2642,17 @@ app.post("/api/admin/settings", (req, res) => {
   if (femaleOnly != null) setSetting(db, "femaleOnly", !!femaleOnly);
   if (minParticipants != null) setSetting(db, "minParticipants", Math.max(1, Math.min(200, Number(minParticipants) || 15)));
   if (cooldownMonths != null) setSetting(db, "cooldownMonths", Math.max(0, Math.min(60, Number(cooldownMonths) || 6)));
+  // Best-effort: prewarm Media Streams greeting TTS so callers don't wait in silence.
+  // We prefetch both greeting variants from the current saved scripts.
+  try {
+    const snap = settingsSnapshot();
+    const gMale = String(snap.openingScriptMale || snap.openingScript || "").trim();
+    const gFemale = String(snap.openingScriptFemale || snap.openingScript || "").trim();
+    if (gMale) prefetchUlaw({ text: gMale, persona: AGENT_VOICE_PERSONA }).catch(() => {});
+    if (gFemale) prefetchUlaw({ text: gFemale, persona: AGENT_VOICE_PERSONA }).catch(() => {});
+    const fillerText = String(process.env.MS_GREETING_FILLER_TEXT || "שלום רגע").trim();
+    if (fillerText) prefetchUlaw({ text: fillerText, persona: AGENT_VOICE_PERSONA }).catch(() => {});
+  } catch {}
   res.json({ ok: true });
 });
 
@@ -2459,11 +2702,17 @@ app.post("/api/admin/dialer", (req, res) => {
   const {
     autoDialEnabled = false,
     autoDialBatchSize = 5,
-    autoDialIntervalSeconds = 30
+    autoDialIntervalSeconds = 30,
+    autoDialHoursEnabled = true,
+    autoDialStartTime = "09:00",
+    autoDialEndTime = "17:00"
   } = req.body || {};
   setSetting(db, "autoDialEnabled", !!autoDialEnabled);
   setSetting(db, "autoDialBatchSize", Math.max(1, Math.min(50, Number(autoDialBatchSize) || 5)));
   setSetting(db, "autoDialIntervalSeconds", Math.max(5, Math.min(3600, Number(autoDialIntervalSeconds) || 30)));
+  setSetting(db, "autoDialHoursEnabled", !!autoDialHoursEnabled);
+  setSetting(db, "autoDialStartTime", String(autoDialStartTime || "09:00").trim() || "09:00");
+  setSetting(db, "autoDialEndTime", String(autoDialEndTime || "17:00").trim() || "17:00");
   res.json({ ok: true });
 });
 
@@ -2750,6 +2999,60 @@ function ensureVoicePath(url) {
   return u;
 }
 
+// ---------------------------
+// Dialer business hours (Asia/Jerusalem)
+// ---------------------------
+function parseHHMMToMinutes(raw, fallbackMinutes) {
+  const s = String(raw || "").trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return fallbackMinutes;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return fallbackMinutes;
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return fallbackMinutes;
+  return hh * 60 + mm;
+}
+
+function nowMinutesInIsrael() {
+  // Server may run in UTC; we always use Israel time for business hours.
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Jerusalem",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).formatToParts(new Date());
+    let hh = 0;
+    let mm = 0;
+    for (const p of parts) {
+      if (p.type === "hour") hh = Number(p.value);
+      if (p.type === "minute") mm = Number(p.value);
+    }
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+    return hh * 60 + mm;
+  } catch {
+    return null;
+  }
+}
+
+function isWithinWindowMinutes(nowMin, startMin, endMin) {
+  // Normal window: 09:00-17:00
+  if (startMin <= endMin) return nowMin >= startMin && nowMin < endMin;
+  // Overnight window (e.g. 22:00-06:00)
+  return nowMin >= startMin || nowMin < endMin;
+}
+
+function dialerIsWithinBusinessHours() {
+  const snap = settingsSnapshot();
+  if (!snap.autoDialHoursEnabled) return true;
+  const startMin = parseHHMMToMinutes(snap.autoDialStartTime, 9 * 60);
+  const endMin = parseHHMMToMinutes(snap.autoDialEndTime, 17 * 60);
+  const nowMin = nowMinutesInIsrael();
+  // Fail-open: if timezone conversion fails, do not block the dialer.
+  if (nowMin == null) return true;
+  return isWithinWindowMinutes(nowMin, startMin, endMin);
+}
+
 // Dial a specific number (admin "phone icon") — similar to `npm run dial`
 app.post("/api/contacts/dial", async (req, res) => {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM_NUMBER) {
@@ -2869,7 +3172,11 @@ app.all("/twilio/voice", async (req, res) => {
       // Save greeting once so the LLM won't repeat it.
       try {
         const c = db.prepare(`SELECT COUNT(1) AS c FROM call_messages WHERE call_sid = ?`).get(callSid)?.c ?? 0;
-        if (Number(c) === 0) addMessage(db, { callSid, role: "assistant", content: greeting });
+        if (Number(c) === 0) {
+          // Store without [[!]] tags (for clean transcripts), but keep tags for TTS via `greeting`.
+          const clean = sanitizeSayText(String(extractTtsDirectives(greeting).text || "").trim());
+          addMessage(db, { callSid, role: "assistant", content: clean });
+        }
       } catch {}
 
       const httpBase = getPublicBaseUrl(req);
@@ -3101,7 +3408,9 @@ app.all("/twilio/record", async (req, res) => {
         callSid,
         persona,
         doNotCall: true,
-        campaignMode: String(settingsSnapshot()?.campaignMode || "")
+        campaignMode: String(settingsSnapshot()?.campaignMode || ""),
+        fullTranscriptUrl: buildTranscriptUrl(callSid),
+        fullTranscript: buildFullTranscriptText(callSid)
       });
       await respondWithPlayAndMaybeHangup(req, res, {
         text: "אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב.",
@@ -3182,7 +3491,9 @@ app.all("/twilio/record", async (req, res) => {
         callSid,
         persona,
         doNotCall: false,
-        campaignMode: String(settingsSnapshot()?.campaignMode || "")
+        campaignMode: String(settingsSnapshot()?.campaignMode || ""),
+        fullTranscriptUrl: buildTranscriptUrl(callSid),
+        fullTranscript: buildFullTranscriptText(callSid)
       });
       const picked =
         (interested
@@ -3236,7 +3547,9 @@ app.all("/twilio/record", async (req, res) => {
         callSid,
         persona,
         doNotCall: true,
-        campaignMode: String(settingsSnapshot()?.campaignMode || "")
+        campaignMode: String(settingsSnapshot()?.campaignMode || ""),
+        fullTranscriptUrl: buildTranscriptUrl(callSid),
+        fullTranscript: buildFullTranscriptText(callSid)
       });
       await respondWithPlayAndMaybeHangup(req, res, { text: "אין בעיה, הסרתי אותך. יום טוב.", persona, hangup: true });
       return;
@@ -3282,29 +3595,39 @@ app.all("/twilio/record", async (req, res) => {
 
 // Auto dialer (simple background loop)
 let dialerTimer = null;
+let dialerInFlight = false;
 async function runDialerOnce() {
   const { autoDialEnabled, autoDialBatchSize } = settingsSnapshot();
   if (!autoDialEnabled) return;
-  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM_NUMBER) return;
-  const voiceBase = String(process.env.VOICE_WEBHOOK_URL || "").trim().replace(/\/$/, "");
-  if (!voiceBase) return;
-  const callUrl = `${voiceBase}/twilio/voice`;
+  // Prevent overlapping runs if the interval is short or Twilio is slow.
+  if (dialerInFlight) return;
+  dialerInFlight = true;
+  try {
+    // Business hours gate (Israel time)
+    if (!dialerIsWithinBusinessHours()) return;
+    if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM_NUMBER) return;
+    const voiceBase = String(process.env.VOICE_WEBHOOK_URL || "").trim().replace(/\/$/, "");
+    if (!voiceBase) return;
+    const callUrl = `${voiceBase}/twilio/voice`;
 
-  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  const batch = fetchNextContactsToDial(db, autoDialBatchSize);
-  for (const c of batch) {
-    try {
-      queueContactForDial(db, c.phone);
-      await client.calls.create({
-        to: c.phone,
-        from: process.env.TWILIO_FROM_NUMBER,
-        url: callUrl,
-        method: "POST"
-      });
-      markDialResult(db, c.phone, { status: "called" });
-    } catch (e) {
-      markDialResult(db, c.phone, { status: "failed", error: e?.message || String(e) });
+    const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+    const batch = fetchNextContactsToDial(db, autoDialBatchSize);
+    for (const c of batch) {
+      try {
+        queueContactForDial(db, c.phone);
+        await client.calls.create({
+          to: c.phone,
+          from: process.env.TWILIO_FROM_NUMBER,
+          url: callUrl,
+          method: "POST"
+        });
+        markDialResult(db, c.phone, { status: "called" });
+      } catch (e) {
+        markDialResult(db, c.phone, { status: "failed", error: e?.message || String(e) });
+      }
     }
+  } finally {
+    dialerInFlight = false;
   }
 }
 
@@ -3315,6 +3638,18 @@ function ensureDialerRunning() {
     dialerTimer = null;
   }
   if (!autoDialEnabled) return;
+  // Best-effort: prewarm greeting TTS so the first outbound call after enabling won't wait in silence.
+  try {
+    const snap = settingsSnapshot();
+    const gMale = String(snap.openingScriptMale || snap.openingScript || "").trim();
+    const gFemale = String(snap.openingScriptFemale || snap.openingScript || "").trim();
+    if (gMale) prefetchUlaw({ text: gMale, persona: AGENT_VOICE_PERSONA }).catch(() => {});
+    if (gFemale) prefetchUlaw({ text: gFemale, persona: AGENT_VOICE_PERSONA }).catch(() => {});
+    const fillerText = String(process.env.MS_GREETING_FILLER_TEXT || "שלום רגע").trim();
+    if (fillerText) prefetchUlaw({ text: fillerText, persona: AGENT_VOICE_PERSONA }).catch(() => {});
+  } catch {}
+  // Kick off immediately (don't wait for the first interval tick).
+  runDialerOnce().catch(() => {});
   dialerTimer = setInterval(() => {
     runDialerOnce().catch(() => {});
   }, Math.max(5, autoDialIntervalSeconds) * 1000);
@@ -3660,6 +3995,18 @@ const wssMediaStream = new WebSocketServer({ noServer: true });
 wssMediaStream.on("error", (e) => {
   console.warn("[ms] wss error", e?.message || e);
 });
+
+// Best-effort: prewarm greeting TTS on boot so the first call after deploy/cold start won't wait in silence.
+try {
+  const snap0 = settingsSnapshot();
+  const gMale0 = String(snap0.openingScriptMale || snap0.openingScript || "").trim();
+  const gFemale0 = String(snap0.openingScriptFemale || snap0.openingScript || "").trim();
+  if (gMale0) prefetchUlaw({ text: gMale0, persona: AGENT_VOICE_PERSONA }).catch(() => {});
+  if (gFemale0) prefetchUlaw({ text: gFemale0, persona: AGENT_VOICE_PERSONA }).catch(() => {});
+  const filler0 = String(process.env.MS_GREETING_FILLER_TEXT || "שלום רגע").trim();
+  if (filler0) prefetchUlaw({ text: filler0, persona: AGENT_VOICE_PERSONA }).catch(() => {});
+} catch {}
+
 wssMediaStream.on("connection", (ws, req) => {
   let streamSid = "";
   let callSid = "";
@@ -3843,7 +4190,9 @@ wssMediaStream.on("connection", (ws, req) => {
       campaignMode: String(settingsSnapshot()?.campaignMode || ""),
       purpose: guidedPurpose || "",
       dateText: guidedDateText || "",
-      participants: guidedParticipants ?? null
+      participants: guidedParticipants ?? null,
+      fullTranscriptUrl: buildTranscriptUrl(callSid),
+      fullTranscript: buildFullTranscriptText(callSid)
     });
   }
 
@@ -4145,12 +4494,14 @@ wssMediaStream.on("connection", (ws, req) => {
   }
 
   async function sayText(text, { label = "elevenlabs" } = {}) {
-    const safe = sanitizeSayText(String(text || "").trim());
+    const raw = sanitizeSayTextKeepDirectives(String(text || "").trim());
+    const d = extractTtsDirectives(raw);
+    const safe = sanitizeSayText(String(d.text || "").trim());
     if (!safe) return;
     const tGen0 = Date.now();
 
     // Fast path: cache hit (memory/disk) → play immediately
-    const cacheKey = computeElevenUlawCacheKey({ text: safe, persona: AGENT_VOICE_PERSONA });
+    const cacheKey = computeElevenUlawCacheKey({ text: safe, persona: AGENT_VOICE_PERSONA, variant: d.variant });
     const cached = _ulawMemCache.get(cacheKey) || getUlawFromDisk(cacheKey);
     if (cached && cached.length) {
       if (!_ulawMemCache.get(cacheKey)) _ulawMemCache.set(cacheKey, cached);
@@ -4172,11 +4523,27 @@ wssMediaStream.on("connection", (ws, req) => {
     }
 
     // Streaming path: start playback while ElevenLabs is still producing audio.
-    const stream = await elevenlabsTtsToUlaw8000Stream({ text: safe, persona: AGENT_VOICE_PERSONA });
+    // For greeting: try to avoid dead air by playing a short cached filler first (if available).
+    const streamPromise = elevenlabsTtsToUlaw8000Stream({ text: safe, persona: AGENT_VOICE_PERSONA, variant: d.variant });
+    if (label === "greeting") {
+      try {
+        const fillerText = String(process.env.MS_GREETING_FILLER_TEXT || "שלום רגע").trim();
+        const fillerSafe = sanitizeSayText(fillerText);
+        if (fillerSafe) {
+          const fillerKey = computeElevenUlawCacheKey({ text: fillerSafe, persona: AGENT_VOICE_PERSONA, variant: "default" });
+          const filler = _ulawMemCache.get(fillerKey) || getUlawFromDisk(fillerKey);
+          if (filler && filler.length) {
+            if (!_ulawMemCache.get(fillerKey)) _ulawMemCache.set(fillerKey, filler);
+            await playUlaw(filler, { label: "greeting_filler" });
+          }
+        }
+      } catch {}
+    }
+    const stream = await streamPromise;
     const genMs = Date.now() - tGen0;
     if (!stream) {
       // Fallback: if streaming fails (or returns empty body), generate full ulaw and play normally.
-      const ulaw = await elevenlabsTtsToUlaw8000({ text: safe, persona: AGENT_VOICE_PERSONA });
+      const ulaw = await elevenlabsTtsToUlaw8000({ text: safe, persona: AGENT_VOICE_PERSONA, variant: d.variant });
       if (!ulaw) return;
       _ulawMemCache.set(cacheKey, ulaw);
       putUlawToDisk(cacheKey, ulaw);
@@ -4885,6 +5252,20 @@ wssMediaStream.on("connection", (ws, req) => {
 
       // Handle CLOSE (handoff confirmation)
       if (guidedStep === "CLOSE") {
+        // If the caller asks a "who/team/rabbanit" question at the close, answer briefly first,
+        // then re-ask for consent instead of looping the same consent question.
+        if (detectRabbinicalInquiry(speech)) {
+          const askedName = matchApprovedNameInText({ kb: snap.knowledgeBase, userText: speech });
+          const base = askedName ? flowText.FLOW_NAME_CONFIRMED : flowText.FLOW_NAME_UNKNOWN;
+          const msg = limitPhoneReply(`${sanitizeSayText(base)} ${handoffQuestionText()}`.trim(), 240);
+          msLog("guided", { callSid, kind: askedName ? "name_confirmed_close" : "name_unknown_close" });
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+          } catch {}
+          guidedLastQuestionAt = Date.now();
+          await sayText(msg, { label: "reply" });
+          return;
+        }
         const ns = normalizeIntentText(speech);
         const yesMisheardAsKan = ns === "כאן" && String(speech || "").trim().length <= 4;
         // Treat a clear "כן" as final confirmation; do NOT re-ask.

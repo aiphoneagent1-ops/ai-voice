@@ -245,6 +245,22 @@ export function renderAdminPage() {
               הפעל חיוג אוטומטי למספרים חדשים
             </label>
           </div>
+          <div class="row" style="margin-top:8px;">
+            <label style="margin:0; display:flex; gap:8px; align-items:center;">
+              <input type="checkbox" id="autoDialHoursEnabled" style="width:auto;" />
+              הגבל לשעות פעילות (שעון ישראל)
+            </label>
+          </div>
+          <div class="row">
+            <div style="flex:1; min-width:220px;">
+              <label>משעה</label>
+              <input id="autoDialStartTime" type="time" value="09:00" />
+            </div>
+            <div style="flex:1; min-width:220px;">
+              <label>עד שעה</label>
+              <input id="autoDialEndTime" type="time" value="17:00" />
+            </div>
+          </div>
           <div class="row">
             <div style="flex:1; min-width:220px;">
               <label>קצב (כמה מספרים בכל ריצה)</label>
@@ -457,6 +473,9 @@ export function renderAdminPage() {
           $("autoDialEnabled").checked = !!data.autoDialEnabled;
           $("autoDialBatch").value = String(data.autoDialBatchSize ?? 5);
           $("autoDialInterval").value = String(data.autoDialIntervalSeconds ?? 300);
+          if($("autoDialHoursEnabled")) $("autoDialHoursEnabled").checked = data.autoDialHoursEnabled !== false;
+          if($("autoDialStartTime")) $("autoDialStartTime").value = String(data.autoDialStartTime || "09:00");
+          if($("autoDialEndTime")) $("autoDialEndTime").value = String(data.autoDialEndTime || "17:00");
           setStatus($("topStatus"), "מחובר. עודכן: " + (data.updatedAt || "—"), true);
           try{
             const s = await api("/api/contacts/stats");
@@ -549,7 +568,10 @@ export function renderAdminPage() {
             body: JSON.stringify({
               autoDialEnabled: $("autoDialEnabled").checked,
               autoDialBatchSize: Number($("autoDialBatch").value || 5),
-              autoDialIntervalSeconds: Number($("autoDialInterval").value || 300)
+              autoDialIntervalSeconds: Number($("autoDialInterval").value || 300),
+              autoDialHoursEnabled: $("autoDialHoursEnabled") ? $("autoDialHoursEnabled").checked : true,
+              autoDialStartTime: $("autoDialStartTime") ? String($("autoDialStartTime").value || "09:00") : "09:00",
+              autoDialEndTime: $("autoDialEndTime") ? String($("autoDialEndTime").value || "17:00") : "17:00"
             })
           });
           setStatus($("dialerStatus"), "נשמר", true);
