@@ -1209,6 +1209,8 @@ function normalizePhone(raw) {
 function sanitizeSayText(text) {
   // Twilio לפעמים נופל על תווים מיוחדים; נשאיר עברית אבל נחליף תווים בעייתיים.
   return String(text || "")
+    // Strip Hebrew niqqud/cantillation marks (often hurts TTS pronunciation/latency and gets read aloud).
+    .replace(/[\u0591-\u05C7]/g, "")
     .replaceAll("—", "-")
     .replaceAll("–", "-")
     .replaceAll("\u202A", "")
@@ -4206,6 +4208,10 @@ wssMediaStream.on("connection", (ws, req) => {
     let streamDone = false;
     let streamErr = "";
     let totalBytes = queued.length;
+    // Accumulate what we actually send so we can cache it (makes next time instant).
+    // Bound memory: keep up to ~2MB (enough for typical phone replies).
+    const sentParts = [];
+    let sentBytesForCache = 0;
     let framesSent = 0;
     let offsetBytes = 0;
     let lastByteAt = Date.now();
@@ -4304,10 +4310,12 @@ wssMediaStream.on("connection", (ws, req) => {
               playing = false;
               if (playTimer) clearInterval(playTimer);
               playTimer = null;
-              // Cache what we got (best-effort)
+              // Cache what we sent (best-effort).
               try {
-                if (totalBytes > 0 && totalBytes <= 2_000_000) {
-                  // We didn't persist the full byte stream; keep only if we managed to accumulate it (not guaranteed).
+                if (sentParts.length && sentBytesForCache > 0 && sentBytesForCache <= 2_000_000) {
+                  const full = Buffer.concat(sentParts);
+                  _ulawMemCache.set(cacheKey, full);
+                  putUlawToDisk(cacheKey, full);
                 }
               } catch {}
               resolve({
@@ -4332,6 +4340,12 @@ wssMediaStream.on("connection", (ws, req) => {
         // Recording: capture what we send out (agent channel).
         if (recordEnabled && chunk && chunk.length) {
           recOutUlawQ.push(Buffer.from(chunk));
+        }
+        // Cache accumulation
+        if (sentBytesForCache <= 2_000_000) {
+          const b = Buffer.from(chunk);
+          sentParts.push(b);
+          sentBytesForCache += b.length;
         }
         wsSendToTwilio({
           event: "media",
@@ -4850,7 +4864,9 @@ wssMediaStream.on("connection", (ws, req) => {
           const pitch = String(flowText.FLOW_INTEREST_PITCH || "").trim();
           if (pitch) {
             guidedStep = "ASK_DATE";
-            const msg = limitPhoneReply(sanitizeSayText(pitch), 260);
+            // Allow a longer pitch (some campaigns want a 2–3 sentence intro here).
+            // If it's too long, the user should shorten it in KB for latency, but don't truncate mid-sentence by default.
+            const msg = limitPhoneReply(sanitizeSayText(pitch), 520);
             try {
               if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
             } catch {}
