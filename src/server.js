@@ -1535,8 +1535,8 @@ function detectAffirmativeShort(text) {
   if (!t) return false;
   // Negation wins: avoid false positives like "כן אבל לא".
   if (detectOptOut(t) || detectNotInterested(t)) return false;
-  // If "כן" appears anywhere, treat as affirmative (unless a clear negation is also present).
-  if (/\bכן\b/.test(t)) return true;
+  // If "כן" appears as a token, treat as affirmative (Hebrew-safe; \b is not reliable for \p{L}).
+  if (t === "כן" || t.startsWith("כן ") || t.endsWith(" כן") || t.includes(" כן ")) return true;
   const patterns = [
     "בטח",
     "ברור",
@@ -4483,11 +4483,37 @@ wssMediaStream.on("connection", (ws, req) => {
           const origSuspicious = isSuspiciousTranscript(speech);
           const retrySuspicious = isSuspiciousTranscript(speech2);
 
+          // Extra rule: when we're in a guided step that expects a number/date, prefer the retry
+          // if the retry looks like it captured the expected structure and the original didn't.
+          let stepPrefersRetry = false;
+          try {
+            if (String(campaignMode || "").toLowerCase() === "guided") {
+              if (guidedStep === "ASK_PARTICIPANTS") {
+                const ns1 = normalizeIntentText(speech);
+                const ns2 = normalizeIntentText(speech2);
+                const n1 = extractHeNumber(speech) ?? inferParticipantsCountFromList(ns1);
+                const n2 = extractHeNumber(speech2) ?? inferParticipantsCountFromList(ns2);
+                if (n1 == null && n2 != null) stepPrefersRetry = true;
+              } else if (guidedStep === "ASK_DATE") {
+                const d1 = looksLikeDateAnswer(speech);
+                const d2 = looksLikeDateAnswer(speech2);
+                if (!d1 && d2) stepPrefersRetry = true;
+              } else if (guidedStep === "CLOSE") {
+                // Handoff confirmation: if retry contains a clearer yes/consent, prefer it.
+                const y1 = detectAffirmativeShort(speech) || detectInterested(speech) || detectTransferConsent(speech);
+                const y2 = detectAffirmativeShort(speech2) || detectInterested(speech2) || detectTransferConsent(speech2);
+                if (!y1 && y2) stepPrefersRetry = true;
+              }
+            }
+          } catch {}
+
           const shouldUseRetry =
             // Hard override: original is prompt-echo, retry is not
             (origLooksEcho && speech2 && !retryLooksEcho) ||
             // General: original suspicious, retry not suspicious
             (origSuspicious && speech2 && !retrySuspicious) ||
+            // Step-aware: retry fits the expected shape better
+            (speech2 && stepPrefersRetry) ||
             // Old heuristic: retry is clearly more informative OR original was generic ack on long audio
             (speech2 && (speech2.length > speech.length + 2 || isGenericAckTranscript(speech)));
 
