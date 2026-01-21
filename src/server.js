@@ -1329,8 +1329,12 @@ function detectInterested(text) {
 
 function detectNotInterested(text) {
   const t = normalizeIntentText(text);
+  if (!t) return false;
+  // IMPORTANT: do NOT treat any utterance containing "לא" as not-interested.
+  // Many valid phrases include "לא" (e.g. "לא משתתפות", "לא יודעת", etc.).
+  // Treat a standalone "לא" as a hard no; other negatives require clearer patterns.
+  if (t === "לא") return true;
   const patterns = [
-    "לא",
     "לא רוצה",
     "לא מעוניין",
     "לא מעוניינת",
@@ -1344,10 +1348,7 @@ function detectNotInterested(text) {
     "להתראות",
     "עזוב",
     "עזבי",
-    "אין לי זמן",
-    "לא עכשיו",
-    "לא נראה לי",
-    "אולי אחר כך"
+    "לא נראה לי"
   ];
   return patterns.some((p) => t.includes(p));
 }
@@ -1857,6 +1858,11 @@ function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
     FLOW_ASK_PURPOSE: "בגדול—מה המטרה/הבקשה שלך?",
     FLOW_ASK_DATE: "מתי נוח לך?",
     FLOW_ASK_PARTICIPANTS: "כמה משתתפים צפויים בערך?",
+    // When we can't understand the participants answer (STT garbage), re-ask ONCE with a clearer hint.
+    FLOW_PARTICIPANTS_REASK: "סליחה, לא הבנתי. כמה משתתפות צפויות בערך? מספר כמו 15 או 20.",
+    // After 2 unclear attempts, stop looping and hand off to a human.
+    // IMPORTANT: this will be appended with the handoff question in code.
+    FLOW_PARTICIPANTS_UNCLEAR_FALLBACK: "לא הצלחתי להבין את מספר המשתתפות. נציגה תחזור אלייך בהקדם עם כל הפרטים.",
     FLOW_PARTICIPANTS_OK: "מצוין. נציגה תחזור אלייך בהקדם עם כל הפרטים.",
     FLOW_PARTICIPANTS_LOW: `כדי שזה יעבוד אנחנו צריכים מינימום ${minParticipants} משתתפים. תצליחי להגיע ל־${minParticipants}?`,
     // IMPORTANT: this line is appended with the handoff question in code when we still need consent.
@@ -1881,6 +1887,17 @@ function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
     FLOW_NAME_UNKNOWN: "אקח את השם ואבדוק מול היומן, ויחזרו אלייך."
   };
   return { ...defaults, ...flow };
+}
+
+function prependAckOnce(ack, text) {
+  const a0 = sanitizeSayText(String(ack || "").trim());
+  const t0 = sanitizeSayText(String(text || "").trim());
+  if (!a0) return t0;
+  if (!t0) return a0;
+  const na = normalizeIntentText(a0);
+  const nt = normalizeIntentText(t0);
+  if (na && nt && nt.startsWith(na)) return t0; // avoid "מעולה. מעולה."
+  return `${a0} ${t0}`.trim();
 }
 
 function extractHeNumber(text) {
@@ -3759,6 +3776,7 @@ wssMediaStream.on("connection", (ws, req) => {
   let guidedAskedPurposeQ = false;
   let guidedDateText = "";
   let guidedParticipants = null;
+  let guidedParticipantsBadCount = 0;
   let participantsPersuadeAsked = false;
   let guidedAskedCooldownRule = false;
   let guidedLastQuestionAt = 0;
@@ -4856,7 +4874,8 @@ wssMediaStream.on("connection", (ws, req) => {
         const unknownPrefix = !guidedPurpose && looksLikeUnknownAnswer(ns)
           ? limitPhoneReply(flowText.FLOW_PURPOSE_UNKNOWN || "הבנתי. נציגה תוכל לעזור לסגור את זה. בואי נתקדם רגע.", 140)
           : "";
-        const q = limitPhoneReply(`${unknownPrefix ? unknownPrefix + " " : ""}${ack ? ack + " " : ""}${flowText.FLOW_ASK_DATE}`.trim(), 240);
+        const askDate = prependAckOnce(ack, flowText.FLOW_ASK_DATE);
+        const q = limitPhoneReply(`${unknownPrefix ? unknownPrefix + " " : ""}${askDate}`.trim(), 240);
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
         } catch {}
@@ -4887,6 +4906,7 @@ wssMediaStream.on("connection", (ws, req) => {
         if (!ackLike && looksLikeDateUnknownOrAvailability(ns)) {
           guidedDateText = guidedDateText || s;
           guidedStep = "ASK_PARTICIPANTS";
+          guidedParticipantsBadCount = 0;
           const flex = limitPhoneReply(
             flowText.FLOW_DATE_FLEX_CONFIRM || "אין בעיה. נציגה תחזור אלייך בהקדם כדי לתאם תאריך שנוח לך.",
             200
@@ -4913,10 +4933,11 @@ wssMediaStream.on("connection", (ws, req) => {
 
         guidedDateText = guidedDateText || s;
         guidedStep = "ASK_PARTICIPANTS";
+        guidedParticipantsBadCount = 0;
         const ack = limitPhoneReply(flowText.FLOW_ACK_DATE || flowText.FLOW_ACK_GENERAL || "", 40);
         const confirm = limitPhoneReply(flowText.FLOW_DATE_CONFIRM || "", 180);
-        const combined = `${ack ? ack + " " : ""}${confirm ? confirm + " " : ""}${flowText.FLOW_ASK_PARTICIPANTS}`.trim();
-        const q = limitPhoneReply(combined, 260);
+        const combined = `${confirm ? confirm + " " : ""}${flowText.FLOW_ASK_PARTICIPANTS}`.trim();
+        const q = limitPhoneReply(prependAckOnce(ack, combined), 260);
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
         } catch {}
@@ -4929,6 +4950,7 @@ wssMediaStream.on("connection", (ws, req) => {
         const ns = normalizeIntentText(speech);
         // Try to extract a number; if caller lists people, infer an approximate count.
         const n = extractHeNumber(speech) ?? inferParticipantsCountFromList(ns);
+        if (n != null) guidedParticipantsBadCount = 0;
         guidedParticipants = n;
         const ackLike =
           ns === "תודה" ||
@@ -4938,11 +4960,16 @@ wssMediaStream.on("connection", (ws, req) => {
           ns === "אוקיי" ||
           ns === "אוקי" ||
           ns === "כן" ||
-          ns === "כאן";
+          ns === "כאן" ||
+          ns === "בהחלט" ||
+          ns === "בטח" ||
+          ns === "ברור" ||
+          ns === "כמובן" ||
+          ns === "לגמרי";
         // If user didn't provide a number:
-        // - If it's a generic ack -> re-ask
         // - If it's "לא יודעת/לא בטוחה" -> fallback + proceed to handoff (rep can help)
-        if (n == null && looksLikeDateUnknownOrAvailability(ns)) {
+        // - If it's garbage/non-sensical -> re-ask ONCE; then stop looping and hand off.
+        if (n == null && looksLikeUnknownAnswer(ns)) {
           msLog("guided", { callSid, kind: "participants_unknown", n: null });
           guidedStep = "CLOSE";
           const t = limitPhoneReply(flowText.FLOW_PARTICIPANTS_LOW_FALLBACK, 200);
@@ -4954,21 +4981,25 @@ wssMediaStream.on("connection", (ws, req) => {
           await sayText(msg, { label: "reply" });
           return;
         }
-        if (n == null && ackLike) {
-          // Avoid rapid loops while the caller is still talking.
-          if (guidedLastQuestionAt && Date.now() - guidedLastQuestionAt < GUIDED_REASK_MIN_MS) return;
-          const q0 = limitPhoneReply(flowText.FLOW_ASK_PARTICIPANTS, 160);
-          try {
-            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
-          } catch {}
-          guidedLastQuestionAt = Date.now();
-          await sayText(q0, { label: "reply" });
-          return;
-        }
         if (n == null) {
-          // Not a number and not a clear "I don't know" -> re-ask (prevents wrong <15 branch).
+          // Not a number and not a clear "I don't know" -> re-ask once, then hand off.
           if (guidedLastQuestionAt && Date.now() - guidedLastQuestionAt < GUIDED_REASK_MIN_MS) return;
-          const q0 = limitPhoneReply(flowText.FLOW_ASK_PARTICIPANTS, 160);
+          guidedParticipantsBadCount++;
+          if (guidedParticipantsBadCount >= 2) {
+            msLog("guided", { callSid, kind: "participants_unclear_fallback", attempts: guidedParticipantsBadCount });
+            guidedStep = "CLOSE";
+            const t = limitPhoneReply(
+              flowText.FLOW_PARTICIPANTS_UNCLEAR_FALLBACK || "לא הצלחתי להבין את מספר המשתתפות. נציגה תחזור אלייך בהקדם עם כל הפרטים.",
+              200
+            );
+            const msg = limitPhoneReply(`${t} ${handoffQuestionText()}`.trim(), 240);
+            try {
+              if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+            } catch {}
+            await sayText(msg, { label: "reply" });
+            return;
+          }
+          const q0 = limitPhoneReply(flowText.FLOW_PARTICIPANTS_REASK || flowText.FLOW_ASK_PARTICIPANTS, 180);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
           } catch {}
@@ -4981,7 +5012,7 @@ wssMediaStream.on("connection", (ws, req) => {
           // Ask handoff question (rep will call back)
           guidedStep = "CLOSE";
           const ack = limitPhoneReply(flowText.FLOW_ACK_PARTICIPANTS || flowText.FLOW_ACK_GENERAL || "", 40);
-          const q = limitPhoneReply(`${ack ? ack + " " : ""}${handoffQuestionText()}`.trim(), 220);
+          const q = limitPhoneReply(prependAckOnce(ack, handoffQuestionText()), 220);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
           } catch {}
