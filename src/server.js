@@ -1881,6 +1881,8 @@ function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
     FLOW_INTEREST_PITCH: "",
     // Generic one-shot "I didn't catch that" (used to avoid loops on STT garbage in tricky steps).
     FLOW_UNCLEAR_REPEAT: "סליחה, לא הבנתי. תוכלי לחזור על זה בקצרה?",
+    // One-time safety recheck (used only when STT returns "לא מעוניינת" on a very short first utterance).
+    FLOW_INTEREST_RECHECK: "רק כדי לוודא—רוצה לשמוע עוד פרטים?",
     FLOW_ASK_DATE: "מתי נוח לך?",
     FLOW_ASK_PARTICIPANTS: "כמה משתתפים צפויים בערך?",
     // When we can't understand the participants answer (STT garbage), re-ask ONCE with a clearer hint.
@@ -3673,6 +3675,8 @@ wssMediaStream.on("connection", (ws, req) => {
   // We always CAPTURE inbound audio, but only TRANSCRIBE/RESPOND after the greeting is done.
   let allowListen = false; // "process speech" (STT+LLM+TTS)
   let allowBargeIn = false; // interrupt agent speech
+  // If we decided to end the call, ignore any late inbound speech.
+  let ignoreInbound = false;
   // Echo-safe turn-taking: while agent audio is playing, ignore inbound audio entirely.
   let agentSpeaking = false;
   let pendingEnableListenOnMark = false;
@@ -3808,6 +3812,8 @@ wssMediaStream.on("connection", (ws, req) => {
   let guidedLastQuestionAt = 0;
   let guidedCallbackTime = "";
   let guidedCloseAttempts = 0;
+  // One-time safety recheck for suspicious early "not interested" right after greeting.
+  let guidedInterestRecheckAsked = false;
   // Google Sheets sync guard (avoid duplicate rows on ws close after explicit outcome)
   let sheetsSynced = false;
 
@@ -3877,7 +3883,13 @@ wssMediaStream.on("connection", (ws, req) => {
     if (r?.markName) {
       pendingHangupOnMark = true;
       hangupMarkName = String(r.markName || "");
+      // Stop listening immediately; we are finishing the call.
+      ignoreInbound = true;
+      allowListen = false;
+      allowBargeIn = false;
+      pendingEnableListenOnMark = false;
     } else {
+      ignoreInbound = true;
       await hangupCallNow();
     }
     conversationState = "END";
@@ -3896,7 +3908,12 @@ wssMediaStream.on("connection", (ws, req) => {
       if (r?.markName) {
         pendingHangupOnMark = true;
         hangupMarkName = String(r.markName || "");
+        ignoreInbound = true;
+        allowListen = false;
+        allowBargeIn = false;
+        pendingEnableListenOnMark = false;
       } else {
+        ignoreInbound = true;
         await hangupCallNow();
       }
       conversationState = "END";
@@ -3924,6 +3941,7 @@ wssMediaStream.on("connection", (ws, req) => {
   let thinkingTimer = null;
   let awaitingReply = false;
   let lastUtteranceEndAt = 0;
+  let lastUtteranceDurMs = 0;
   let thinkingPlayed = false;
 
   function clearThinkingTimer() {
@@ -4430,6 +4448,8 @@ wssMediaStream.on("connection", (ws, req) => {
 
   async function transcribeAndRespond(pcm8kAll) {
     if (closed) return;
+    // If we already decided to hang up / finalized outcome, ignore late speech.
+    if (ignoreInbound || pendingHangupOnMark || conversationState === "END") return;
     if (!openai) return;
     if (!pcm8kAll || !pcm8kAll.length) return;
 
@@ -4619,6 +4639,24 @@ wssMediaStream.on("connection", (ws, req) => {
       try {
         if (callSid && phone) addMessage(db, { callSid, role: "user", content: speech });
       } catch {}
+
+      // If we previously asked a quick "recheck interest" question, interpret this turn as the answer.
+      if (guidedInterestRecheckAsked && !guidedAskedPurposeQ && guidedStep === "ASK_PURPOSE") {
+        const ns = normalizeIntentText(speech);
+        const yesLike = detectAffirmativeShort(speech) || detectInterested(speech) || ns === "כן" || ns === "כאן";
+        if (yesLike) {
+          guidedInterestRecheckAsked = false;
+          // Continue normally; the ASK_PURPOSE step will route "כן" into FLOW_INTEREST_PITCH/ASK_PURPOSE.
+        } else if (detectNotInterested(speech) && !looksLikeUnknownAnswer(speech)) {
+          guidedInterestRecheckAsked = false;
+          msLog("guided", { callSid, kind: "not_interested_confirmed" });
+          await sayFinalAndHangup({ text: "אין בעיה, תודה על הזמן. יום טוב ובשורות טובות.", outcome: "not_interested" });
+          return;
+        } else {
+          guidedInterestRecheckAsked = false;
+          // Fall through: treat as normal speech (FAQ/off-step/etc).
+        }
+      }
 
       // Rabbinical/instructor names policy enforcement:
       // - Do NOT list names proactively.
@@ -4824,6 +4862,22 @@ wssMediaStream.on("connection", (ws, req) => {
       // Handle hard NO / goodbye
       // Treat "לא יודעת/לא בטוחה" as an unknown answer (not a hard NO).
       if (detectNotInterested(speech) && !looksLikeUnknownAnswer(speech)) {
+        // Safety: sometimes the very first short response after the greeting gets mis-transcribed.
+        // If it's very short, ask a quick recheck ONCE instead of ending immediately.
+        if (!guidedAskedPurposeQ && guidedStep === "ASK_PURPOSE" && !guidedInterestRecheckAsked && lastUtteranceDurMs > 0 && lastUtteranceDurMs < 900) {
+          guidedInterestRecheckAsked = true;
+          const q0 = limitPhoneReply(
+            String(flowText.FLOW_INTEREST_RECHECK || "רק כדי לוודא—רוצה לשמוע עוד פרטים?").trim(),
+            160
+          );
+          msLog("guided", { callSid, kind: "interest_recheck" });
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
+          } catch {}
+          guidedLastQuestionAt = Date.now();
+          await sayText(q0, { label: "reply" });
+          return;
+        }
         msLog("guided", { callSid, kind: "not_interested" });
         await sayFinalAndHangup({ text: "אין בעיה, תודה על הזמן. יום טוב ובשורות טובות.", outcome: "not_interested" });
         return;
@@ -5711,6 +5765,7 @@ wssMediaStream.on("connection", (ws, req) => {
         if (durMs < minMs) return;
         // mark end-of-speech moment for latency measurement + conditional backchannel
         lastUtteranceEndAt = Date.now();
+        lastUtteranceDurMs = durMs;
         awaitingReply = true;
         thinkingPlayed = false;
         scheduleThinkingOnce();
@@ -5760,6 +5815,7 @@ wssMediaStream.on("connection", (ws, req) => {
           }
           msLog("utterance force finalize", { callSid, ms: durMs });
           lastUtteranceEndAt = Date.now();
+          lastUtteranceDurMs = durMs;
           awaitingReply = true;
           thinkingPlayed = false;
           scheduleThinkingOnce();
@@ -5808,7 +5864,7 @@ wssMediaStream.on("connection", (ws, req) => {
       // Twilio acks our marks; this is the moment playback is complete.
       const name = String(msg?.mark?.name || "");
       msLog("rx mark", { name });
-      if (pendingEnableListenOnMark && name && name === lastMarkName) {
+      if (pendingEnableListenOnMark && name && name === lastMarkName && !pendingHangupOnMark && !ignoreInbound) {
         pendingEnableListenOnMark = false;
         agentSpeaking = false;
         allowListen = true;
