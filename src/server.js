@@ -2072,6 +2072,107 @@ function extractApprovedNamesFromKnowledgeBase(kbRaw) {
   return uniq.filter((n) => n.length >= 2 && n.length <= 30);
 }
 
+function extractApprovedPurposesFromKnowledgeBase(kbRaw) {
+  // Allow campaigns to define a purpose whitelist in KB, similar to approved names.
+  // Section header: "מטרות מאושרות" / "רשימת מטרות מאושרות"
+  const kb = String(kbRaw || "");
+  if (!kb) return [];
+  const lines = kb.split(/\r?\n/);
+  const out = [];
+  let inSection = false;
+  for (const raw of lines) {
+    const line = String(raw || "").trim();
+    if (!line) {
+      if (inSection) break;
+      continue;
+    }
+    if (/^(רשימת\s+מטרות\s+מאושרות|מטרות\s+מאושרות)/i.test(line)) {
+      inSection = true;
+      continue;
+    }
+    if (!inSection) continue;
+    const m = line.match(/^-+\s*(.+)$/);
+    if (!m) {
+      if (/^\[.+\]$/.test(line) || /:$/.test(line)) break;
+      continue;
+    }
+    const item = String(m[1] || "").trim().replace(/^"|"$/g, "");
+    if (!item) continue;
+    out.push(item);
+  }
+  const uniq = Array.from(new Set(out.map((s) => s.trim()).filter(Boolean)));
+  return uniq.filter((n) => n.length >= 2 && n.length <= 60);
+}
+
+function matchApprovedPurposeFromKb({ kb, userText }) {
+  const list = extractApprovedPurposesFromKnowledgeBase(kb);
+  const defaults = [
+    "יום הולדת",
+    "פרי בטן",
+    "זרע בר קיימא",
+    "רפואה",
+    "בריאות",
+    "שלום בית",
+    "חנוכת בית",
+    "פרנסה",
+    "זיווג",
+    "לידה קלה",
+    "לעילוי נשמת",
+    "להצלחה",
+    "הודיה",
+    "חיילים",
+    "עם ישראל",
+    "גאולה",
+    "ראש חודש",
+    "הילולה",
+    "טו בשבט",
+    "חנוכה",
+    "אלול",
+    "פורים",
+    "דירה חדשה",
+    "מקווה",
+    "חיזוק",
+    "כלה",
+    "כל הישועות"
+  ];
+  const candidates = (list && list.length ? list : defaults).map((x) => String(x || "").trim()).filter(Boolean);
+  if (!candidates.length) return null;
+  const ns = normalizeIntentText(userText);
+  if (!ns) return null;
+  for (const c of candidates) {
+    const cn = normalizeIntentText(c);
+    if (!cn) continue;
+    if (ns.includes(cn)) return c;
+  }
+  return null;
+}
+
+function detectTorahPreference(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  if (t.includes("שיעור תורה") || (t.includes("שיעור") && t.includes("תורה"))) return true;
+  if (t.includes("מעדיפה") && (t.includes("תורה") || t.includes("רב"))) return true;
+  return false;
+}
+
+function parseRecentEventMonths(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return null;
+  if (!t.includes("לפני")) return null;
+  // Common phrases
+  if (t.includes("חצי שנה")) return 6;
+  if (t.includes("שנה")) {
+    const n = extractHeNumber(t);
+    if (n != null) return Number(n) * 12;
+    return 12;
+  }
+  const n = extractHeNumber(t);
+  if (n == null) return null;
+  if (t.includes("חודש")) return Number(n);
+  if (t.includes("שבוע")) return Math.max(1, Math.round(Number(n) / 4));
+  return null;
+}
+
 function detectRabbinicalInquiry(text) {
   const t = normalizeIntentText(text);
   if (!t) return false;
@@ -2183,6 +2284,16 @@ function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
     // Keep it non-contradictory ("so that a rep can call you...") rather than "a rep will call you..." unconditionally.
     FLOW_PARTICIPANTS_LOW_FALLBACK: "הבנתי. כדי שנוכל לחזור אלייך עם כל הפרטים ולעזור גם לגבי המשתתפות—",
     FLOW_COOLDOWN_RULE: `בדרך כלל אפשר לקבוע שוב רק אחרי מינימום ${cooldownMonths} חודשים.`,
+    // Purpose whitelist behavior (configurable via KB):
+    // - If purpose matches approved list -> accept and continue.
+    // - Otherwise -> promise a callback and ask for consent to pass details.
+    FLOW_PURPOSE_ALLOWED_CONFIRM: "בטח, אין בעיה להקדיש את הערב למטרה הזו. נציגה שלנו תחזור אלייך ממש בהקדם ותתאם מול היומן.",
+    FLOW_PURPOSE_UNKNOWN_CONFIRM: "שמחה שאת מתעניינת. אני צריכה לבדוק לגבי מטרת הערב ונחזור אלייך ממש בהקדם.",
+    // Cooldown explicit messaging (optional overrides):
+    FLOW_COOLDOWN_OK: "זה בסדר גמור, אין שום בעיה. נציגה שלנו תחזור אלייך ממש בהקדם ונתאם לך ערב מושלם.",
+    FLOW_COOLDOWN_TOO_SOON: `אני מבינה. כיוון שהיה אצלך אירוע לא מזמן (פחות מ־${cooldownMonths} חודשים) אני צריכה לבדוק מול היומן—ונחזור אלייך ממש בהקדם.`,
+    // Alternate request: Torah lesson instead of hafrashat challah (optional override):
+    FLOW_TORAH_PREFERENCE: "אין בעיה. יש לנו מגוון רבנים מוכרים שעובדים איתנו, ונשמח לתאם שיעור תורה אצלך בבית. נציגה שלנו תחזור אלייך ממש בהקדם ותתאם מול היומן.",
     FLOW_WOMEN_ONLY: "שלום, כרגע השיחה מיועדת לנשים בלבד. יום טוב.",
     // Optional: acknowledgments to make the conversation feel like active listening (override in KB if desired)
     FLOW_ACK_PURPOSE: "הבנתי.",
@@ -5249,6 +5360,20 @@ wssMediaStream.on("connection", (ws, req) => {
         return;
       }
 
+      // Alternate service request: Torah lesson instead of hafrashat challah.
+      if (detectTorahPreference(speech)) {
+        guidedStep = "CLOSE";
+        const a = limitPhoneReply(flowText.FLOW_TORAH_PREFERENCE || "אין בעיה. נציגה שלנו תחזור אלייך ממש בהקדם לתיאום.", 220);
+        const msg = limitPhoneReply(`${a} ${handoffQuestionText()}`.trim(), 260);
+        msLog("guided", { callSid, kind: "torah_preference", step: guidedStep });
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+        } catch {}
+        guidedLastQuestionAt = Date.now();
+        await sayText(msg, { label: "reply" });
+        return;
+      }
+
       // FAQ layer (from KB "question → answer" lines):
       // If user asks a known question, answer it and then continue the current guided step.
       // This is how we support "not exact words" matching.
@@ -5377,14 +5502,39 @@ wssMediaStream.on("connection", (ws, req) => {
       // If the user mentions a recent event, enforce cooldown rule (only when it comes up).
       if (!guidedAskedCooldownRule) {
         const ns = normalizeIntentText(speech);
-        if (ns.includes("לפני") && (ns.includes("חודש") || ns.includes("חודשים") || ns.includes("שבוע") || ns.includes("שבועות"))) {
+        const monthsAgo = parseRecentEventMonths(ns);
+        if (monthsAgo != null) {
           guidedAskedCooldownRule = true;
-          const t = limitPhoneReply(flowText.FLOW_COOLDOWN_RULE, 160);
-          try {
-            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: t });
-          } catch {}
-          await sayText(t, { label: "reply" });
-          return;
+          // If it's older than cooldown -> OK and continue; otherwise -> explain and move to consent (call back).
+          if (Number(monthsAgo) >= Number(cooldownMonths || 6)) {
+            const a = limitPhoneReply(flowText.FLOW_COOLDOWN_OK || flowText.FLOW_COOLDOWN_RULE, 220);
+            // Continue the flow normally after acknowledging.
+            let q0 = "";
+            if (guidedStep === "ASK_PURPOSE") q0 = stripLeadingAckFromQuestion(flowText.FLOW_ASK_PURPOSE);
+            else if (guidedStep === "ASK_DATE") q0 = stripLeadingAckFromQuestion(flowText.FLOW_ASK_DATE);
+            else if (guidedStep === "ASK_PARTICIPANTS") q0 = stripLeadingAckFromQuestion(flowText.FLOW_ASK_PARTICIPANTS);
+            else if (guidedStep === "PARTICIPANTS_PERSUADE") q0 = stripLeadingAckFromQuestion(flowText.FLOW_PARTICIPANTS_LOW);
+            else if (guidedStep === "CLOSE") q0 = stripLeadingAckFromQuestion(handoffQuestionText());
+            const msg = limitPhoneReply(`${a} ${q0}`.trim(), 260);
+            msLog("guided", { callSid, kind: "cooldown_ok", monthsAgo, step: guidedStep });
+            try {
+              if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+            } catch {}
+            guidedLastQuestionAt = Date.now();
+            await sayText(msg, { label: "reply" });
+            return;
+          } else {
+            guidedStep = "CLOSE";
+            const a = limitPhoneReply(flowText.FLOW_COOLDOWN_TOO_SOON || flowText.FLOW_COOLDOWN_RULE, 240);
+            const msg = limitPhoneReply(`${a} ${handoffQuestionText()}`.trim(), 260);
+            msLog("guided", { callSid, kind: "cooldown_too_soon", monthsAgo, step: guidedStep });
+            try {
+              if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+            } catch {}
+            guidedLastQuestionAt = Date.now();
+            await sayText(msg, { label: "reply" });
+            return;
+          }
         }
       }
 
@@ -5561,6 +5711,49 @@ wssMediaStream.on("connection", (ws, req) => {
           guidedLastQuestionAt = Date.now();
           await sayText(q0, { label: "reply" });
           return;
+        }
+
+        // Purpose whitelist: if the user provides a dedication/purpose, either accept it (if approved)
+        // or promise a callback and move directly to consent (so a human can handle edge cases).
+        const purposeApproved = matchApprovedPurposeFromKb({ kb: snap.knowledgeBase, userText: speech });
+        const purposeMentionsDedication =
+          ns.includes("להקדיש") ||
+          ns.includes("מקדישה") ||
+          ns.includes("מקדיש") ||
+          ns.includes("לעילוי נשמת") ||
+          ns.includes("ליום הולדת") ||
+          ns.includes("לפרנסה") ||
+          ns.includes("לזיווג") ||
+          ns.includes("לבריאות") ||
+          ns.includes("לרפואה") ||
+          ns.includes("לשלום בית");
+        if (!guidedPurpose && guidedAskedPurposeQ && (purposeMentionsDedication || purposeApproved)) {
+          guidedPurpose = s;
+          guidedAskedPurposeQ = true;
+          if (purposeApproved) {
+            guidedStep = "ASK_DATE";
+            const a = limitPhoneReply(flowText.FLOW_PURPOSE_ALLOWED_CONFIRM || "", 220);
+            const qDate = stripLeadingAckFromQuestion(flowText.FLOW_ASK_DATE);
+            const msg = limitPhoneReply(`${a} ${qDate}`.trim(), 260);
+            msLog("guided", { callSid, kind: "purpose_allowed", approved: purposeApproved, step: guidedStep });
+            try {
+              if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+            } catch {}
+            guidedLastQuestionAt = Date.now();
+            await sayText(msg, { label: "reply" });
+            return;
+          } else {
+            guidedStep = "CLOSE";
+            const a = limitPhoneReply(flowText.FLOW_PURPOSE_UNKNOWN_CONFIRM || "", 220);
+            const msg = limitPhoneReply(`${a} ${handoffQuestionText()}`.trim(), 260);
+            msLog("guided", { callSid, kind: "purpose_unknown", step: guidedStep });
+            try {
+              if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+            } catch {}
+            guidedLastQuestionAt = Date.now();
+            await sayText(msg, { label: "reply" });
+            return;
+          }
         }
 
         // Otherwise, treat this response as the purpose and move on.
