@@ -4292,6 +4292,9 @@ wssMediaStream.on("connection", (ws, req) => {
   let recOutUlawQ = [];
   let recFd = null;
   let recPath = "";
+  // Preserve the recording filename even after we clear recPath on finalize,
+  // so downstream (Google Sheets sync) can still build a link.
+  let recBasename = "";
   let recDataBytes = 0;
   let recTimer = null;
   let recStartedAt = 0;
@@ -4303,6 +4306,7 @@ wssMediaStream.on("connection", (ws, req) => {
     try {
       const ts = Date.now();
       recPath = path.join(msRecordingsDir, `ms-${callSid}-${ts}-stereo.wav`);
+      recBasename = path.basename(recPath);
       recFd = fs.openSync(recPath, "w");
       // Placeholder header; we'll overwrite sizes on finalize.
       fs.writeSync(recFd, wavHeaderPcm16({ numChannels: 2, sampleRate: 8000, dataBytes: 0 }), 0, 44, 0);
@@ -4327,7 +4331,7 @@ wssMediaStream.on("connection", (ws, req) => {
         } catch {}
       }, 20);
 
-      msLog("recording started", { callSid, path: `/ms-recordings/${path.basename(recPath)}` });
+      msLog("recording started", { callSid, path: `/ms-recordings/${recBasename || path.basename(recPath)}` });
     } catch (e) {
       msLog("recording start failed", e?.message || e);
       try {
@@ -4339,12 +4343,17 @@ wssMediaStream.on("connection", (ws, req) => {
       } catch {}
       recFd = null;
       recPath = "";
+      recBasename = "";
       recDataBytes = 0;
     }
   }
 
   function finalizeRecorder() {
     if (!recFd) return;
+    // Capture basename before we clear recPath.
+    try {
+      if (!recBasename && recPath) recBasename = path.basename(recPath);
+    } catch {}
     try {
       if (recTimer) clearInterval(recTimer);
     } catch {}
@@ -4357,7 +4366,7 @@ wssMediaStream.on("connection", (ws, req) => {
     try {
       fs.closeSync(recFd);
     } catch {}
-    const url = recPath ? `/ms-recordings/${path.basename(recPath)}` : "";
+    const url = recBasename ? `/ms-recordings/${recBasename}` : recPath ? `/ms-recordings/${path.basename(recPath)}` : "";
     msLog("recording finalized", { callSid, bytes: recDataBytes, url });
     recFd = null;
     recPath = "";
@@ -4424,8 +4433,9 @@ wssMediaStream.on("connection", (ws, req) => {
     let recordingUrl = "";
     try {
       const base = publicBaseUrlFromEnv();
-      if (base && recPath) {
-        recordingUrl = `${base}/ms-recordings/${encodeURIComponent(path.basename(recPath))}`;
+      const fname = recBasename || (recPath ? path.basename(recPath) : "");
+      if (base && fname) {
+        recordingUrl = `${base}/ms-recordings/${encodeURIComponent(fname)}`;
       }
     } catch {}
     void postLeadToGoogleSheets({
