@@ -3070,6 +3070,23 @@ app.post("/api/contacts/dial", async (req, res) => {
   const contact = getContactByPhone(db, phone);
   if (contact?.do_not_call) return res.status(400).json({ error: "המספר מסומן DNC (לא להתקשר)" });
 
+  // Best-effort: prefetch/cache the greeting before we place the call,
+  // so the greeting starts immediately when the callee answers (no "שלום רגע" filler).
+  try {
+    const persona0 = pickPersona(contact);
+    const snap0 = settingsSnapshot();
+    const personaOpening0 =
+      persona0 === "female"
+        ? (snap0.openingScriptFemale || snap0.openingScript)
+        : (snap0.openingScriptMale || snap0.openingScript);
+    const greeting0 = sanitizeSayText(String(personaOpening0 || "").trim() || buildGreeting({ persona: persona0 }));
+    if (greeting0) {
+      const p = prefetchUlaw({ text: greeting0, persona: AGENT_VOICE_PERSONA });
+      // Don't block dialing indefinitely; give it a short head-start only.
+      await Promise.race([p, new Promise((r) => setTimeout(r, 1200))]);
+    }
+  } catch {}
+
   const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
   try {
     queueContactForDial(db, phone);
@@ -4388,7 +4405,9 @@ wssMediaStream.on("connection", (ws, req) => {
     playing = true;
     playingSince = Date.now();
     agentSpeaking = true;
-    pendingEnableListenOnMark = true;
+    // IMPORTANT: greeting filler is only to avoid dead air while we fetch/generate the real greeting.
+    // It must NOT enable listening, otherwise we start STT before the real greeting even begins.
+    pendingEnableListenOnMark = label !== "greeting_filler";
     // While we are speaking, do not listen (echo will look like "speech").
     allowListen = false;
     const CHUNK_BYTES = 160; // 20ms @ 8kHz, 1 byte/sample (mulaw)
@@ -6245,13 +6264,17 @@ wssMediaStream.on("connection", (ws, req) => {
       // Twilio acks our marks; this is the moment playback is complete.
       const name = String(msg?.mark?.name || "");
       msLog("rx mark", { name });
-      if (pendingEnableListenOnMark && name && name === lastMarkName && !pendingHangupOnMark && !ignoreInbound) {
-        pendingEnableListenOnMark = false;
+      // Always clear "agentSpeaking" for the last playback mark.
+      // Whether we enable listening depends on pendingEnableListenOnMark.
+      if (name && name === lastMarkName) {
         agentSpeaking = false;
-        allowListen = true;
-        allowBargeIn = MS_ENABLE_BARGE_IN;
-        calibrateUntil = Date.now() + MS_NOISE_CALIBRATION_MS;
-        msLog("listening enabled");
+        if (pendingEnableListenOnMark && !pendingHangupOnMark && !ignoreInbound) {
+          allowListen = true;
+          allowBargeIn = MS_ENABLE_BARGE_IN;
+          calibrateUntil = Date.now() + MS_NOISE_CALIBRATION_MS;
+          msLog("listening enabled");
+        }
+        pendingEnableListenOnMark = false;
       }
       if (pendingHangupOnMark && name && name === hangupMarkName) {
         pendingHangupOnMark = false;
