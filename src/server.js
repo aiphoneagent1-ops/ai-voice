@@ -2075,49 +2075,85 @@ function extractApprovedNamesFromKnowledgeBase(kbRaw) {
 function detectRabbinicalInquiry(text) {
   const t = normalizeIntentText(text);
   if (!t) return false;
-  // IMPORTANT: do NOT match "רב" as a substring inside other words (e.g. "הערב", "הרבה").
-  // We only treat this as a rabbinical/instructor inquiry if the trigger appears as a standalone token/phrase.
-  const hasWholeToken = (token) =>
-    new RegExp(`(^|[^\\u0590-\\u05FF])${String(token).replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}($|[^\\u0590-\\u05FF])`).test(
-      t
-    );
+  // IMPORTANT: phone STT often attaches Hebrew prepositions (ב/ל/כ/ו/ה/מ/ש) to words, e.g. "ברבנית".
+  // Also we saw mishears like "האבנית" instead of "הרבנית".
+  const stripPrefix = (w) => String(w || "").replace(/^[בלכוהמש]/, "");
+  const toks = tokenizeHe(t);
+  const tokHas = (base) => toks.some((w) => w === base || stripPrefix(w) === base);
 
-  // Strong triggers (standalone words/phrases)
+  // Strong triggers / phrases
   if (t.includes("שם הרבנית") || t.includes("מי הרבנית") || t.includes("מי הרבניות")) return true;
-  if (hasWholeToken("רבנית") || hasWholeToken("רבניות")) return true;
+  if (tokHas("רבנית") || tokHas("רבניות")) return true;
+  if (tokHas("מדריכה") || tokHas("מדריכות")) return true;
+  // Allow "רב"/"הרב" only as tokens (not inside "הערב")
+  if (tokHas("רב") || tokHas("הרב")) return true;
+
   // People/team phrasing (common in campaigns): "מי הבנות שעובדות איתכם", "מי הצוות", etc.
   if (t.includes("מי הבנות") || t.includes("מי הבנות שעובדות") || t.includes("מי הבנות שעובדות איתכם")) return true;
-  if (hasWholeToken("בנות") || hasWholeToken("צוות") || hasWholeToken("נציגות") || hasWholeToken("עובדות")) {
-    // Only treat as inquiry if it includes "מי" (so we don't misfire on unrelated mentions).
-    if (t.includes("מי")) return true;
+  if (t.includes("מי") && (tokHas("בנות") || tokHas("צוות") || tokHas("נציגות") || tokHas("עובדות"))) return true;
+
+  // STT mishear: "האבנית" / "אבנית" in the context of an event question.
+  if ((tokHas("אבנית") || t.includes("האבנית")) && (t.includes("באירוע") || t.includes("תהיה") || t.includes("יהיה"))) {
+    return true;
   }
-  if (hasWholeToken("מדריכה") || hasWholeToken("מדריכות")) return true;
-  // Allow "רב"/"הרב" only as standalone tokens (not inside "הערב")
-  if (hasWholeToken("הרב") || hasWholeToken("רב")) return true;
   return false;
 }
 
 function matchApprovedNameInText({ kb, userText }) {
   const names = extractApprovedNamesFromKnowledgeBase(kb);
   if (!names.length) return null;
-  const raw = String(userText || "");
+  const uNorm = normalizeIntentText(userText);
+  const uTokens = tokenizeHe(uNorm);
+  const uSet = new Set(uTokens);
+  const tokenSimilar = (a, b) => {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    // tolerate short prefixes/partials (>=3 chars) e.g. STT missing final letter
+    if (a.length >= 3 && b.length >= 3 && (a.startsWith(b) || b.startsWith(a))) return true;
+    return false;
+  };
   for (const n of names) {
-    if (!n) continue;
-    if (raw.includes(n)) return n;
+    const name = String(n || "").trim();
+    if (!name) continue;
+    const nNorm = normalizeIntentText(name);
+    if (nNorm && uNorm.includes(nNorm)) return name;
+    const nTokens = tokenizeHe(nNorm);
+    if (!nTokens.length) continue;
+    let ok = true;
+    for (const nt of nTokens) {
+      if (uSet.has(nt)) continue;
+      // fuzzy token match
+      const found = uTokens.some((ut) => tokenSimilar(ut, nt));
+      if (!found) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return name;
   }
   return null;
 }
 
 function extractUnapprovedRabbinicalNameCandidate(text) {
-  // Heuristic: if the user said "הרבנית X" / "רבנית X" capture X as a name-like candidate.
+  // Heuristic: capture a name-like candidate after rabbinical tokens.
+  // Handles prefixes and common STT mishears like "האבנית".
   const t = normalizeIntentText(text);
   if (!t) return "";
-  const m = t.match(/(?:^|\s)(?:הרבנית|רבנית|הרב|רב)\s+([\u0590-\u05FF]{2,}(?:\s+[\u0590-\u05FF]{2,})?)/);
+  const m = t.match(
+    /(?:^|\s)(?:ה?רבנית|רבנית|[בלכוהמש]רבנית|ה?רבניות|רבניות|האבנית|אבנית|ה?רב|רב)\s+([\u0590-\u05FF]{2,}(?:\s+[\u0590-\u05FF]{2,})?)/
+  );
   const cand = String(m?.[1] || "").trim();
   if (!cand) return "";
   // Filter common non-names that appear in these questions.
   if (cand === "שלכן" || cand === "שלכם" || cand === "פנויה" || cand === "מגיעה") return "";
   return cand;
+}
+
+function stripLeadingAckFromQuestion(q) {
+  const s = sanitizeSayText(String(q || "").trim());
+  if (!s) return "";
+  // Remove leading "מעולה/סבבה/הבנתי" if present so it won't sound like approving nonsense.
+  return s.replace(/^(מעולה|סבבה|הבנתי|אוקיי|אוקי)\s*[,.—-]?\s*/u, "");
 }
 
 function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
@@ -5144,29 +5180,26 @@ wssMediaStream.on("connection", (ws, req) => {
       if (detectRabbinicalInquiry(speech)) {
         const askedName = matchApprovedNameInText({ kb: snap.knowledgeBase, userText: speech });
         const nameCandidate = askedName ? askedName : extractUnapprovedRabbinicalNameCandidate(speech);
-        // If the caller asked generally ("מי הרבנית/מי מגיעה") without a specific name,
-        // answer with the FAQ/general response (per KB) instead of "אקח את השם...".
         let base = "";
         if (askedName) {
-          base = flowText.FLOW_NAME_CONFIRMED;
+          base = `מצוין, הרבנית ${askedName} עובדת איתנו. אנחנו נבדוק ביומן של הרבנית ונחזור אלייך ממש בהקדם.`;
         } else if (nameCandidate) {
-          base = flowText.FLOW_NAME_UNKNOWN;
-        } else {
-          const faq = matchFaqAnswerFromKb({ kb: snap.knowledgeBase, userText: speech, minScore: 1 });
           base =
-            faq ||
-            "יש לנו הרבה רבניות מדהימות. כדי לדעת מי פנויה צריך לבדוק ביומן—נציגה שלנו תחזור אלייך ממש בהקדם עם זה.";
+            "אנחנו לא עובדים עם הרבנית הזאת, אבל יש לנו רבניות אחרות, מהממות ומאד מוכרות שיעבירו לך ערב מרגש.";
+        } else {
+          // General question about rabbaniot/team (no name provided).
+          base = "יש לנו הרבה רבניות מדהימות. כדי לדעת מי פנויה צריך לבדוק ביומן—נציגה שלנו תחזור אלייך ממש בהקדם עם זה.";
         }
         let q0 = "";
-        if (guidedStep === "ASK_PURPOSE") q0 = flowText.FLOW_ASK_PURPOSE;
-        else if (guidedStep === "ASK_DATE") q0 = flowText.FLOW_ASK_DATE;
-        else if (guidedStep === "ASK_PARTICIPANTS") q0 = flowText.FLOW_ASK_PARTICIPANTS;
-        else if (guidedStep === "PARTICIPANTS_PERSUADE") q0 = flowText.FLOW_PARTICIPANTS_LOW;
-        else if (guidedStep === "CLOSE") q0 = handoffQuestionText();
+        if (guidedStep === "ASK_PURPOSE") q0 = stripLeadingAckFromQuestion(flowText.FLOW_ASK_PURPOSE);
+        else if (guidedStep === "ASK_DATE") q0 = stripLeadingAckFromQuestion(flowText.FLOW_ASK_DATE);
+        else if (guidedStep === "ASK_PARTICIPANTS") q0 = stripLeadingAckFromQuestion(flowText.FLOW_ASK_PARTICIPANTS);
+        else if (guidedStep === "PARTICIPANTS_PERSUADE") q0 = stripLeadingAckFromQuestion(flowText.FLOW_PARTICIPANTS_LOW);
+        else if (guidedStep === "CLOSE") q0 = stripLeadingAckFromQuestion(handoffQuestionText());
         const msg = limitPhoneReply(`${sanitizeSayText(base)} ${q0}`.trim(), 260);
         msLog("guided", {
           callSid,
-          kind: askedName ? "name_confirmed" : nameCandidate ? "name_unknown" : "rabbinical_general",
+          kind: askedName ? "name_confirmed" : nameCandidate ? "name_unapproved" : "rabbinical_general",
           step: guidedStep
         });
         try {
