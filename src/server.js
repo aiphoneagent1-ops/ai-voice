@@ -1486,12 +1486,30 @@ function detectOptOut(text) {
   const patterns = [
     "אל תתקשר",
     "אל תתקשרו",
+    "לא להתקשר",
+    "לא להתקשר יותר",
     "תסיר",
     "להסיר",
     "תמחק",
     "מחק",
+    "תוציא",
+    "תוציאי",
+    "תוציאו",
+    "תעיף",
+    "תעיפי",
+    "תעיפו",
+    "להוריד אותי",
+    "תוריד",
+    "תורידי",
+    "תורידו",
+    "מהרשימה",
+    "תוציא אותי מהרשימה",
+    "תעיף אותי מהרשימה",
     "לא רוצה שיחות",
     "תפסיקו להתקשר",
+    "די להתקשר",
+    "אל תתקשרי",
+    "אל תתקשרי אלי",
     "דונט קול",
     "do not call"
   ];
@@ -1653,6 +1671,20 @@ function looksLikeUnknownAnswer(text) {
   if (!t) return false;
   const patterns = ["לא יודעת", "לא יודע", "לא בטוחה", "לא סגורה", "אין לי מושג", "לא זוכרת"];
   return patterns.some((p) => t.includes(p));
+}
+
+function detectReligiousObjection(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  const neg =
+    t.includes("לא מתחבר") ||
+    t.includes("לא מתחברת") ||
+    t.includes("לא בקטע") ||
+    t.includes("לא מתאים לי") ||
+    t.includes("לא מתחברת לזה") ||
+    t.includes("לא מתחבר לזה");
+  const religion = t.includes("דת") || t.includes("דתי") || t.includes("דתי") || t.includes("חרדי");
+  return (neg && religion) || (t.includes("לא מתחבר") && t.includes("דת")) || (t.includes("לא מתחברת") && t.includes("דת"));
 }
 
 function isGenericAckTranscript(text) {
@@ -5035,6 +5067,26 @@ wssMediaStream.on("connection", (ws, req) => {
         return;
       }
 
+      // Objection: "לא מתחברת לערבים כאלה של דת" — answer briefly (human-like) and return to the step question.
+      if (detectReligiousObjection(speech)) {
+        const a =
+          "מבינה אותך לגמרי. זה ערב שמרגש את כולן ומביא אור ושמחה לבית—ואחר כך אנחנו מקבלות הרבה תגובות מרגשות.";
+        let q0 = "";
+        if (guidedStep === "ASK_PURPOSE") q0 = flowText.FLOW_ASK_PURPOSE;
+        else if (guidedStep === "ASK_DATE") q0 = flowText.FLOW_ASK_DATE;
+        else if (guidedStep === "ASK_PARTICIPANTS") q0 = flowText.FLOW_ASK_PARTICIPANTS;
+        else if (guidedStep === "PARTICIPANTS_PERSUADE") q0 = flowText.FLOW_PARTICIPANTS_LOW;
+        else if (guidedStep === "CLOSE") q0 = handoffQuestionText();
+        const msg = limitPhoneReply(`${a} ${q0}`.trim(), 260);
+        msLog("guided", { callSid, kind: "objection_religion", step: guidedStep });
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+        } catch {}
+        guidedLastQuestionAt = Date.now();
+        await sayText(msg, { label: "reply" });
+        return;
+      }
+
       // Explicit consent to transfer details should close immediately (regardless of step).
       if (detectTransferConsent(speech)) {
         msLog("guided", { callSid, kind: "handoff_consent_direct" });
@@ -5974,12 +6026,33 @@ wssMediaStream.on("connection", (ws, req) => {
               flow0.FLOW_PARTICIPANTS_LOW || "",
               flow0.FLOW_PARTICIPANTS_LOW_FALLBACK ? `${flow0.FLOW_PARTICIPANTS_LOW_FALLBACK} ${handoffQ0}`.trim() : "",
               handoffQ0
-            ]
+            ];
+
+            // Also prefetch FAQ answers (price, rabbaniot, singer, source of number, etc.) so replies are cache hits.
+            // Bound to avoid spending too many ElevenLabs calls.
+            const faqPairs = extractFaqPairsFromKnowledgeBase(String(snap0?.knowledgeBase || ""));
+            const faqAnswers = [];
+            for (const p of faqPairs) {
+              const a = sanitizeSayText(String(p?.answer || "").trim());
+              if (!a) continue;
+              faqAnswers.push(limitPhoneReply(a, 220));
+            }
+            // Deduplicate while keeping order.
+            const seen = new Set();
+            const faqAnswersUnique = [];
+            for (const a of faqAnswers) {
+              if (seen.has(a)) continue;
+              seen.add(a);
+              faqAnswersUnique.push(a);
+              if (faqAnswersUnique.length >= 12) break;
+            }
+
+            const allPrefetch = [...maybes, ...faqAnswersUnique]
               .map((x) => sanitizeSayText(String(x || "").trim()))
               .filter(Boolean);
             // Run sequentially in the background; greeting is long enough to hide the work.
             (async () => {
-              for (const t of maybes) {
+              for (const t of allPrefetch) {
                 if (closed) break;
                 if (isUlawCached({ text: t, persona: AGENT_VOICE_PERSONA })) continue;
                 await prefetchUlaw({ text: t, persona: AGENT_VOICE_PERSONA });
