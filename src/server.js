@@ -1856,6 +1856,10 @@ function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
   // Important: these defaults must NOT mention any specific campaign (religion/city/organization/etc.).
   const defaults = {
     FLOW_ASK_PURPOSE: "בגדול—מה המטרה/הבקשה שלך?",
+    // Optional: if your campaign wants a short “pitch” immediately after the callee says yes to the opener,
+    // put it here and end it with the next question (usually scheduling/date).
+    // This is used only on the first affirmative after greeting (before any other step).
+    FLOW_INTEREST_PITCH: "",
     FLOW_ASK_DATE: "מתי נוח לך?",
     FLOW_ASK_PARTICIPANTS: "כמה משתתפים צפויים בערך?",
     // When we can't understand the participants answer (STT garbage), re-ask ONCE with a clearer hint.
@@ -4838,9 +4842,22 @@ wssMediaStream.on("connection", (ws, req) => {
         // We should NOT treat "short length" as ack; only explicit acknowledgements/yes-like.
         const shouldAskPurposeFirst = !guidedPurpose && !guidedAskedPurposeQ && (isYesLike || ackLike);
 
-        // If the user just said "כן"/short acknowledgment, ask the purpose question first.
+        // If the user just said "כן"/short acknowledgment right after the opener:
+        // - Prefer a campaign-specific pitch (FLOW_INTEREST_PITCH) that ends with the next question.
+        // - Otherwise fall back to asking purpose.
         if (shouldAskPurposeFirst) {
           guidedAskedPurposeQ = true;
+          const pitch = String(flowText.FLOW_INTEREST_PITCH || "").trim();
+          if (pitch) {
+            guidedStep = "ASK_DATE";
+            const msg = limitPhoneReply(sanitizeSayText(pitch), 260);
+            try {
+              if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+            } catch {}
+            guidedLastQuestionAt = Date.now();
+            await sayText(msg, { label: "reply" });
+            return;
+          }
           const q0 = limitPhoneReply(flowText.FLOW_ASK_PURPOSE, 160);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
