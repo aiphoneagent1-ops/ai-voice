@@ -683,6 +683,25 @@ async function prefetchUlaw({ text, persona }) {
   } catch {}
 }
 
+function greetingTextForPersona({ persona }) {
+  const snap = settingsSnapshot();
+  const { openingScript, openingScriptMale, openingScriptFemale } = snap || {};
+  const personaOpening =
+    persona === "female" ? (openingScriptFemale || openingScript) : (openingScriptMale || openingScript);
+  return sanitizeSayText(String(personaOpening || "").trim() || buildGreeting({ persona }));
+}
+
+async function ensureGreetingCachedBeforeDial({ persona, timeoutMs = 12000 }) {
+  // We require the greeting to be cached BEFORE we place the outbound call,
+  // so the callee hears the real greeting immediately upon answering (no filler, no dead air).
+  const greeting = greetingTextForPersona({ persona });
+  if (!greeting) return true;
+  if (isUlawCached({ text: greeting, persona: AGENT_VOICE_PERSONA })) return true;
+  const p = prefetchUlaw({ text: greeting, persona: AGENT_VOICE_PERSONA });
+  await Promise.race([p, new Promise((r) => setTimeout(r, Math.max(1000, Number(timeoutMs) || 12000)))]);
+  return isUlawCached({ text: greeting, persona: AGENT_VOICE_PERSONA });
+}
+
 function primaryLangTag(code) {
   const s = String(code || "").trim();
   if (!s) return "";
@@ -2650,8 +2669,7 @@ app.post("/api/admin/settings", (req, res) => {
     const gFemale = String(snap.openingScriptFemale || snap.openingScript || "").trim();
     if (gMale) prefetchUlaw({ text: gMale, persona: AGENT_VOICE_PERSONA }).catch(() => {});
     if (gFemale) prefetchUlaw({ text: gFemale, persona: AGENT_VOICE_PERSONA }).catch(() => {});
-    const fillerText = String(process.env.MS_GREETING_FILLER_TEXT || "שלום רגע").trim();
-    if (fillerText) prefetchUlaw({ text: fillerText, persona: AGENT_VOICE_PERSONA }).catch(() => {});
+    // NOTE: we no longer prefetch a "greeting filler" clip. We want the real greeting to be ready before dialing.
   } catch {}
   res.json({ ok: true });
 });
@@ -3070,21 +3088,12 @@ app.post("/api/contacts/dial", async (req, res) => {
   const contact = getContactByPhone(db, phone);
   if (contact?.do_not_call) return res.status(400).json({ error: "המספר מסומן DNC (לא להתקשר)" });
 
-  // Best-effort: prefetch/cache the greeting before we place the call,
-  // so the greeting starts immediately when the callee answers (no "שלום רגע" filler).
+  // Hard requirement: do NOT place the call until greeting TTS is cached,
+  // so the callee hears the real greeting immediately upon answer.
   try {
     const persona0 = pickPersona(contact);
-    const snap0 = settingsSnapshot();
-    const personaOpening0 =
-      persona0 === "female"
-        ? (snap0.openingScriptFemale || snap0.openingScript)
-        : (snap0.openingScriptMale || snap0.openingScript);
-    const greeting0 = sanitizeSayText(String(personaOpening0 || "").trim() || buildGreeting({ persona: persona0 }));
-    if (greeting0) {
-      const p = prefetchUlaw({ text: greeting0, persona: AGENT_VOICE_PERSONA });
-      // Don't block dialing indefinitely; give it a short head-start only.
-      await Promise.race([p, new Promise((r) => setTimeout(r, 1200))]);
-    }
+    const ok = await ensureGreetingCachedBeforeDial({ persona: persona0, timeoutMs: 12000 });
+    if (!ok) return res.status(503).json({ error: "TTS עמוס כרגע. נסה שוב בעוד כמה שניות." });
   } catch {}
 
   const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
@@ -3622,26 +3631,37 @@ async function runDialerOnce() {
   try {
     // Business hours gate (Israel time)
     if (!dialerIsWithinBusinessHours()) return;
-    if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM_NUMBER) return;
-    const voiceBase = String(process.env.VOICE_WEBHOOK_URL || "").trim().replace(/\/$/, "");
-    if (!voiceBase) return;
-    const callUrl = `${voiceBase}/twilio/voice`;
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM_NUMBER) return;
+  const voiceBase = String(process.env.VOICE_WEBHOOK_URL || "").trim().replace(/\/$/, "");
+  if (!voiceBase) return;
+  const callUrl = `${voiceBase}/twilio/voice`;
 
-    const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-    const batch = fetchNextContactsToDial(db, autoDialBatchSize);
-    for (const c of batch) {
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  const batch = fetchNextContactsToDial(db, autoDialBatchSize);
+  for (const c of batch) {
+    try {
+      // Hard requirement: ensure greeting is cached BEFORE placing the call.
+      // If ElevenLabs is busy, skip this contact (we prefer skipping over bad UX "silence on answer").
       try {
-        queueContactForDial(db, c.phone);
-        await client.calls.create({
-          to: c.phone,
-          from: process.env.TWILIO_FROM_NUMBER,
-          url: callUrl,
-          method: "POST"
-        });
-        markDialResult(db, c.phone, { status: "called" });
-      } catch (e) {
-        markDialResult(db, c.phone, { status: "failed", error: e?.message || String(e) });
-      }
+        const contact = getContactByPhone(db, c.phone);
+        const persona0 = pickPersona(contact);
+        const ok = await ensureGreetingCachedBeforeDial({ persona: persona0, timeoutMs: 12000 });
+        if (!ok) {
+          markDialResult(db, c.phone, { status: "failed", error: "TTS busy (greeting not cached)" });
+          continue;
+        }
+      } catch {}
+      queueContactForDial(db, c.phone);
+      await client.calls.create({
+        to: c.phone,
+        from: process.env.TWILIO_FROM_NUMBER,
+        url: callUrl,
+        method: "POST"
+      });
+      markDialResult(db, c.phone, { status: "called" });
+    } catch (e) {
+      markDialResult(db, c.phone, { status: "failed", error: e?.message || String(e) });
+    }
     }
   } finally {
     dialerInFlight = false;
@@ -3662,8 +3682,7 @@ function ensureDialerRunning() {
     const gFemale = String(snap.openingScriptFemale || snap.openingScript || "").trim();
     if (gMale) prefetchUlaw({ text: gMale, persona: AGENT_VOICE_PERSONA }).catch(() => {});
     if (gFemale) prefetchUlaw({ text: gFemale, persona: AGENT_VOICE_PERSONA }).catch(() => {});
-    const fillerText = String(process.env.MS_GREETING_FILLER_TEXT || "שלום רגע").trim();
-    if (fillerText) prefetchUlaw({ text: fillerText, persona: AGENT_VOICE_PERSONA }).catch(() => {});
+    // NOTE: we no longer prefetch a "greeting filler" clip. We want the real greeting to be ready before dialing.
   } catch {}
   // Kick off immediately (don't wait for the first interval tick).
   runDialerOnce().catch(() => {});
@@ -4020,8 +4039,7 @@ try {
   const gFemale0 = String(snap0.openingScriptFemale || snap0.openingScript || "").trim();
   if (gMale0) prefetchUlaw({ text: gMale0, persona: AGENT_VOICE_PERSONA }).catch(() => {});
   if (gFemale0) prefetchUlaw({ text: gFemale0, persona: AGENT_VOICE_PERSONA }).catch(() => {});
-  const filler0 = String(process.env.MS_GREETING_FILLER_TEXT || "שלום רגע").trim();
-  if (filler0) prefetchUlaw({ text: filler0, persona: AGENT_VOICE_PERSONA }).catch(() => {});
+  // NOTE: we no longer prefetch a "greeting filler" clip. We want the real greeting to be ready before dialing.
 } catch {}
 
 wssMediaStream.on("connection", (ws, req) => {
@@ -4542,22 +4560,7 @@ wssMediaStream.on("connection", (ws, req) => {
     }
 
     // Streaming path: start playback while ElevenLabs is still producing audio.
-    // For greeting: try to avoid dead air by playing a short cached filler first (if available).
     const streamPromise = elevenlabsTtsToUlaw8000Stream({ text: safe, persona: AGENT_VOICE_PERSONA, variant: d.variant });
-    if (label === "greeting") {
-      try {
-        const fillerText = String(process.env.MS_GREETING_FILLER_TEXT || "שלום רגע").trim();
-        const fillerSafe = sanitizeSayText(fillerText);
-        if (fillerSafe) {
-          const fillerKey = computeElevenUlawCacheKey({ text: fillerSafe, persona: AGENT_VOICE_PERSONA, variant: "default" });
-          const filler = _ulawMemCache.get(fillerKey) || getUlawFromDisk(fillerKey);
-          if (filler && filler.length) {
-            if (!_ulawMemCache.get(fillerKey)) _ulawMemCache.set(fillerKey, filler);
-            await playUlaw(filler, { label: "greeting_filler" });
-          }
-        }
-      } catch {}
-    }
     const stream = await streamPromise;
     const genMs = Date.now() - tGen0;
     if (!stream) {
