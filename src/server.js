@@ -4465,9 +4465,25 @@ wssMediaStream.on("connection", (ws, req) => {
       if (fallbackModel) {
         try {
           const tStt1 = Date.now();
-          const prompt2 =
+          // Step-aware retry prompt: numbers and short confirmations are often misheard on phone lines.
+          let prompt2 =
             "תמלול שיחה טלפונית בעברית. חשוב: אל תחליף משפטים ב'תודה' אם לא נאמר. נסה לשמר ניסוח מלא. " +
-            "מילים נפוצות: כן, אני מעוניין/ת, במה מדובר, מה זה, לא בטוח/ה, אולי, תעבירו את הפרטים, אל תתקשרו.";
+            "אם נאמר מספר, תכתוב אותו בספרות (למשל 6, 15, 20).";
+          try {
+            if (String(campaignMode || "").toLowerCase() === "guided") {
+              if (guidedStep === "ASK_PARTICIPANTS" || guidedStep === "PARTICIPANTS_PERSUADE") {
+                prompt2 +=
+                  " אנחנו בשאלה על מספר משתתפות. מספרים נפוצים: 6, 7, 10, 15, 20. מילים: שש, שבע, עשר, חמש עשרה, עשרים.";
+              } else if (guidedStep === "ASK_DATE") {
+                prompt2 +=
+                  " אנחנו בשאלה על תאריך/יום. ביטויים נפוצים: שבוע הבא, ביום ראשון/שני/שלישי, היום, מחר, בערב, בבוקר.";
+              } else if (guidedStep === "CLOSE") {
+                prompt2 +=
+                  " אנחנו בשאלת אישור להעברת פרטים. לרוב התשובה היא 'כן' או 'לא'. אם נשמע אישור—כתוב 'כן'.";
+              }
+            }
+          } catch {}
+          prompt2 += " מילים נפוצות: כן, לא, מעוניינת, במה מדובר, פרטים, תעבירו את הפרטים, אל תתקשרו.";
           const transcription2 = await openai.audio.transcriptions.create({
             model: fallbackModel,
             file: fs.createReadStream(tmpPath),
