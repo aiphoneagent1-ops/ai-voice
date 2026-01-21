@@ -684,11 +684,19 @@ async function prefetchUlaw({ text, persona }) {
 }
 
 function greetingTextForPersona({ persona }) {
+  // IMPORTANT: this must match the exact greeting that `/twilio/voice` (MS_MODE)
+  // will persist into `call_messages` and that Media Streams will actually play.
   const snap = settingsSnapshot();
   const { openingScript, openingScriptMale, openingScriptFemale } = snap || {};
   const personaOpening =
     persona === "female" ? (openingScriptFemale || openingScript) : (openingScriptMale || openingScript);
-  return sanitizeSayText(String(personaOpening || "").trim() || buildGreeting({ persona }));
+  const g0 = normalizeGreetingForLatency({
+    greeting: String(personaOpening || "").trim() || buildGreeting({ persona }),
+    persona
+  });
+  // Store/play without any directives/tags so cache key matches what MS actually says.
+  const clean = sanitizeSayText(String(extractTtsDirectives(g0).text || "").trim());
+  return clean || sanitizeSayText(buildGreeting({ persona }));
 }
 
 async function ensureGreetingCachedBeforeDial({ persona, timeoutMs = 12000 }) {
@@ -2058,6 +2066,18 @@ function matchApprovedNameInText({ kb, userText }) {
     if (raw.includes(n)) return n;
   }
   return null;
+}
+
+function extractUnapprovedRabbinicalNameCandidate(text) {
+  // Heuristic: if the user said "הרבנית X" / "רבנית X" capture X as a name-like candidate.
+  const t = normalizeIntentText(text);
+  if (!t) return "";
+  const m = t.match(/(?:^|\s)(?:הרבנית|רבנית|הרב|רב)\s+([\u0590-\u05FF]{2,}(?:\s+[\u0590-\u05FF]{2,})?)/);
+  const cand = String(m?.[1] || "").trim();
+  if (!cand) return "";
+  // Filter common non-names that appear in these questions.
+  if (cand === "שלכן" || cand === "שלכם" || cand === "פנויה" || cand === "מגיעה") return "";
+  return cand;
 }
 
 function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
@@ -3677,9 +3697,8 @@ function ensureDialerRunning() {
   if (!autoDialEnabled) return;
   // Best-effort: prewarm greeting TTS so the first outbound call after enabling won't wait in silence.
   try {
-    const snap = settingsSnapshot();
-    const gMale = String(snap.openingScriptMale || snap.openingScript || "").trim();
-    const gFemale = String(snap.openingScriptFemale || snap.openingScript || "").trim();
+    const gMale = greetingTextForPersona({ persona: "male" });
+    const gFemale = greetingTextForPersona({ persona: "female" });
     if (gMale) prefetchUlaw({ text: gMale, persona: AGENT_VOICE_PERSONA }).catch(() => {});
     if (gFemale) prefetchUlaw({ text: gFemale, persona: AGENT_VOICE_PERSONA }).catch(() => {});
     // NOTE: we no longer prefetch a "greeting filler" clip. We want the real greeting to be ready before dialing.
@@ -4034,9 +4053,8 @@ wssMediaStream.on("error", (e) => {
 
 // Best-effort: prewarm greeting TTS on boot so the first call after deploy/cold start won't wait in silence.
 try {
-  const snap0 = settingsSnapshot();
-  const gMale0 = String(snap0.openingScriptMale || snap0.openingScript || "").trim();
-  const gFemale0 = String(snap0.openingScriptFemale || snap0.openingScript || "").trim();
+  const gMale0 = greetingTextForPersona({ persona: "male" });
+  const gFemale0 = greetingTextForPersona({ persona: "female" });
   if (gMale0) prefetchUlaw({ text: gMale0, persona: AGENT_VOICE_PERSONA }).catch(() => {});
   if (gFemale0) prefetchUlaw({ text: gFemale0, persona: AGENT_VOICE_PERSONA }).catch(() => {});
   // NOTE: we no longer prefetch a "greeting filler" clip. We want the real greeting to be ready before dialing.
@@ -5053,7 +5071,20 @@ wssMediaStream.on("connection", (ws, req) => {
       //   otherwise say we'll check and call back.
       if (detectRabbinicalInquiry(speech)) {
         const askedName = matchApprovedNameInText({ kb: snap.knowledgeBase, userText: speech });
-        const base = askedName ? flowText.FLOW_NAME_CONFIRMED : flowText.FLOW_NAME_UNKNOWN;
+        const nameCandidate = askedName ? askedName : extractUnapprovedRabbinicalNameCandidate(speech);
+        // If the caller asked generally ("מי הרבנית/מי מגיעה") without a specific name,
+        // answer with the FAQ/general response (per KB) instead of "אקח את השם...".
+        let base = "";
+        if (askedName) {
+          base = flowText.FLOW_NAME_CONFIRMED;
+        } else if (nameCandidate) {
+          base = flowText.FLOW_NAME_UNKNOWN;
+        } else {
+          const faq = matchFaqAnswerFromKb({ kb: snap.knowledgeBase, userText: speech, minScore: 1 });
+          base =
+            faq ||
+            "יש לנו הרבה רבניות מדהימות. כדי לדעת מי פנויה צריך לבדוק ביומן—נציגה שלנו תחזור אלייך ממש בהקדם עם זה.";
+        }
         let q0 = "";
         if (guidedStep === "ASK_PURPOSE") q0 = flowText.FLOW_ASK_PURPOSE;
         else if (guidedStep === "ASK_DATE") q0 = flowText.FLOW_ASK_DATE;
@@ -5061,7 +5092,11 @@ wssMediaStream.on("connection", (ws, req) => {
         else if (guidedStep === "PARTICIPANTS_PERSUADE") q0 = flowText.FLOW_PARTICIPANTS_LOW;
         else if (guidedStep === "CLOSE") q0 = handoffQuestionText();
         const msg = limitPhoneReply(`${sanitizeSayText(base)} ${q0}`.trim(), 260);
-        msLog("guided", { callSid, kind: askedName ? "name_confirmed" : "name_unknown", step: guidedStep });
+        msLog("guided", {
+          callSid,
+          kind: askedName ? "name_confirmed" : nameCandidate ? "name_unknown" : "rabbinical_general",
+          step: guidedStep
+        });
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
         } catch {}
@@ -6366,10 +6401,11 @@ server.listen(PORT, HOST, () => {
   (async () => {
     try {
       const { openingScript, openingScriptMale, openingScriptFemale } = settingsSnapshot();
-      const gMale = sanitizeSayText(String(openingScriptMale || openingScript || "").trim() || buildGreeting({ persona: "male" }));
-      const gFemale = sanitizeSayText(
-        String(openingScriptFemale || openingScript || "").trim() || buildGreeting({ persona: "female" })
-      );
+      // IMPORTANT: keep [[!]] tags here so the prewarm matches the actual TTS variant and avoids a cache miss.
+      const gMaleRaw =
+        String(openingScriptMale || openingScript || "").trim() || sanitizeSayTextKeepDirectives(buildGreeting({ persona: "male" }));
+      const gFemaleRaw =
+        String(openingScriptFemale || openingScript || "").trim() || sanitizeSayTextKeepDirectives(buildGreeting({ persona: "female" }));
       const fixed = [
         "ברור, אני איתך. תגיד לי מתי נוח.",
         "שנייה אני איתך.",
@@ -6377,9 +6413,10 @@ server.listen(PORT, HOST, () => {
         handoffConfirmCloseText({ persona: "male" })
       ];
       await Promise.all([
-        elevenlabsTtsToUlaw8000({ text: gMale, persona: AGENT_VOICE_PERSONA }),
-        elevenlabsTtsToUlaw8000({ text: gFemale, persona: AGENT_VOICE_PERSONA }),
-        ...fixed.map((t) => elevenlabsTtsToUlaw8000({ text: sanitizeSayText(t), persona: AGENT_VOICE_PERSONA }))
+        prefetchUlaw({ text: gMaleRaw, persona: AGENT_VOICE_PERSONA }),
+        prefetchUlaw({ text: gFemaleRaw, persona: AGENT_VOICE_PERSONA }),
+        prefetchUlaw({ text: String(process.env.MS_GREETING_FILLER_TEXT || "שלום רגע").trim(), persona: AGENT_VOICE_PERSONA }),
+        ...fixed.map((t) => prefetchUlaw({ text: sanitizeSayTextKeepDirectives(t), persona: AGENT_VOICE_PERSONA }))
       ]);
       if (MS_DEBUG) console.log("[ms] ulaw prewarm complete");
     } catch (e) {
