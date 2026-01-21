@@ -327,7 +327,8 @@ const MS_VAD_NOISE_MARGIN = Number(process.env.MS_VAD_NOISE_MARGIN || 250);
 // If calibration is too long, we miss the beginning of the user's first reply (common right after greeting).
 const MS_NOISE_CALIBRATION_MS = Number(process.env.MS_NOISE_CALIBRATION_MS || 120);
 // Greeting latency: keep the pickup snappy (avoid 4–6s intros).
-const MS_GREETING_MAX_CHARS = Number(process.env.MS_GREETING_MAX_CHARS || 70);
+// If your campaign requires a longer opener, raise MS_GREETING_MAX_CHARS in env (or rely on this default).
+const MS_GREETING_MAX_CHARS = Number(process.env.MS_GREETING_MAX_CHARS || 260);
 const MS_FORCE_SHORT_GREETING = process.env.MS_FORCE_SHORT_GREETING === "1" || process.env.MS_FORCE_SHORT_GREETING === "true";
 // Auto-hangup after final line (after mark ack)
 const MS_AUTO_HANGUP = process.env.MS_AUTO_HANGUP !== "0" && process.env.MS_AUTO_HANGUP !== "false";
@@ -1575,9 +1576,9 @@ function serverVersion() {
 }
 
 function shortGreetingByPersona(persona) {
-  return persona === "female"
-    ? "היי, מדבר בנוגע להצעה קצרה—זה רלוונטי לך?"
-    : "היי, מדבר בנוגע להצעה קצרה—זה רלוונטי לך?";
+  const verb = AGENT_VOICE_PERSONA === "female" ? "מדברת" : "מדבר";
+  // Keep it neutral; grammar-to-callee is handled elsewhere.
+  return `היי, ${verb} בנוגע להצעה קצרה—זה רלוונטי לך?`;
 }
 
 function normalizeGreetingForLatency({ greeting, persona }) {
