@@ -532,6 +532,23 @@ function computeElevenUlawCacheKey({ text, persona }) {
     .digest("hex");
 }
 
+function isUlawCached({ text, persona }) {
+  const safe = sanitizeSayText(String(text || "").trim());
+  if (!safe) return true;
+  const key = computeElevenUlawCacheKey({ text: safe, persona });
+  return !!(_ulawMemCache.get(key) || getUlawFromDisk(key));
+}
+
+async function prefetchUlaw({ text, persona }) {
+  const safe = sanitizeSayText(String(text || "").trim());
+  if (!safe) return;
+  if (isUlawCached({ text: safe, persona })) return;
+  // Best-effort: generate full ulaw and cache (runs in background while greeting plays).
+  try {
+    await elevenlabsTtsToUlaw8000({ text: safe, persona });
+  } catch {}
+}
+
 function primaryLangTag(code) {
   const s = String(code || "").trim();
   if (!s) return "";
@@ -1862,6 +1879,8 @@ function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
     // put it here and end it with the next question (usually scheduling/date).
     // This is used only on the first affirmative after greeting (before any other step).
     FLOW_INTEREST_PITCH: "",
+    // Generic one-shot "I didn't catch that" (used to avoid loops on STT garbage in tricky steps).
+    FLOW_UNCLEAR_REPEAT: "סליחה, לא הבנתי. תוכלי לחזור על זה בקצרה?",
     FLOW_ASK_DATE: "מתי נוח לך?",
     FLOW_ASK_PARTICIPANTS: "כמה משתתפים צפויים בערך?",
     // When we can't understand the participants answer (STT garbage), re-ask ONCE with a clearer hint.
@@ -3783,6 +3802,7 @@ wssMediaStream.on("connection", (ws, req) => {
   let guidedDateText = "";
   let guidedParticipants = null;
   let guidedParticipantsBadCount = 0;
+  let guidedPersuadeBadCount = 0;
   let participantsPersuadeAsked = false;
   let guidedAskedCooldownRule = false;
   let guidedLastQuestionAt = 0;
@@ -4661,6 +4681,9 @@ wssMediaStream.on("connection", (ws, req) => {
           nsq.startsWith("אפשר ") &&
           (nsq.includes("פרטים") || nsq.includes("להסביר") || nsq.includes("לספר") || nsq.includes("לדעת"));
         const looksQuestion =
+          // In the participants persuasion step we do NOT want to route random STT garbage like "מה נהנה"
+          // into an LLM fallback; we handle it as "unclear" inside the step machine.
+          guidedStep !== "PARTICIPANTS_PERSUADE" &&
           !isLikelyDateAnswer &&
           (nsq.includes("?") ||
             nsq.startsWith("מה ") ||
@@ -4768,7 +4791,14 @@ wssMediaStream.on("connection", (ws, req) => {
       if (guidedStep === "CLOSE") {
         const ns = normalizeIntentText(speech);
         const yesMisheardAsKan = ns === "כאן" && String(speech || "").trim().length <= 4;
-        if (detectAffirmativeShort(speech) || detectInterested(speech) || detectTransferConsent(speech) || yesMisheardAsKan) {
+        // Treat a clear "כן" as final confirmation; do NOT re-ask.
+        const yesLike =
+          ns === "כן" ||
+          yesMisheardAsKan ||
+          detectAffirmativeShort(speech) ||
+          detectInterested(speech) ||
+          detectTransferConsent(speech);
+        if (yesLike) {
           msLog("guided", { callSid, kind: "handoff_confirm" });
           await sayFinalAndHangup({ text: handoffConfirmCloseText({ persona }), outcome: "interested" });
           return;
@@ -5055,6 +5085,7 @@ wssMediaStream.on("connection", (ws, req) => {
         msLog("guided", { callSid, kind: "participants_low_or_unknown", n });
         guidedStep = "PARTICIPANTS_PERSUADE";
         participantsPersuadeAsked = true;
+        guidedPersuadeBadCount = 0;
         const q = limitPhoneReply(flowText.FLOW_PARTICIPANTS_LOW, 200);
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
@@ -5067,6 +5098,7 @@ wssMediaStream.on("connection", (ws, req) => {
         if (detectAffirmativeShort(speech) || detectInterested(speech)) {
           msLog("guided", { callSid, kind: "participants_persuade_yes" });
           guidedStep = "CLOSE";
+          guidedCloseAttempts = 0;
           const q = handoffQuestionText();
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
@@ -5074,9 +5106,28 @@ wssMediaStream.on("connection", (ws, req) => {
           await sayText(q, { label: "reply" });
           return;
         }
-        // Not sure / no → fallback, then still offer a call back for help.
+        const ns = normalizeIntentText(speech);
+        // If STT looks like garbage / doesn't match the question, give ONE retry without repeating the whole question.
+        if (!looksLikeUnknownAnswer(ns) && !detectNotInterested(ns) && !detectOptOut(ns)) {
+          guidedPersuadeBadCount++;
+          if (guidedPersuadeBadCount <= 1) {
+            const retry = limitPhoneReply(
+              flowText.FLOW_UNCLEAR_REPEAT || "סליחה, לא הבנתי. תוכלי לחזור על זה בקצרה?",
+              140
+            );
+            msLog("guided", { callSid, kind: "participants_persuade_unclear_retry" });
+            try {
+              if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: retry });
+            } catch {}
+            guidedLastQuestionAt = Date.now();
+            await sayText(retry, { label: "reply" });
+            return;
+          }
+        }
+        // Not sure / no / still unclear → fallback, then still offer a call back for help.
         msLog("guided", { callSid, kind: "participants_persuade_no_or_unsure" });
         guidedStep = "CLOSE";
+        guidedCloseAttempts = 0;
         const t = limitPhoneReply(flowText.FLOW_PARTICIPANTS_LOW_FALLBACK, 200);
         const q = handoffQuestionText();
         const msg = limitPhoneReply(`${t} ${q}`.trim(), 240);
@@ -5370,6 +5421,38 @@ wssMediaStream.on("connection", (ws, req) => {
           }
         } catch {}
         if (!g) g = sanitizeSayText(buildGreeting({ persona }));
+
+        // Prefetch likely next phrases while the greeting is playing (cuts perceived delay after user says "כן").
+        // This is best-effort and uses the persistent ulaw cache.
+        try {
+          const snap0 = settingsSnapshot();
+          const campaignMode0 = String(snap0?.campaignMode || "handoff").toLowerCase();
+          if (campaignMode0 === "guided") {
+            const minParticipants0 = Number(snap0?.minParticipants || 15);
+            const cooldownMonths0 = Number(snap0?.cooldownMonths || 6);
+            const flow0 = guidedFlowTextFromKb(snap0?.knowledgeBase || "", { minParticipants: minParticipants0, cooldownMonths: cooldownMonths0 });
+            const handoffQ0 = handoffQuestionText();
+            const maybes = [
+              flow0.FLOW_INTEREST_PITCH || "",
+              // common next turns
+              flow0.FLOW_DATE_CONFIRM || "",
+              flow0.FLOW_ASK_PARTICIPANTS || "",
+              flow0.FLOW_PARTICIPANTS_LOW || "",
+              flow0.FLOW_PARTICIPANTS_LOW_FALLBACK ? `${flow0.FLOW_PARTICIPANTS_LOW_FALLBACK} ${handoffQ0}`.trim() : "",
+              handoffQ0
+            ]
+              .map((x) => sanitizeSayText(String(x || "").trim()))
+              .filter(Boolean);
+            // Run sequentially in the background; greeting is long enough to hide the work.
+            (async () => {
+              for (const t of maybes) {
+                if (closed) break;
+                if (isUlawCached({ text: t, persona: AGENT_VOICE_PERSONA })) continue;
+                await prefetchUlaw({ text: t, persona: AGENT_VOICE_PERSONA });
+              }
+            })().catch(() => {});
+          }
+        } catch {}
 
         // Persist greeting as the first assistant message once per callSid.
         // This prevents the LLM from "restarting" the call and repeating the intro later.
