@@ -1169,6 +1169,14 @@ function escapeXmlAttr(v) {
     .replaceAll(">", "&gt;");
 }
 
+function escapeXmlText(v) {
+  // Safe for placing inside HTML text nodes / <textarea>.
+  return String(v ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
 function buildConversationRelayTwiML({
   wsUrl,
   language,
@@ -3488,7 +3496,8 @@ app.all("/twilio/record", async (req, res) => {
         doNotCall: true,
         campaignMode: String(settingsSnapshot()?.campaignMode || ""),
         fullTranscriptUrl: buildTranscriptUrl(callSid),
-        fullTranscript: buildFullTranscriptText(callSid)
+        fullTranscript: buildFullTranscriptText(callSid),
+        recordingUrl: "" // No Media Streams recording in <Record> mode
       });
       await respondWithPlayAndMaybeHangup(req, res, {
         text: "אין בעיה, הסרתי אותך. סליחה על ההפרעה ויום טוב.",
@@ -3571,7 +3580,8 @@ app.all("/twilio/record", async (req, res) => {
         doNotCall: false,
         campaignMode: String(settingsSnapshot()?.campaignMode || ""),
         fullTranscriptUrl: buildTranscriptUrl(callSid),
-        fullTranscript: buildFullTranscriptText(callSid)
+        fullTranscript: buildFullTranscriptText(callSid),
+        recordingUrl: "" // No Media Streams recording in ConversationRelay mode
       });
       const picked =
         (interested
@@ -3627,7 +3637,8 @@ app.all("/twilio/record", async (req, res) => {
         doNotCall: true,
         campaignMode: String(settingsSnapshot()?.campaignMode || ""),
         fullTranscriptUrl: buildTranscriptUrl(callSid),
-        fullTranscript: buildFullTranscriptText(callSid)
+        fullTranscript: buildFullTranscriptText(callSid),
+        recordingUrl: "" // No Media Streams recording in ConversationRelay mode
       });
       await respondWithPlayAndMaybeHangup(req, res, { text: "אין בעיה, הסרתי אותך. יום טוב.", persona, hangup: true });
       return;
@@ -4262,6 +4273,14 @@ wssMediaStream.on("connection", (ws, req) => {
             dateText: (guidedCallbackTime ? `לחזור: ${guidedCallbackTime}. ` : "") + (guidedDateText || ""),
             participants: guidedParticipants ?? ""
           });
+    // Media Streams recording link (stereo WAV). If recording is disabled/unavailable, this stays empty.
+    let recordingUrl = "";
+    try {
+      const base = publicBaseUrlFromEnv();
+      if (base && recPath) {
+        recordingUrl = `${base}/ms-recordings/${encodeURIComponent(path.basename(recPath))}`;
+      }
+    } catch {}
     void postLeadToGoogleSheets({
       event: "lead",
       ts: new Date().toISOString(),
@@ -4277,7 +4296,8 @@ wssMediaStream.on("connection", (ws, req) => {
       dateText: guidedDateText || "",
       participants: guidedParticipants ?? null,
       fullTranscriptUrl: buildTranscriptUrl(callSid),
-      fullTranscript: buildFullTranscriptText(callSid)
+      fullTranscript: buildFullTranscriptText(callSid),
+      recordingUrl
     });
   }
 
