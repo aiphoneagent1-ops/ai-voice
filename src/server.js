@@ -436,8 +436,12 @@ const MS_TEST_TONE = process.env.MS_TEST_TONE === "1" || process.env.MS_TEST_TON
 const MS_BARGE_IN_FRAMES = Number(process.env.MS_BARGE_IN_FRAMES || 15); // 15 frames * 20ms = 300ms
 const MS_BARGE_IN_GRACE_MS = Number(process.env.MS_BARGE_IN_GRACE_MS || 400); // don't barge-in instantly after agent starts
 const MS_BARGE_IN_MIN_RMS = Number(process.env.MS_BARGE_IN_MIN_RMS || 2200); // extra safety: ignore low-level line noise/echo
-// Default: turn-taking like a normal call (no interruptions). You can enable barge-in later.
-const MS_ENABLE_BARGE_IN = process.env.MS_ENABLE_BARGE_IN === "1" || process.env.MS_ENABLE_BARGE_IN === "true";
+// Default: allow caller to interrupt/stops agent speech (barge-in) so overlapping speech won't confuse the turn.
+// Set MS_ENABLE_BARGE_IN=0/false to disable.
+const MS_ENABLE_BARGE_IN = !(
+  process.env.MS_ENABLE_BARGE_IN === "0" ||
+  process.env.MS_ENABLE_BARGE_IN === "false"
+);
 // Guided flow: prevent rapid re-asks while caller is still talking (avoids "looping the same question").
 const GUIDED_REASK_MIN_MS = Number(process.env.GUIDED_REASK_MIN_MS || 2500);
 // Call recording (Media Streams): record both sides (agent + caller) into a stereo WAV (8k PCM16).
@@ -1385,6 +1389,8 @@ setDefaultIfEmpty("autoDialIntervalSeconds", 300);
 setDefaultIfEmpty("autoDialHoursEnabled", true);
 setDefaultIfEmpty("autoDialStartTime", "09:00");
 setDefaultIfEmpty("autoDialEndTime", "17:00");
+// Critical safety: don't auto-dial on Fri/Sat by default (Israel).
+setDefaultIfEmpty("autoDialSkipFriSat", true);
 
 // If the user already edited scripts, keep them—but add a small helpful "explanation" block once.
 // Keep legacy upgrade helpers, but make them generic (white-label).
@@ -2592,6 +2598,7 @@ function settingsSnapshot() {
   const autoDialHoursEnabled = !!getSetting(db, "autoDialHoursEnabled", true);
   const autoDialStartTime = String(getSetting(db, "autoDialStartTime", "09:00") || "09:00").trim() || "09:00";
   const autoDialEndTime = String(getSetting(db, "autoDialEndTime", "17:00") || "17:00").trim() || "17:00";
+  const autoDialSkipFriSat = getSetting(db, "autoDialSkipFriSat", true) !== false;
 
   // White-label phrases MUST be short (examples: "לצוות", "מהצוות", "למוקד", "מהמוקד").
   // If someone pastes the whole greeting here, it creates a repetition loop like:
@@ -2629,6 +2636,7 @@ function settingsSnapshot() {
     autoDialHoursEnabled,
     autoDialStartTime,
     autoDialEndTime,
+    autoDialSkipFriSat,
     handoffToPhrase,
     handoffFromPhrase,
     campaignMode,
@@ -2989,7 +2997,8 @@ app.post("/api/admin/dialer", (req, res) => {
     autoDialIntervalSeconds = 30,
     autoDialHoursEnabled = true,
     autoDialStartTime = "09:00",
-    autoDialEndTime = "17:00"
+    autoDialEndTime = "17:00",
+    autoDialSkipFriSat = true
   } = req.body || {};
   setSetting(db, "autoDialEnabled", !!autoDialEnabled);
   setSetting(db, "autoDialBatchSize", Math.max(1, Math.min(50, Number(autoDialBatchSize) || 5)));
@@ -2997,6 +3006,7 @@ app.post("/api/admin/dialer", (req, res) => {
   setSetting(db, "autoDialHoursEnabled", !!autoDialHoursEnabled);
   setSetting(db, "autoDialStartTime", String(autoDialStartTime || "09:00").trim() || "09:00");
   setSetting(db, "autoDialEndTime", String(autoDialEndTime || "17:00").trim() || "17:00");
+  setSetting(db, "autoDialSkipFriSat", !!autoDialSkipFriSat);
   res.json({ ok: true });
 });
 
@@ -3375,11 +3385,42 @@ function nowMinutesInIsrael() {
   }
 }
 
+function nowWeekdayInIsrael() {
+  // 0=Sun ... 6=Sat (Israel time)
+  try {
+    const wd = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Jerusalem",
+      weekday: "short"
+    }).format(new Date());
+    const m = String(wd || "").toLowerCase().slice(0, 3);
+    if (m === "sun") return 0;
+    if (m === "mon") return 1;
+    if (m === "tue") return 2;
+    if (m === "wed") return 3;
+    if (m === "thu") return 4;
+    if (m === "fri") return 5;
+    if (m === "sat") return 6;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function isWithinWindowMinutes(nowMin, startMin, endMin) {
   // Normal window: 09:00-17:00
   if (startMin <= endMin) return nowMin >= startMin && nowMin < endMin;
   // Overnight window (e.g. 22:00-06:00)
   return nowMin >= startMin || nowMin < endMin;
+}
+
+function dialerIsAllowedDay() {
+  const snap = settingsSnapshot();
+  if (!snap.autoDialSkipFriSat) return true;
+  const wd = nowWeekdayInIsrael();
+  // Fail-open: if timezone conversion fails, do not block the dialer.
+  if (wd == null) return true;
+  // Fri (5) + Sat (6)
+  return wd !== 5 && wd !== 6;
 }
 
 function dialerIsWithinBusinessHours() {
@@ -3955,6 +3996,7 @@ async function runDialerOnce() {
   dialerInFlight = true;
   try {
     // Business hours gate (Israel time)
+    if (!dialerIsAllowedDay()) return;
     if (!dialerIsWithinBusinessHours()) return;
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM_NUMBER) return;
   const voiceBase = String(process.env.VOICE_WEBHOOK_URL || "").trim().replace(/\/$/, "");

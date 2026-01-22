@@ -7,22 +7,22 @@ export function renderAdminPage() {
     <title>סוכן AI טלפוני</title>
     <style>
       :root{
-        --bg:#070a12;
-        --panel:#0f1426;
-        --panel2:#0b1020;
-        --border:#273155;
-        --text:#ffffff;
-        --muted:rgba(255,255,255,.75);
-        --muted2:rgba(255,255,255,.6);
-        --brand:#6d8cff;
-        --brand2:#7cf3ff;
-        --good:#7CFFB2;
-        --bad:#FF7C7C;
-        --shadow: 0 10px 30px rgba(0,0,0,.35);
+        --bg:#f6f8ff;
+        --panel:#ffffff;
+        --panel2:#f2f6ff;
+        --border:#d7e0f6;
+        --text:#0b1220;
+        --muted:rgba(11,18,32,.74);
+        --muted2:rgba(11,18,32,.58);
+        --brand:#2f6bff;
+        --brand2:#70a4ff;
+        --good:#138a4b;
+        --bad:#c62828;
+        --shadow: 0 12px 30px rgba(15,25,55,.10);
       }
       *{ box-sizing:border-box; }
-      body { font-family: system-ui, -apple-system, Arial; margin: 0; background: radial-gradient(1200px 800px at 20% 0%, rgba(109,140,255,.18), transparent 50%), radial-gradient(900px 700px at 80% 10%, rgba(124,243,255,.12), transparent 55%), var(--bg); color: var(--text); }
-      header { padding: 22px 24px; border-bottom: 1px solid rgba(255,255,255,.06); background: rgba(10,12,20,.6); backdrop-filter: blur(8px); position: sticky; top:0; z-index: 10; }
+      body { font-family: system-ui, -apple-system, Arial; margin: 0; background: radial-gradient(1200px 800px at 20% 0%, rgba(47,107,255,.12), transparent 55%), radial-gradient(900px 700px at 80% 10%, rgba(112,164,255,.10), transparent 55%), var(--bg); color: var(--text); }
+      header { padding: 22px 24px; border-bottom: 1px solid rgba(11,18,32,.08); background: rgba(255,255,255,.70); backdrop-filter: blur(10px); position: sticky; top:0; z-index: 10; }
       .wrap { max-width: 1100px; margin: 0 auto; }
       .top { display:flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
       h1 { margin: 0; font-size: 18px; letter-spacing: .2px; }
@@ -30,42 +30,42 @@ export function renderAdminPage() {
       main { padding: 24px; }
       .grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
       @media (min-width: 980px){ .grid { grid-template-columns: 1.05fr .95fr; } }
-      .card { background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02)); border: 1px solid rgba(255,255,255,.07); border-radius: 16px; padding: 16px; box-shadow: var(--shadow); }
+      .card { background: linear-gradient(180deg, rgba(255,255,255,.95), rgba(255,255,255,.90)); border: 1px solid rgba(11,18,32,.08); border-radius: 16px; padding: 16px; box-shadow: var(--shadow); }
       .card h2 { margin: 0 0 10px; font-size: 15px; }
-      .pill { display:inline-flex; gap:8px; align-items:center; padding: 6px 10px; border-radius: 999px; border:1px solid rgba(255,255,255,.10); background: rgba(255,255,255,.03); color: var(--muted); font-size: 12px; }
+      .pill { display:inline-flex; gap:8px; align-items:center; padding: 6px 10px; border-radius: 999px; border:1px solid rgba(11,18,32,.10); background: rgba(47,107,255,.06); color: var(--muted); font-size: 12px; }
       .stats { display:flex; gap:10px; flex-wrap:wrap; }
-      .stat { min-width: 120px; padding: 10px 12px; border-radius: 12px; border:1px solid rgba(255,255,255,.08); background: rgba(0,0,0,.18); }
+      .stat { min-width: 120px; padding: 10px 12px; border-radius: 12px; border:1px solid rgba(11,18,32,.10); background: rgba(255,255,255,.65); }
       .stat .k { font-size: 11px; color: var(--muted2); }
       .stat .v { font-size: 16px; margin-top: 2px; }
       label { display:block; font-size: 12px; color: var(--muted); margin: 10px 0 6px; }
-      textarea, input { width: 100%; padding: 11px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,.10); background: rgba(0,0,0,.20); color: var(--text); outline: none; }
-      textarea:focus, input:focus { border-color: rgba(109,140,255,.6); box-shadow: 0 0 0 4px rgba(109,140,255,.12); }
+      textarea, input { width: 100%; padding: 11px 12px; border-radius: 12px; border: 1px solid rgba(11,18,32,.12); background: rgba(255,255,255,.85); color: var(--text); outline: none; }
+      textarea:focus, input:focus { border-color: rgba(47,107,255,.55); box-shadow: 0 0 0 4px rgba(47,107,255,.12); }
       textarea { min-height: 220px; resize: vertical; }
-      button { cursor: pointer; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,.12); background: linear-gradient(180deg, rgba(109,140,255,.35), rgba(109,140,255,.18)); color: #fff; }
+      button { cursor: pointer; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(47,107,255,.25); background: linear-gradient(180deg, rgba(47,107,255,.95), rgba(47,107,255,.82)); color: #fff; }
       button:hover { filter: brightness(1.07); }
-      button.secondary { background: rgba(255,255,255,.04); }
+      button.secondary { background: rgba(255,255,255,.85); color: var(--text); border-color: rgba(11,18,32,.14); }
       .row { display:flex; gap: 10px; flex-wrap: wrap; align-items: center; }
       .status { font-size: 12px; color: var(--muted2); }
       .ok { color: var(--good); }
       .err { color: var(--bad); }
-      code { background: rgba(0,0,0,.25); padding: 2px 6px; border-radius: 8px; border:1px solid rgba(255,255,255,.10); }
-      a { color: #b9c7ff; }
-      hr { border:0; border-top:1px solid rgba(255,255,255,.07); margin:16px 0; }
+      code { background: rgba(47,107,255,.08); padding: 2px 6px; border-radius: 8px; border:1px solid rgba(47,107,255,.18); }
+      a { color: #2f6bff; }
+      hr { border:0; border-top:1px solid rgba(11,18,32,.08); margin:16px 0; }
       .tabs{ display:flex; gap:8px; flex-wrap:wrap; margin-top: 8px; }
-      .tab{ padding: 8px 10px; border-radius: 999px; border:1px solid rgba(255,255,255,.10); background: rgba(255,255,255,.03); color: var(--muted); font-size: 12px; cursor:pointer; }
-      .tab.active{ border-color: rgba(109,140,255,.55); background: rgba(109,140,255,.18); color: #fff; }
-      .tableWrap{ overflow:auto; border-radius: 14px; border:1px solid rgba(255,255,255,.08); background: rgba(0,0,0,.16); }
+      .tab{ padding: 8px 10px; border-radius: 999px; border:1px solid rgba(11,18,32,.12); background: rgba(255,255,255,.75); color: var(--muted); font-size: 12px; cursor:pointer; }
+      .tab.active{ border-color: rgba(47,107,255,.35); background: rgba(47,107,255,.14); color: var(--text); }
+      .tableWrap{ overflow:auto; border-radius: 14px; border:1px solid rgba(11,18,32,.10); background: rgba(255,255,255,.75); }
       .tableWrap.fixed5 { max-height: 320px; } /* ~5 rows + header; scroll inside */
       table{ width:100%; border-collapse: collapse; min-width: 820px; }
-      th, td{ text-align:right; padding: 10px 12px; border-bottom:1px solid rgba(255,255,255,.06); font-size: 12px; color: var(--muted); }
-      th{ color:#fff; font-weight:600; background: rgba(255,255,255,.03); position: sticky; top:0; }
-      td strong{ color:#fff; font-weight:600; }
-      .badge{ display:inline-flex; padding: 3px 8px; border-radius: 999px; border:1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.03); font-size: 11px; }
-      .badge.good{ border-color: rgba(124,255,178,.35); color: var(--good); }
-      .badge.bad{ border-color: rgba(255,124,124,.35); color: var(--bad); }
+      th, td{ text-align:right; padding: 10px 12px; border-bottom:1px solid rgba(11,18,32,.08); font-size: 12px; color: var(--muted); }
+      th{ color:var(--text); font-weight:600; background: rgba(47,107,255,.06); position: sticky; top:0; }
+      td strong{ color:var(--text); font-weight:600; }
+      .badge{ display:inline-flex; padding: 3px 8px; border-radius: 999px; border:1px solid rgba(11,18,32,.12); background: rgba(255,255,255,.85); font-size: 11px; }
+      .badge.good{ border-color: rgba(19,138,75,.25); color: var(--good); }
+      .badge.bad{ border-color: rgba(198,40,40,.25); color: var(--bad); }
       .drop {
-        border: 1px dashed rgba(255,255,255,.22);
-        background: rgba(0,0,0,.16);
+        border: 1px dashed rgba(47,107,255,.35);
+        background: rgba(255,255,255,.75);
         border-radius: 14px;
         padding: 14px;
         display:flex;
@@ -77,7 +77,7 @@ export function renderAdminPage() {
       .drop span { font-size: 12px; color: var(--muted2); display:block; margin-top:4px; }
       .toast {
         position: fixed; left: 16px; bottom: 16px; z-index: 9999;
-        background: rgba(10,12,20,.9); border:1px solid rgba(255,255,255,.10);
+        background: rgba(255,255,255,.92); border:1px solid rgba(11,18,32,.12);
         border-radius: 14px; padding: 12px 14px; min-width: 260px; max-width: 420px;
         box-shadow: var(--shadow); display:none;
       }
@@ -89,8 +89,8 @@ export function renderAdminPage() {
         width: 34px; height: 34px;
         padding: 0;
         border-radius: 10px;
-        border: 1px solid rgba(255,255,255,.14);
-        background: rgba(255,255,255,.04);
+        border: 1px solid rgba(11,18,32,.14);
+        background: rgba(255,255,255,.85);
       }
       .iconBtn:hover{ filter: brightness(1.12); }
       .iconBtn svg{ width: 18px; height: 18px; opacity: .95; }
@@ -98,15 +98,15 @@ export function renderAdminPage() {
       /* Modal */
       .modalOverlay{
         position: fixed; inset:0; z-index: 9998;
-        background: rgba(0,0,0,.55);
+        background: rgba(11,18,32,.40);
         display:none;
         padding: 16px;
       }
       .modal{
         max-width: 520px;
         margin: 64px auto;
-        background: rgba(10,12,20,.92);
-        border: 1px solid rgba(255,255,255,.10);
+        background: rgba(255,255,255,.96);
+        border: 1px solid rgba(11,18,32,.12);
         border-radius: 16px;
         box-shadow: var(--shadow);
         padding: 14px;
@@ -116,8 +116,8 @@ export function renderAdminPage() {
         width: 100%;
         padding: 11px 12px;
         border-radius: 12px;
-        border: 1px solid rgba(255,255,255,.10);
-        background: rgba(0,0,0,.20);
+        border: 1px solid rgba(11,18,32,.12);
+        background: rgba(255,255,255,.85);
         color: var(--text);
         outline: none;
       }
@@ -249,6 +249,12 @@ export function renderAdminPage() {
             <label style="margin:0; display:flex; gap:8px; align-items:center;">
               <input type="checkbox" id="autoDialHoursEnabled" style="width:auto;" />
               הגבל לשעות פעילות (שעון ישראל)
+            </label>
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <label style="margin:0; display:flex; gap:8px; align-items:center;">
+              <input type="checkbox" id="autoDialSkipFriSat" style="width:auto;" />
+              אל תחייג בשישי/שבת (קריטי)
             </label>
           </div>
           <div class="row">
@@ -476,6 +482,7 @@ export function renderAdminPage() {
           if($("autoDialHoursEnabled")) $("autoDialHoursEnabled").checked = data.autoDialHoursEnabled !== false;
           if($("autoDialStartTime")) $("autoDialStartTime").value = String(data.autoDialStartTime || "09:00");
           if($("autoDialEndTime")) $("autoDialEndTime").value = String(data.autoDialEndTime || "17:00");
+          if($("autoDialSkipFriSat")) $("autoDialSkipFriSat").checked = data.autoDialSkipFriSat !== false;
           setStatus($("topStatus"), "מחובר. עודכן: " + (data.updatedAt || "—"), true);
           try{
             const s = await api("/api/contacts/stats");
@@ -571,7 +578,8 @@ export function renderAdminPage() {
               autoDialIntervalSeconds: Number($("autoDialInterval").value || 300),
               autoDialHoursEnabled: $("autoDialHoursEnabled") ? $("autoDialHoursEnabled").checked : true,
               autoDialStartTime: $("autoDialStartTime") ? String($("autoDialStartTime").value || "09:00") : "09:00",
-              autoDialEndTime: $("autoDialEndTime") ? String($("autoDialEndTime").value || "17:00") : "17:00"
+              autoDialEndTime: $("autoDialEndTime") ? String($("autoDialEndTime").value || "17:00") : "17:00",
+              autoDialSkipFriSat: $("autoDialSkipFriSat") ? $("autoDialSkipFriSat").checked : true
             })
           });
           setStatus($("dialerStatus"), "נשמר", true);
