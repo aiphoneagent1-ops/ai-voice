@@ -1404,6 +1404,65 @@ function normalizePhone(raw) {
   return String(raw).trim();
 }
 
+function normalizePhoneLooseIL(raw) {
+  // Accept common Israeli spreadsheet formats and normalize to E.164 (+972...)
+  if (raw == null) return "";
+  let s = String(raw).trim();
+  if (!s) return "";
+  // remove common separators, keep leading +
+  const hadPlus = s.startsWith("+");
+  s = s.replace(/[^\d+]/g, "");
+  if (hadPlus) s = "+" + s.replace(/[^\d]/g, "");
+  else s = s.replace(/[^\d]/g, "");
+
+  // Common mobile format in Sheets: 9 digits starting with 5 (e.g. 523456789) -> 0523456789
+  if (/^5\d{8}$/.test(s)) s = `0${s}`;
+  // If they pasted 972XXXXXXXXX without +, normalizePhoneE164IL handles it.
+  return normalizePhoneE164IL(s);
+}
+
+function normalizeHeaderKey(k) {
+  return String(k || "")
+    .replace(/^\uFEFF/, "") // BOM
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\-_]+/g, " ")
+    .replace(/[:"'“”‘’(){}\[\].,]/g, "")
+    .trim();
+}
+
+function isPhoneHeader(k) {
+  const h = normalizeHeaderKey(k);
+  if (!h) return false;
+  // Hebrew
+  if (h.includes("טלפון") || h.includes("נייד")) return true;
+  if (h.includes("מספר") && (h.includes("טלפון") || h.includes("נייד") || h === "מספר" || h.startsWith("מספר "))) return true;
+  // English
+  if (h.includes("phone") || h.includes("mobile") || h.includes("cell")) return true;
+  return h === "tel";
+}
+
+function isNameHeader(k) {
+  const h = normalizeHeaderKey(k);
+  if (!h) return false;
+  // Hebrew
+  if (h === "שם" || h === "שמות") return true;
+  if (h.includes("שם פרטי") || h.includes("שם מלא")) return true;
+  // English
+  if (h === "name" || h === "fullname" || h.includes("full name")) return true;
+  if (h === "first name" || h === "firstname") return true;
+  return false;
+}
+
+function pickFirstMatchingField(row, predicate) {
+  if (!row || typeof row !== "object") return "";
+  const keys = Object.keys(row);
+  for (const k of keys) {
+    if (predicate(k)) return String(row[k] ?? "").trim();
+  }
+  return "";
+}
+
 function sanitizeSayText(text) {
   // Twilio לפעמים נופל על תווים מיוחדים; נשאיר עברית אבל נחליף תווים בעייתיים.
   return String(text || "")
@@ -2948,18 +3007,38 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
   const isCsv = filename.endsWith(".csv");
 
   let imported = 0;
+  let invalidPhones = 0;
   if (isCsv) {
     const csv = req.file.buffer.toString("utf8");
     const records = csvParse(csv, { columns: true, skip_empty_lines: true });
     for (const row of records) {
-      const phone = String(row.phone || row.Phone || row.PHONE || "").trim();
-      if (!phone) continue;
+      const phoneRaw =
+        String(row.phone || row.Phone || row.PHONE || "").trim() ||
+        pickFirstMatchingField(row, isPhoneHeader);
+      const phone = normalizePhoneLooseIL(phoneRaw);
+      if (!phone) {
+        if (phoneRaw) invalidPhones++;
+        continue;
+      }
       const gender = parseGender(row.gender || row.Gender || "");
-      const firstName = String(row.first_name || row.firstName || row.name || row.Name || "").trim() || null;
+      const firstName =
+        (String(row.first_name || row.firstName || row.name || row.Name || "").trim() ||
+          pickFirstMatchingField(row, isNameHeader) ||
+          null);
       upsertContact(db, { phone, gender, firstName });
       imported++;
     }
-    res.json({ ok: true, imported, type: "csv" });
+    if (!imported) {
+      const headers = records?.[0] ? Object.keys(records[0]) : [];
+      return res.status(400).json({
+        ok: false,
+        imported,
+        invalidPhones,
+        error: "יובאו 0 אנשי קשר. כנראה שהמערכת לא זיהתה עמודת טלפון/שם או שהמספרים לא תקינים.",
+        detectedHeaders: headers
+      });
+    }
+    res.json({ ok: true, imported, invalidPhones, type: "csv" });
     return;
   }
 
@@ -2999,15 +3078,34 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
         r[key] = normalizeCellValue(row.getCell(c + 1).value);
       }
 
-    const phone = String(r.phone || r.Phone || r.PHONE || "").trim();
-    if (!phone) continue;
-    const gender = parseGender(r.gender || r.Gender || r.GENDER || "");
-    const firstName = String(r.first_name || r.firstName || r.name || r.Name || "").trim() || null;
-    upsertContact(db, { phone, gender, firstName });
-    imported++;
+      const phoneRaw =
+        String(r.phone || r.Phone || r.PHONE || "").trim() ||
+        pickFirstMatchingField(r, isPhoneHeader);
+      const phone = normalizePhoneLooseIL(phoneRaw);
+      if (!phone) {
+        if (phoneRaw) invalidPhones++;
+        continue;
+      }
+      const gender = parseGender(r.gender || r.Gender || r.GENDER || "");
+      const firstName =
+        (String(r.first_name || r.firstName || r.name || r.Name || "").trim() ||
+          pickFirstMatchingField(r, isNameHeader) ||
+          null);
+      upsertContact(db, { phone, gender, firstName });
+      imported++;
   }
 
-  res.json({ ok: true, imported, type: "xlsx" });
+  if (!imported) {
+    return res.status(400).json({
+      ok: false,
+      imported,
+      invalidPhones,
+      error: "יובאו 0 אנשי קשר. כנראה שהמערכת לא זיהתה עמודת טלפון/שם או שהמספרים לא תקינים.",
+      detectedHeaders: headers
+    });
+  }
+
+  res.json({ ok: true, imported, invalidPhones, type: "xlsx" });
   })().catch((err) => {
     console.error("[import-xlsx] failed:", err);
     res.status(400).json({ error: "failed to parse xlsx" });
@@ -3050,21 +3148,25 @@ app.post("/api/contacts/import-sheet", async (req, res) => {
 
   const records = csvParse(csv, { columns: true, skip_empty_lines: true });
   let imported = 0;
+  let invalidPhones = 0;
+  const detectedHeaders = records?.[0] ? Object.keys(records[0]) : [];
   for (const row of records) {
-    const phoneRaw = String(
-      row.phone ||
-        row.Phone ||
-        row.PHONE ||
-        row["טלפון"] ||
-        row["טלפון "] ||
-        row["מספר"] ||
-        row["מספר טלפון"] ||
-        ""
-    ).trim();
-    let phone = phoneRaw;
-    // Common Israel Sheets format: 9 digits starting with 5 (e.g. 502347812) -> prepend 0.
-    if (/^5\d{8}$/.test(phone)) phone = `0${phone}`;
-    if (!phone) continue;
+    const phoneRaw =
+      String(
+        row.phone ||
+          row.Phone ||
+          row.PHONE ||
+          row["טלפון"] ||
+          row["טלפון "] ||
+          row["מספר"] ||
+          row["מספר טלפון"] ||
+          ""
+      ).trim() || pickFirstMatchingField(row, isPhoneHeader);
+    const phone = normalizePhoneLooseIL(phoneRaw);
+    if (!phone) {
+      if (phoneRaw) invalidPhones++;
+      continue;
+    }
     const gender =
       parseGender(row.gender || row.Gender || row["מין"] || "") ||
       // If this campaign is women-only, default to female for imported rows.
@@ -3079,11 +3181,24 @@ app.post("/api/contacts/import-sheet", async (req, res) => {
           row["שם "] ||
           ""
       ).trim() || null;
-    upsertContact(db, { phone, gender, firstName });
+    const firstNameFinal = firstName || pickFirstMatchingField(row, isNameHeader) || null;
+    upsertContact(db, { phone, gender, firstName: firstNameFinal });
     imported++;
   }
 
-  res.json({ ok: true, imported });
+  if (!imported) {
+    return res.status(400).json({
+      ok: false,
+      imported,
+      invalidPhones,
+      error:
+        "יובאו 0 אנשי קשר. ודא/י שהשורה הראשונה היא כותרות, ושיש עמודה של טלפון (למשל: 'מספר טלפון', 'מספרי טלפון', 'טלפון', 'נייד') " +
+        "ועמודה של שם (למשל: 'שם', 'שמות', 'שם פרטי').",
+      detectedHeaders
+    });
+  }
+
+  res.json({ ok: true, imported, invalidPhones, detectedHeaders });
 });
 
 app.get("/api/contacts/stats", (req, res) => {
