@@ -5,85 +5,75 @@ export function renderAdminPage() {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>סוכן AI טלפוני</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Assistant:wght@400;600;700;800&display=swap" rel="stylesheet">
     <style>
       :root{
-        /* TechMonster-ish: clean, modern, strong typography, soft background */
-        --bg:#f4fbf8;          /* minty off-white */
-        --surface:#ffffff;     /* cards */
-        --surface2:#f6fffb;    /* subtle green tint */
-        --border:rgba(9,30,66,.12);
-        --text:#0b1220;
-        --muted:rgba(11,18,32,.72);
-        --muted2:rgba(11,18,32,.56);
-        --brand:#2563eb;       /* techelet/blue */
-        --brand2:#16a34a;      /* green accent */
-        --brandSoft:rgba(37,99,235,.10);
-        --good:#16a34a;
-        --bad:#dc2626;
-        --shadow: 0 18px 50px rgba(9,30,66,.12);
-        --shadow2: 0 10px 26px rgba(9,30,66,.10);
+        /* Techelet (light cyan) dominant theme */
+        --bg:#bfeeff;
+        --panel:#d8f6ff;
+        --panel2:#b3ecff;
+        --border:#49bfe0;
+        --text:#071a2a;
+        --muted:rgba(7,26,42,.78);
+        --muted2:rgba(7,26,42,.62);
+        --brand:#0ea5c6;
+        --brand2:#35c6ea;
+        --good:#0b7a43;
+        --bad:#b32626;
+        --shadow: 0 16px 40px rgba(2,30,55,.18);
       }
       *{ box-sizing:border-box; }
-      body {
-        font-family: "Assistant", system-ui, -apple-system, Arial;
-        margin: 0;
-        background:
-          radial-gradient(900px 520px at 10% 0%, rgba(22,163,74,.14), transparent 62%),
-          radial-gradient(860px 520px at 90% 8%, rgba(37,99,235,.12), transparent 60%),
-          radial-gradient(900px 620px at 50% 110%, rgba(22,163,74,.10), transparent 64%),
-          var(--bg);
+      body { font-family: system-ui, -apple-system, Arial; margin: 0; background:
+        radial-gradient(1100px 760px at 18% 0%, rgba(53,198,234,.55), transparent 62%),
+        radial-gradient(900px 700px at 78% 10%, rgba(14,165,198,.32), transparent 60%),
+        radial-gradient(900px 700px at 50% 120%, rgba(53,198,234,.40), transparent 65%),
+        var(--bg);
         color: var(--text);
       }
-      header { padding: 16px 18px; border-bottom: 1px solid var(--border); background: rgba(255,255,255,.82); backdrop-filter: blur(10px); position: sticky; top:0; z-index: 10; }
+      header { padding: 22px 24px; border-bottom: 1px solid rgba(7,26,42,.16); background: rgba(216,246,255,.92); backdrop-filter: blur(10px); position: sticky; top:0; z-index: 10; }
       .wrap { max-width: 1100px; margin: 0 auto; }
       .top { display:flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
-      h1 { margin: 0; font-size: 18px; letter-spacing: .2px; font-weight: 800; }
+      h1 { margin: 0; font-size: 18px; letter-spacing: .2px; }
       .sub { font-size: 12px; color: var(--muted2); margin-top: 4px; }
       main { padding: 24px; }
       .grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
       @media (min-width: 980px){ .grid { grid-template-columns: 1.05fr .95fr; } }
-      .card { background: var(--surface); border: 1px solid var(--border); border-radius: 18px; padding: 16px; box-shadow: var(--shadow2); }
-      .card h2 { margin: 0 0 10px; font-size: 16px; font-weight: 800; }
-      .pill { display:inline-flex; gap:8px; align-items:center; padding: 7px 10px; border-radius: 999px; border:1px solid rgba(22,163,74,.22); background: rgba(22,163,74,.08); color: var(--muted); font-size: 12px; }
+      .card { background: linear-gradient(180deg, rgba(216,246,255,.98), rgba(179,236,255,.92)); border: 1px solid rgba(7,26,42,.16); border-radius: 16px; padding: 16px; box-shadow: var(--shadow); }
+      .card h2 { margin: 0 0 10px; font-size: 15px; }
+      .pill { display:inline-flex; gap:8px; align-items:center; padding: 6px 10px; border-radius: 999px; border:1px solid rgba(14,165,198,.42); background: rgba(53,198,234,.30); color: var(--muted); font-size: 12px; }
       .stats { display:flex; gap:10px; flex-wrap:wrap; }
-      .stat { min-width: 120px; padding: 10px 12px; border-radius: 14px; border:1px solid var(--border); background: rgba(255,255,255,.86); box-shadow: 0 8px 18px rgba(9,30,66,.06); }
+      .stat { min-width: 120px; padding: 10px 12px; border-radius: 12px; border:1px solid rgba(7,26,42,.18); background: rgba(216,246,255,.92); }
       .stat .k { font-size: 11px; color: var(--muted2); }
-      .stat .v { font-size: 18px; margin-top: 2px; font-weight: 800; }
+      .stat .v { font-size: 16px; margin-top: 2px; }
       label { display:block; font-size: 12px; color: var(--muted); margin: 10px 0 6px; }
-      textarea, input { width: 100%; padding: 11px 12px; border-radius: 14px; border: 1px solid var(--border); background: rgba(255,255,255,.92); color: var(--text); outline: none; }
-      textarea:focus, input:focus { border-color: rgba(37,99,235,.55); box-shadow: 0 0 0 4px rgba(37,99,235,.14); }
+      textarea, input { width: 100%; padding: 11px 12px; border-radius: 12px; border: 1px solid rgba(7,26,42,.20); background: rgba(216,246,255,.95); color: var(--text); outline: none; }
+      textarea:focus, input:focus { border-color: rgba(14,165,198,.70); box-shadow: 0 0 0 4px rgba(53,198,234,.28); }
       textarea { min-height: 220px; resize: vertical; }
-      button { cursor: pointer; padding: 10px 12px; border-radius: 14px; border: 1px solid rgba(37,99,235,.32); background: linear-gradient(180deg, rgba(37,99,235,.98), rgba(29,78,216,.92)); color: #fff; font-weight: 700; box-shadow: 0 10px 18px rgba(37,99,235,.16); }
-      button:hover { filter: brightness(1.06); transform: translateY(-1px); }
-      button:active { transform: translateY(0px); }
-      button.secondary { background: rgba(255,255,255,.92); color: var(--text); border-color: var(--border); box-shadow: 0 10px 18px rgba(9,30,66,.06); }
-      button.secondary:hover { border-color: rgba(22,163,74,.32); }
+      button { cursor: pointer; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(14,165,198,.45); background: linear-gradient(180deg, rgba(14,165,198,.98), rgba(11,139,169,.90)); color: #fff; }
+      button:hover { filter: brightness(1.07); }
+      button.secondary { background: rgba(216,246,255,.96); color: var(--text); border-color: rgba(7,26,42,.22); }
       .row { display:flex; gap: 10px; flex-wrap: wrap; align-items: center; }
       .status { font-size: 12px; color: var(--muted2); }
       .ok { color: var(--good); }
       .err { color: var(--bad); }
-      code { background: rgba(37,99,235,.10); padding: 2px 6px; border-radius: 10px; border:1px solid rgba(37,99,235,.18); }
-      a { color: rgba(22,163,74,1); }
+      code { background: rgba(53,198,234,.30); padding: 2px 6px; border-radius: 8px; border:1px solid rgba(14,165,198,.38); }
+      a { color: #0a7fa0; }
       hr { border:0; border-top:1px solid rgba(7,26,42,.12); margin:16px 0; }
       .tabs{ display:flex; gap:8px; flex-wrap:wrap; margin-top: 8px; }
       .tab{ padding: 8px 10px; border-radius: 999px; border:1px solid rgba(7,26,42,.18); background: rgba(216,246,255,.92); color: var(--muted); font-size: 12px; cursor:pointer; }
       .tab.active{ border-color: rgba(14,165,198,.52); background: rgba(53,198,234,.36); color: var(--text); }
-      .tableWrap{ overflow:auto; border-radius: 16px; border:1px solid var(--border); background: rgba(255,255,255,.92); box-shadow: 0 10px 18px rgba(9,30,66,.06); }
+      .tableWrap{ overflow:auto; border-radius: 14px; border:1px solid rgba(7,26,42,.18); background: rgba(216,246,255,.92); }
       .tableWrap.fixed5 { max-height: 320px; } /* ~5 rows + header; scroll inside */
       table{ width:100%; border-collapse: collapse; min-width: 820px; }
       th, td{ text-align:right; padding: 10px 12px; border-bottom:1px solid rgba(7,26,42,.12); font-size: 12px; color: var(--muted); }
-      th{ color:var(--text); font-weight:800; background: linear-gradient(180deg, rgba(22,163,74,.14), rgba(22,163,74,.08)); position: sticky; top:0; }
+      th{ color:var(--text); font-weight:600; background: rgba(53,198,234,.40); position: sticky; top:0; }
       td strong{ color:var(--text); font-weight:600; }
       .badge{ display:inline-flex; padding: 3px 8px; border-radius: 999px; border:1px solid rgba(7,26,42,.14); background: rgba(241,252,255,.92); font-size: 11px; }
       .badge.good{ border-color: rgba(11,122,67,.25); color: var(--good); }
       .badge.bad{ border-color: rgba(179,38,38,.25); color: var(--bad); }
       .drop {
-        border: 1px dashed rgba(22,163,74,.55);
-        background: rgba(255,255,255,.90);
-        border-radius: 16px;
+        border: 1px dashed rgba(14,165,198,.70);
+        background: rgba(216,246,255,.92);
+        border-radius: 14px;
         padding: 14px;
         display:flex;
         gap: 12px;
@@ -105,9 +95,9 @@ export function renderAdminPage() {
         display:inline-flex; align-items:center; justify-content:center;
         width: 34px; height: 34px;
         padding: 0;
-        border-radius: 12px;
-        border: 1px solid var(--border);
-        background: rgba(255,255,255,.92);
+        border-radius: 10px;
+        border: 1px solid rgba(7,26,42,.22);
+        background: rgba(216,246,255,.96);
       }
       .iconBtn:hover{ filter: brightness(1.12); }
       .iconBtn svg{ width: 18px; height: 18px; opacity: .95; }
@@ -122,9 +112,9 @@ export function renderAdminPage() {
       .modal{
         max-width: 520px;
         margin: 64px auto;
-        background: rgba(255,255,255,.98);
-        border: 1px solid var(--border);
-        border-radius: 18px;
+        background: rgba(216,246,255,.98);
+        border: 1px solid rgba(7,26,42,.20);
+        border-radius: 16px;
         box-shadow: var(--shadow);
         padding: 14px;
       }
@@ -132,43 +122,12 @@ export function renderAdminPage() {
       select{
         width: 100%;
         padding: 11px 12px;
-        border-radius: 14px;
-        border: 1px solid var(--border);
-        background: rgba(255,255,255,.92);
+        border-radius: 12px;
+        border: 1px solid rgba(7,26,42,.20);
+        background: rgba(216,246,255,.96);
         color: var(--text);
         outline: none;
       }
-
-      /* Hero */
-      .hero{
-        margin: 14px auto 18px;
-        border-radius: 22px;
-        border: 1px solid var(--border);
-        background:
-          radial-gradient(520px 280px at 15% 10%, rgba(22,163,74,.22), transparent 65%),
-          radial-gradient(520px 280px at 85% 20%, rgba(37,99,235,.18), transparent 62%),
-          linear-gradient(180deg, rgba(255,255,255,.92), rgba(255,255,255,.82));
-        box-shadow: var(--shadow);
-        overflow: hidden;
-      }
-      .heroInner{ padding: 18px; display:grid; gap: 14px; grid-template-columns: 1fr; align-items:center; }
-      @media (min-width: 980px){ .heroInner{ grid-template-columns: 1.1fr .9fr; padding: 22px; } }
-      .heroTitle{ font-size: 34px; line-height: 1.02; margin: 0; font-weight: 900; letter-spacing: -.2px; }
-      .heroTitle .g{ color: var(--brand2); }
-      .heroP{ margin: 8px 0 0; color: var(--muted); font-size: 14px; line-height: 1.55; max-width: 60ch; }
-      .heroBtns{ display:flex; gap: 10px; flex-wrap:wrap; margin-top: 10px; }
-      .heroArt{
-        min-height: 160px;
-        border-radius: 18px;
-        border: 1px solid rgba(9,30,66,.10);
-        background: linear-gradient(180deg, rgba(22,163,74,.10), rgba(37,99,235,.08));
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        position: relative;
-        overflow:hidden;
-      }
-      .heroArt svg{ width: 90%; max-width: 360px; height:auto; opacity: .95; }
     </style>
   </head>
   <body>
@@ -183,39 +142,6 @@ export function renderAdminPage() {
       <div class="wrap status" id="topStatus" style="margin-top:10px;"></div>
     </header>
     <main>
-      <div class="wrap hero">
-        <div class="heroInner">
-          <div>
-            <h2 class="heroTitle">מרכז ניהול לשיחות <span class="g">AI</span> יוצאות</h2>
-            <div class="heroP">
-              הכל במקום אחד: ייבוא רשימות (Sheets/XLSX), סטטוסים, לידים, וחיוג אוטומטי.
-              המטרה: עבודה מהירה וברורה — בלי להרגיש “טופס”.
-            </div>
-            <div class="heroBtns">
-              <button class="secondary" type="button" onclick="document.getElementById('showListBtn').click()">רשימות ומספרים</button>
-              <button class="secondary" type="button" onclick="document.getElementById('showLeadsBtn').click()">לידים</button>
-              <button type="button" onclick="document.getElementById('knowledgeBase').scrollIntoView({behavior:'smooth', block:'start'})">הגדרות קמפיין</button>
-            </div>
-          </div>
-          <div class="heroArt" aria-hidden="true">
-            <svg viewBox="0 0 640 360" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <defs>
-                <linearGradient id="a" x1="0" y1="0" x2="1" y2="1">
-                  <stop stop-color="#16A34A" stop-opacity=".65"/>
-                  <stop offset="1" stop-color="#2563EB" stop-opacity=".55"/>
-                </linearGradient>
-              </defs>
-              <path d="M40 300c60-90 160-140 280-140s220 50 280 140" stroke="url(#a)" stroke-width="22" stroke-linecap="round"/>
-              <path d="M130 208c0-52 42-94 94-94s94 42 94 94" stroke="rgba(11,18,32,.22)" stroke-width="16" stroke-linecap="round"/>
-              <path d="M422 208c0-52 42-94 94-94s94 42 94 94" stroke="rgba(11,18,32,.18)" stroke-width="16" stroke-linecap="round"/>
-              <rect x="240" y="214" width="160" height="96" rx="18" fill="rgba(255,255,255,.72)" stroke="rgba(9,30,66,.14)"/>
-              <path d="M270 258h100" stroke="rgba(37,99,235,.55)" stroke-width="12" stroke-linecap="round"/>
-              <path d="M270 286h72" stroke="rgba(22,163,74,.55)" stroke-width="12" stroke-linecap="round"/>
-            </svg>
-          </div>
-        </div>
-      </div>
-
       <div class="wrap grid">
         <div class="card">
           <h2>מאגר טלפונים</h2>
