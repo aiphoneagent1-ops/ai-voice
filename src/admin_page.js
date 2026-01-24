@@ -986,34 +986,67 @@ export function renderAdminPage() {
         const sel = $("listSelect");
         if(sel){
           const current = String(sel.value || "0");
-          sel.innerHTML = '<option value="0">רשימה: הכל</option>' + rows.map(r => `<option value="${r.id}">${escapeHtml(r.name || ("רשימה " + r.id))}</option>`).join("");
+          sel.innerHTML =
+            '<option value="0">רשימה: הכל</option>' +
+            rows
+              .map((r) => {
+                const nm = escapeHtml(r.name || ("רשימה " + r.id));
+                return '<option value="' + String(r.id) + '">' + nm + "</option>";
+              })
+              .join("");
           const stillExists = rows.some(r => String(r.id) === current);
           sel.value = stillExists ? current : "0";
         }
         const tb = $("listsBody");
         if(tb){
-          tb.innerHTML = rows.map(r => {
-            const s = r.stats || {};
-            const name = escapeHtml(r.name || ("רשימה " + r.id));
-            return `
-              <tr>
-                <td>
-                  <button class="secondary" data-open-list="${r.id}" style="padding:6px 10px;">פתח</button>
-                  <button class="secondary" data-rename-list="${r.id}" style="padding:6px 10px;">ערוך</button>
-                  <button class="secondary" data-delete-list="${r.id}" style="padding:6px 10px; border-color: rgba(179,38,38,.35);">מחק</button>
-                </td>
-                <td><strong>${name}</strong></td>
-                <td>${s.total ?? 0}</td>
-                <td>${s.remaining ?? 0}</td>
-                <td>${s.called ?? 0}</td>
-                <td>${s.noAnswer ?? 0}</td>
-                <td>${s.notAvailable ?? 0}</td>
-                <td>${s.answeredUnder5 ?? 0}</td>
-                <td>${s.interested ?? 0}</td>
-                <td>${s.notInterested ?? 0}</td>
-              </tr>
-            `;
-          }).join("");
+          tb.innerHTML = rows
+            .map((r) => {
+              const s = r.stats || {};
+              const name = escapeHtml(r.name || ("רשימה " + r.id));
+              return (
+                "<tr>" +
+                "<td>" +
+                '<button class="secondary" data-open-list="' +
+                String(r.id) +
+                '" style="padding:6px 10px;">פתח</button> ' +
+                '<button class="secondary" data-rename-list="' +
+                String(r.id) +
+                '" style="padding:6px 10px;">ערוך</button> ' +
+                '<button class="secondary" data-delete-list="' +
+                String(r.id) +
+                '" style="padding:6px 10px; border-color: rgba(179,38,38,.35);">מחק</button>' +
+                "</td>" +
+                "<td><strong>" +
+                name +
+                "</strong></td>" +
+                "<td>" +
+                (s.total ?? 0) +
+                "</td>" +
+                "<td>" +
+                (s.remaining ?? 0) +
+                "</td>" +
+                "<td>" +
+                (s.called ?? 0) +
+                "</td>" +
+                "<td>" +
+                (s.noAnswer ?? 0) +
+                "</td>" +
+                "<td>" +
+                (s.notAvailable ?? 0) +
+                "</td>" +
+                "<td>" +
+                (s.answeredUnder5 ?? 0) +
+                "</td>" +
+                "<td>" +
+                (s.interested ?? 0) +
+                "</td>" +
+                "<td>" +
+                (s.notInterested ?? 0) +
+                "</td>" +
+                "</tr>"
+              );
+            })
+            .join("");
           tb.querySelectorAll("[data-open-list]").forEach(btn => btn.addEventListener("click", async (e) => {
             const id = String(e.currentTarget.getAttribute("data-open-list") || "0");
             if($("listSelect")) $("listSelect").value = id;
