@@ -4349,9 +4349,9 @@ async function streamAssistantToConversationRelay({
   addMessage(db, { callSid, role: "assistant", content: answer });
 }
 
-// Render (וגם רוב ספקי ה-hosting) דורשים bind ל-0.0.0.0 כדי שה-Service יהיה נגיש מבחוץ.
-// בלוקאלי אפשר להישאר על 127.0.0.1.
-const HOST = process.env.HOST || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
+// Hosting providers (Render, etc.) require binding to 0.0.0.0 so the service is reachable externally.
+// Binding to 0.0.0.0 is also fine locally. If you *really* want loopback, override via HOST=127.0.0.1.
+const HOST = String(process.env.HOST || "0.0.0.0");
 
 const server = http.createServer(app);
 
