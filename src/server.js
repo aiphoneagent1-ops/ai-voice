@@ -1361,7 +1361,8 @@ const DEFAULT_CLOSING_FEMALE = `
 
 function setDefaultIfEmpty(key, value) {
   const cur = String(getSetting(db, key, "") || "").trim();
-  if (!cur) setSetting(db, key, String(value));
+  // Store typed values (JSON) so booleans/numbers don't become truthy strings like "false".
+  if (!cur) setSetting(db, key, value);
 }
 
 function appendIfMissing(key, { marker, snippet }) {
@@ -2599,13 +2600,30 @@ function settingsSnapshot() {
   const closingScriptMale = getSetting(db, "closingScriptMale", "");
   const closingScriptFemale = getSetting(db, "closingScriptFemale", "");
 
-  const autoDialEnabled = !!getSetting(db, "autoDialEnabled", false);
-  const autoDialBatchSize = Number(getSetting(db, "autoDialBatchSize", 5));
-  const autoDialIntervalSeconds = Number(getSetting(db, "autoDialIntervalSeconds", 30));
-  const autoDialHoursEnabled = !!getSetting(db, "autoDialHoursEnabled", true);
+  // Robust parsing: older DBs may contain strings like "false" / "15" due to legacy seeding.
+  const getBool = (k, def = false) => {
+    const v = getSetting(db, k, def);
+    if (typeof v === "boolean") return v;
+    if (typeof v === "number") return v !== 0;
+    const s = String(v ?? "").trim().toLowerCase();
+    if (s === "true" || s === "1" || s === "yes") return true;
+    if (s === "false" || s === "0" || s === "no" || s === "") return false;
+    return !!v;
+  };
+  const getNum = (k, def) => {
+    const v = getSetting(db, k, def);
+    if (typeof v === "number") return v;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : def;
+  };
+
+  const autoDialEnabled = getBool("autoDialEnabled", false);
+  const autoDialBatchSize = getNum("autoDialBatchSize", 5);
+  const autoDialIntervalSeconds = getNum("autoDialIntervalSeconds", 30);
+  const autoDialHoursEnabled = getBool("autoDialHoursEnabled", true);
   const autoDialStartTime = String(getSetting(db, "autoDialStartTime", "09:00") || "09:00").trim() || "09:00";
   const autoDialEndTime = String(getSetting(db, "autoDialEndTime", "17:00") || "17:00").trim() || "17:00";
-  const autoDialSkipFriSat = getSetting(db, "autoDialSkipFriSat", true) !== false;
+  const autoDialSkipFriSat = getBool("autoDialSkipFriSat", true);
 
   // White-label phrases MUST be short (examples: "לצוות", "מהצוות", "למוקד", "מהמוקד").
   // If someone pastes the whole greeting here, it creates a repetition loop like:
@@ -2622,9 +2640,9 @@ function settingsSnapshot() {
   });
 
   const campaignMode = String(getSetting(db, "campaignMode", "handoff") || "handoff").trim() || "handoff";
-  const femaleOnly = !!getSetting(db, "femaleOnly", false);
-  const minParticipants = Math.max(1, Math.min(200, Number(getSetting(db, "minParticipants", 15)) || 15));
-  const cooldownMonths = Math.max(0, Math.min(60, Number(getSetting(db, "cooldownMonths", 6)) || 6));
+  const femaleOnly = getBool("femaleOnly", false);
+  const minParticipants = Math.max(1, Math.min(200, getNum("minParticipants", 15) || 15));
+  const cooldownMonths = Math.max(0, Math.min(60, getNum("cooldownMonths", 6) || 6));
 
   return {
     knowledgeBase,
@@ -3113,14 +3131,14 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
         if (phoneRaw) invalidPhones++;
         continue;
       }
-      const gender = parseGender(r.gender || r.Gender || r.GENDER || "");
+    const gender = parseGender(r.gender || r.Gender || r.GENDER || "");
       const firstName =
         (String(r.first_name || r.firstName || r.name || r.Name || "").trim() ||
           pickFirstMatchingField(r, isNameHeader) ||
           null);
-      upsertContact(db, { phone, gender, firstName });
+    upsertContact(db, { phone, gender, firstName });
       phonesForList.push(phone);
-      imported++;
+    imported++;
   }
 
   try {

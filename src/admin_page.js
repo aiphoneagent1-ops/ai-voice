@@ -483,6 +483,15 @@ export function renderAdminPage() {
 
     <script>
       const $ = (id) => document.getElementById(id);
+      // Basic HTML escaping for rendering user-provided list names safely.
+      function escapeHtml(s){
+        return String(s ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
       function setStatus(el, msg, ok=true){ el.textContent = msg; el.className = "status " + (ok ? "ok" : "err"); }
       function toast(title, msg, ok=true){
         const t = $("toast"); if(!t) return;
@@ -556,6 +565,10 @@ export function renderAdminPage() {
           setStatus($("importStatus"), "יובאו " + out.imported + " אנשי קשר (" + (out.type || "file") + ")" + extra, true);
           toast("ייבוא הושלם", "יובאו " + out.imported + " אנשי קשר" + extra, true);
           await loadAll();
+          if($("listSection")?.style.display !== "none"){
+            await loadLists();
+            await loadContacts();
+          }
         }catch(e){
           setStatus($("importStatus"), "שגיאה: " + e.message, false);
           toast("שגיאה בייבוא", e.message, false);
@@ -572,6 +585,10 @@ export function renderAdminPage() {
           setStatus($("sheetStatus"), "יובאו " + out.imported + " אנשי קשר" + extra, true);
           toast("ייבוא הושלם", "יובאו " + out.imported + " אנשי קשר" + extra, true);
           await loadAll();
+          if($("listSection")?.style.display !== "none"){
+            await loadLists();
+            await loadContacts();
+          }
         }catch(e){
           setStatus($("sheetStatus"), "שגיאה: " + e.message, false);
           toast("שגיאה בייבוא", e.message, false);
