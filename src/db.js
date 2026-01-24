@@ -29,6 +29,25 @@ export function openDb({ dbPath }) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS contact_lists (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      source TEXT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS contact_list_members (
+      list_id INTEGER NOT NULL,
+      phone TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY(list_id, phone),
+      FOREIGN KEY(list_id) REFERENCES contact_lists(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contact_list_members_list_id ON contact_list_members(list_id);
+    CREATE INDEX IF NOT EXISTS idx_contact_list_members_phone ON contact_list_members(phone);
+
     CREATE TABLE IF NOT EXISTS calls (
       call_sid TEXT PRIMARY KEY,
       phone TEXT NOT NULL,
@@ -122,7 +141,12 @@ export function openDb({ dbPath }) {
     { name: "dial_status", type: "TEXT NOT NULL DEFAULT 'new'" }, // new|queued|called|failed
     { name: "dial_attempts", type: "INTEGER NOT NULL DEFAULT 0" },
     { name: "last_dial_at", type: "TEXT NULL" },
-    { name: "last_dial_error", type: "TEXT NULL" }
+    { name: "last_dial_error", type: "TEXT NULL" },
+    // Twilio status callback enrichment (optional)
+    { name: "last_call_sid", type: "TEXT NULL" },
+    { name: "last_call_status", type: "TEXT NULL" },
+    { name: "last_call_duration", type: "INTEGER NULL" },
+    { name: "last_call_at", type: "TEXT NULL" }
   ]);
 
   // No default knowledge seeding: controlled from the admin scripts.
@@ -336,6 +360,126 @@ export function markDialResult(db, phone, { status, error = null } = {}) {
   db.prepare(
     `UPDATE contacts SET dial_status = ?, last_dial_error = ? WHERE phone = ?`
   ).run(status, error, normalized);
+}
+
+export function upsertContactList(db, { name, source = null } = {}) {
+  const n = String(name || "").trim();
+  if (!n) return null;
+  const info = db
+    .prepare(
+      `INSERT INTO contact_lists (name, source, created_at, updated_at)
+       VALUES (?, ?, datetime('now'), datetime('now'))`
+    )
+    .run(n, source ? String(source) : null);
+  const id = Number(info?.lastInsertRowid || 0);
+  return id || null;
+}
+
+export function renameContactList(db, { id, name } = {}) {
+  const listId = Number(id || 0);
+  const n = String(name || "").trim();
+  if (!listId || !n) return { ok: false };
+  const info = db
+    .prepare(`UPDATE contact_lists SET name = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(n, listId);
+  return { ok: true, updated: Number(info?.changes || 0) };
+}
+
+export function deleteContactList(db, { id } = {}) {
+  const listId = Number(id || 0);
+  if (!listId) return { ok: false };
+  const tx = db.transaction(() => {
+    db.prepare(`DELETE FROM contact_list_members WHERE list_id = ?`).run(listId);
+    const info = db.prepare(`DELETE FROM contact_lists WHERE id = ?`).run(listId);
+    return Number(info?.changes || 0);
+  });
+  try {
+    const deleted = tx();
+    return { ok: true, deleted };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+export function addContactsToList(db, { listId, phones } = {}) {
+  const id = Number(listId || 0);
+  const arr = Array.isArray(phones) ? phones : [];
+  if (!id || !arr.length) return { ok: true, added: 0 };
+  const stmt = db.prepare(
+    `INSERT OR IGNORE INTO contact_list_members (list_id, phone, created_at)
+     VALUES (?, ?, datetime('now'))`
+  );
+  const tx = db.transaction((ps) => {
+    let added = 0;
+    for (const p of ps) {
+      const normalized = normalizePhoneE164IL(p);
+      if (!normalized) continue;
+      const info = stmt.run(id, normalized);
+      if (Number(info?.changes || 0) > 0) added++;
+    }
+    return added;
+  });
+  const added = tx(arr);
+  return { ok: true, added };
+}
+
+export function listContactLists(db) {
+  return db
+    .prepare(
+      `SELECT id, name, source, created_at AS createdAt, updated_at AS updatedAt
+       FROM contact_lists
+       ORDER BY id DESC`
+    )
+    .all();
+}
+
+export function listContactsByList(db, { listId, limit = 200, offset = 0 } = {}) {
+  const id = Number(listId || 0);
+  const lim = Math.max(1, Math.min(1000, Number(limit || 200)));
+  const off = Math.max(0, Number(offset || 0));
+  if (!id) return { rows: [], limit: lim, offset: off };
+  const rows = db
+    .prepare(
+      `SELECT c.id, c.first_name, c.phone, c.gender, c.do_not_call, c.dial_status, c.dial_attempts, c.last_dial_at, c.last_dial_error,
+              c.last_call_status, c.last_call_duration, c.last_call_at
+       FROM contact_list_members m
+       JOIN contacts c ON c.phone = m.phone
+       WHERE m.list_id = ?
+       ORDER BY c.id DESC
+       LIMIT ? OFFSET ?`
+    )
+    .all(id, lim, off);
+  return { rows, limit: lim, offset: off };
+}
+
+export function computeListStats(db, { listId } = {}) {
+  const id = Number(listId || 0);
+  if (!id) return null;
+  const row = db
+    .prepare(
+      `
+      SELECT
+        COUNT(1) AS total,
+        SUM(CASE WHEN c.do_not_call = 1 THEN 1 ELSE 0 END) AS dnc,
+        SUM(CASE WHEN c.do_not_call = 0 AND c.dial_status = 'new' THEN 1 ELSE 0 END) AS remaining,
+        SUM(CASE WHEN c.dial_status = 'called' THEN 1 ELSE 0 END) AS called,
+        SUM(CASE WHEN c.dial_status = 'failed' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN c.last_call_status = 'no-answer' THEN 1 ELSE 0 END) AS noAnswer,
+        SUM(CASE WHEN c.last_call_status IN ('busy','failed','canceled') THEN 1 ELSE 0 END) AS notAvailable,
+        SUM(CASE WHEN c.last_call_status = 'completed' AND COALESCE(c.last_call_duration, 0) < 5 THEN 1 ELSE 0 END) AS answeredUnder5,
+        SUM(CASE WHEN l.status = 'waiting' THEN 1 ELSE 0 END) AS interested,
+        SUM(CASE WHEN l.status = 'not_interested' THEN 1 ELSE 0 END) AS notInterested
+      FROM contact_list_members m
+      JOIN contacts c ON c.phone = m.phone
+      LEFT JOIN leads l ON l.phone = c.phone
+      WHERE m.list_id = ?
+      `
+    )
+    .get(id);
+  // Normalize to numbers
+  const out = {};
+  for (const [k, v] of Object.entries(row || {})) out[k] = Number(v || 0);
+  return out;
 }
 
 export function fetchNextContactsToDial(db, limit = 10) {

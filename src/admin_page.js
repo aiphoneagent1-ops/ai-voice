@@ -154,6 +154,7 @@ export function renderAdminPage() {
             </div>
             <div class="row">
               <input type="file" id="xlsxFile" accept=".xlsx,.csv" style="max-width:260px;" />
+              <input id="importListName" placeholder="שם רשימה (אופציונלי) — למשל: גוגל שיטס ינואר" style="max-width:260px;" />
               <button id="uploadXlsxBtn">העלה</button>
             </div>
           </div>
@@ -177,8 +178,38 @@ export function renderAdminPage() {
             </div>
           </div>
           <div id="listSection" style="display:none; margin-top:12px;">
+            <div class="row" style="justify-content:space-between; align-items:center;">
+              <div class="pill">רשימות (כל ייבוא נהיה רשימה)</div>
+              <div class="row" style="gap:8px;">
+                <button class="secondary" id="refreshListsBtn">רענון רשימות</button>
+              </div>
+            </div>
+            <div style="height:10px;"></div>
+            <div class="tableWrap fixed5">
+              <table style="min-width: 920px;">
+                <thead>
+                  <tr>
+                    <th>פעולות</th>
+                    <th>שם רשימה</th>
+                    <th>סה״כ</th>
+                    <th>נותר</th>
+                    <th>התקשרנו</th>
+                    <th>אין מענה</th>
+                    <th>לא זמין</th>
+                    <th>ניתוק &lt;5ש׳</th>
+                    <th>מעוניין</th>
+                    <th>לא מעוניין</th>
+                  </tr>
+                </thead>
+                <tbody id="listsBody"></tbody>
+              </table>
+            </div>
+            <div style="height:14px;"></div>
             <div class="row" style="justify-content:space-between;">
               <div class="row" style="gap:8px;">
+                <select id="listSelect" style="max-width:260px;">
+                  <option value="0">רשימה: הכל</option>
+                </select>
                 <input id="search" placeholder="חיפוש (שם/טלפון)..." style="max-width:260px;" />
                 <select id="dialFilter" style="max-width:200px;">
                   <option value="all">סינון: הכל</option>
@@ -518,10 +549,12 @@ export function renderAdminPage() {
         if(!f) return setStatus($("importStatus"), "בחר קובץ קודם", false);
         const fd = new FormData();
         fd.append("file", f);
+        fd.append("listName", String($("importListName")?.value || "").trim());
         try{
           const out = await api("/api/contacts/import-xlsx", { method:"POST", body: fd });
-          setStatus($("importStatus"), "יובאו " + out.imported + " אנשי קשר (" + (out.type || "file") + ")", true);
-          toast("ייבוא הושלם", "יובאו " + out.imported + " אנשי קשר", true);
+          const extra = out?.listId ? (" • רשימה #" + out.listId) : "";
+          setStatus($("importStatus"), "יובאו " + out.imported + " אנשי קשר (" + (out.type || "file") + ")" + extra, true);
+          toast("ייבוא הושלם", "יובאו " + out.imported + " אנשי קשר" + extra, true);
           await loadAll();
         }catch(e){
           setStatus($("importStatus"), "שגיאה: " + e.message, false);
@@ -533,9 +566,11 @@ export function renderAdminPage() {
         const url = $("sheetUrl").value.trim();
         if(!url) return setStatus($("sheetStatus"), "הדבק קישור", false);
         try{
-          const out = await api("/api/contacts/import-sheet", { method:"POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ url }) });
-          setStatus($("sheetStatus"), "יובאו " + out.imported + " אנשי קשר", true);
-          toast("ייבוא הושלם", "יובאו " + out.imported + " אנשי קשר", true);
+          const listName = String($("importListName")?.value || "").trim();
+          const out = await api("/api/contacts/import-sheet", { method:"POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ url, listName }) });
+          const extra = out?.listId ? (" • רשימה #" + out.listId) : "";
+          setStatus($("sheetStatus"), "יובאו " + out.imported + " אנשי קשר" + extra, true);
+          toast("ייבוא הושלם", "יובאו " + out.imported + " אנשי קשר" + extra, true);
           await loadAll();
         }catch(e){
           setStatus($("sheetStatus"), "שגיאה: " + e.message, false);
@@ -681,7 +716,8 @@ export function renderAdminPage() {
 
       async function loadContacts(){
         try{
-          const out = await api("/api/contacts/list?limit=500&offset=0");
+          const listId = Number(($("listSelect")?.value || "0") || 0);
+          const out = await api("/api/contacts/list?limit=500&offset=0" + (listId ? ("&listId=" + encodeURIComponent(listId)) : ""));
           const dialFilter = ($("dialFilter")?.value || "all").trim();
           const q = ($("search").value || "").trim();
           const rows = (out.rows || []).filter((r) => {
@@ -934,11 +970,77 @@ export function renderAdminPage() {
       $("showListBtn").addEventListener("click", async () => {
         const sec = $("listSection");
         sec.style.display = sec.style.display === "none" ? "block" : "none";
-        if(sec.style.display === "block") await loadContacts();
+        if(sec.style.display === "block"){
+          await loadLists();
+          await loadContacts();
+        }
       });
       $("refreshListBtn").addEventListener("click", loadContacts);
       $("search").addEventListener("input", () => { if($("listSection").style.display !== "none") loadContacts(); });
       if($("dialFilter")) $("dialFilter").addEventListener("change", () => { if($("listSection").style.display !== "none") loadContacts(); });
+      if($("listSelect")) $("listSelect").addEventListener("change", () => { if($("listSection").style.display !== "none") loadContacts(); });
+
+      async function loadLists(){
+        const out = await api("/api/contact-lists");
+        const rows = out?.rows || [];
+        const sel = $("listSelect");
+        if(sel){
+          const current = String(sel.value || "0");
+          sel.innerHTML = '<option value="0">רשימה: הכל</option>' + rows.map(r => `<option value="${r.id}">${escapeHtml(r.name || ("רשימה " + r.id))}</option>`).join("");
+          const stillExists = rows.some(r => String(r.id) === current);
+          sel.value = stillExists ? current : "0";
+        }
+        const tb = $("listsBody");
+        if(tb){
+          tb.innerHTML = rows.map(r => {
+            const s = r.stats || {};
+            const name = escapeHtml(r.name || ("רשימה " + r.id));
+            return `
+              <tr>
+                <td>
+                  <button class="secondary" data-open-list="${r.id}" style="padding:6px 10px;">פתח</button>
+                  <button class="secondary" data-rename-list="${r.id}" style="padding:6px 10px;">ערוך</button>
+                  <button class="secondary" data-delete-list="${r.id}" style="padding:6px 10px; border-color: rgba(179,38,38,.35);">מחק</button>
+                </td>
+                <td><strong>${name}</strong></td>
+                <td>${s.total ?? 0}</td>
+                <td>${s.remaining ?? 0}</td>
+                <td>${s.called ?? 0}</td>
+                <td>${s.noAnswer ?? 0}</td>
+                <td>${s.notAvailable ?? 0}</td>
+                <td>${s.answeredUnder5 ?? 0}</td>
+                <td>${s.interested ?? 0}</td>
+                <td>${s.notInterested ?? 0}</td>
+              </tr>
+            `;
+          }).join("");
+          tb.querySelectorAll("[data-open-list]").forEach(btn => btn.addEventListener("click", async (e) => {
+            const id = String(e.currentTarget.getAttribute("data-open-list") || "0");
+            if($("listSelect")) $("listSelect").value = id;
+            await loadContacts();
+          }));
+          tb.querySelectorAll("[data-rename-list]").forEach(btn => btn.addEventListener("click", async (e) => {
+            const id = Number(e.currentTarget.getAttribute("data-rename-list") || "0");
+            const cur = rows.find(x => Number(x.id) === id);
+            const next = prompt("שם חדש לרשימה:", cur?.name || "");
+            if(!next) return;
+            await api("/api/contact-lists/rename", { method:"POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ id, name: next }) });
+            toast("עודכן", "עודכן שם הרשימה", true);
+            await loadLists();
+          }));
+          tb.querySelectorAll("[data-delete-list]").forEach(btn => btn.addEventListener("click", async (e) => {
+            const id = Number(e.currentTarget.getAttribute("data-delete-list") || "0");
+            const cur = rows.find(x => Number(x.id) === id);
+            if(!confirm("למחוק את הרשימה '" + (cur?.name || id) + "'? (זה לא מוחק אנשי קשר מהמערכת)")) return;
+            await api("/api/contact-lists/delete", { method:"POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ id }) });
+            toast("נמחק", "הרשימה נמחקה", true);
+            if($("listSelect") && String($("listSelect").value || "0") === String(id)) $("listSelect").value = "0";
+            await loadLists();
+            await loadContacts();
+          }));
+        }
+      }
+      if($("refreshListsBtn")) $("refreshListsBtn").addEventListener("click", () => { if($("listSection").style.display !== "none") loadLists(); });
 
       // Bulk select + delete
       $("selectAllContacts").addEventListener("change", () => {

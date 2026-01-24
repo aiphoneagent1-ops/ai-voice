@@ -33,7 +33,14 @@ import {
   deleteLead,
   fetchNextContactsToDial,
   queueContactForDial,
-  markDialResult
+  markDialResult,
+  upsertContactList,
+  addContactsToList,
+  listContactLists,
+  listContactsByList,
+  renameContactList,
+  deleteContactList,
+  computeListStats
 } from "./db.js";
 import { buildSystemPrompt, buildGreeting, buildSalesAgentSystemPrompt } from "./prompts.js";
 import { buildPlayAndHangup, buildRecordTwiML, buildSayAndHangup } from "./twiml.js";
@@ -3015,9 +3022,12 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "missing file" });
   const filename = String(req.file.originalname || "").toLowerCase();
   const isCsv = filename.endsWith(".csv");
+  const listNameRaw = String(req.body?.listName || req.body?.list_name || "").trim();
 
   let imported = 0;
   let invalidPhones = 0;
+  let listId = null;
+  const phonesForList = [];
   if (isCsv) {
     const csv = req.file.buffer.toString("utf8");
     const records = csvParse(csv, { columns: true, skip_empty_lines: true });
@@ -3036,8 +3046,15 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
           pickFirstMatchingField(row, isNameHeader) ||
           null);
       upsertContact(db, { phone, gender, firstName });
+      phonesForList.push(phone);
       imported++;
     }
+    // Create list (after we know count so default name can include it)
+    try {
+      const name = listNameRaw || `CSV ${imported}`;
+      listId = upsertContactList(db, { name, source: "csv_upload" });
+      if (listId) addContactsToList(db, { listId, phones: phonesForList });
+    } catch {}
     if (!imported) {
       const headers = records?.[0] ? Object.keys(records[0]) : [];
       return res.status(400).json({
@@ -3048,7 +3065,7 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
         detectedHeaders: headers
       });
     }
-    res.json({ ok: true, imported, invalidPhones, type: "csv" });
+    res.json({ ok: true, imported, invalidPhones, type: "csv", listId });
     return;
   }
 
@@ -3102,8 +3119,15 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
           pickFirstMatchingField(r, isNameHeader) ||
           null);
       upsertContact(db, { phone, gender, firstName });
+      phonesForList.push(phone);
       imported++;
   }
+
+  try {
+    const name = listNameRaw || `XLSX ${imported}`;
+    listId = upsertContactList(db, { name, source: "xlsx_upload" });
+    if (listId) addContactsToList(db, { listId, phones: phonesForList });
+  } catch {}
 
   if (!imported) {
     return res.status(400).json({
@@ -3115,7 +3139,7 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
     });
   }
 
-  res.json({ ok: true, imported, invalidPhones, type: "xlsx" });
+  res.json({ ok: true, imported, invalidPhones, type: "xlsx", listId });
   })().catch((err) => {
     console.error("[import-xlsx] failed:", err);
     res.status(400).json({ error: "failed to parse xlsx" });
@@ -3142,6 +3166,7 @@ function toGoogleCsvUrl(url) {
 app.post("/api/contacts/import-sheet", async (req, res) => {
   const url = toGoogleCsvUrl(req.body?.url);
   if (!url) return res.status(400).json({ error: "missing url" });
+  const listNameRaw = String(req.body?.listName || req.body?.list_name || "").trim();
 
   const r = await fetch(url);
   if (!r.ok) {
@@ -3160,6 +3185,7 @@ app.post("/api/contacts/import-sheet", async (req, res) => {
   let imported = 0;
   let invalidPhones = 0;
   const detectedHeaders = records?.[0] ? Object.keys(records[0]) : [];
+  const phonesForList = [];
   for (const row of records) {
     const phoneRaw =
       String(
@@ -3193,6 +3219,7 @@ app.post("/api/contacts/import-sheet", async (req, res) => {
       ).trim() || null;
     const firstNameFinal = firstName || pickFirstMatchingField(row, isNameHeader) || null;
     upsertContact(db, { phone, gender, firstName: firstNameFinal });
+    phonesForList.push(phone);
     imported++;
   }
 
@@ -3208,7 +3235,14 @@ app.post("/api/contacts/import-sheet", async (req, res) => {
     });
   }
 
-  res.json({ ok: true, imported, invalidPhones, detectedHeaders });
+  let listId = null;
+  try {
+    const name = listNameRaw || `Google Sheets ${imported}`;
+    listId = upsertContactList(db, { name, source: "google_sheets" });
+    if (listId) addContactsToList(db, { listId, phones: phonesForList });
+  } catch {}
+
+  res.json({ ok: true, imported, invalidPhones, detectedHeaders, listId });
 });
 
 app.get("/api/contacts/stats", (req, res) => {
@@ -3222,15 +3256,47 @@ app.get("/api/contacts/stats", (req, res) => {
 app.get("/api/contacts/list", (req, res) => {
   const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 200)));
   const offset = Math.max(0, Number(req.query.offset || 0));
+  const listId = Number(req.query.listId || 0);
+  if (listId) {
+    const out = listContactsByList(db, { listId, limit, offset });
+    return res.json({ rows: out.rows, limit: out.limit, offset: out.offset, listId });
+  }
   const rows = db
     .prepare(
-      `SELECT id, first_name, phone, gender, do_not_call, dial_status, dial_attempts, last_dial_at, last_dial_error
+      `SELECT id, first_name, phone, gender, do_not_call, dial_status, dial_attempts, last_dial_at, last_dial_error,
+              last_call_status, last_call_duration, last_call_at
        FROM contacts
        ORDER BY id DESC
        LIMIT ? OFFSET ?`
     )
     .all(limit, offset);
-  res.json({ rows, limit, offset });
+  res.json({ rows, limit, offset, listId: 0 });
+});
+
+// Contact lists (import batches)
+app.get("/api/contact-lists", (req, res) => {
+  const lists = listContactLists(db);
+  const rows = [];
+  for (const l of lists) {
+    const stats = computeListStats(db, { listId: l.id }) || {};
+    rows.push({ ...l, stats });
+  }
+  res.json({ ok: true, rows });
+});
+
+app.post("/api/contact-lists/rename", (req, res) => {
+  const id = Number(req.body?.id || 0);
+  const name = String(req.body?.name || "").trim();
+  if (!id || !name) return res.status(400).json({ ok: false, error: "missing id/name" });
+  const result = renameContactList(db, { id, name });
+  res.json({ ok: true, result });
+});
+
+app.post("/api/contact-lists/delete", (req, res) => {
+  const id = Number(req.body?.id || 0);
+  if (!id) return res.status(400).json({ ok: false, error: "missing id" });
+  const result = deleteContactList(db, { id });
+  res.json({ ok: true, result });
 });
 
 // Leads (waiting/not_interested)
@@ -3466,7 +3532,10 @@ app.post("/api/contacts/dial", async (req, res) => {
       to: phone,
       from: process.env.TWILIO_FROM_NUMBER,
       url: callUrl,
-      method: "POST"
+      method: "POST",
+      statusCallback: `${publicBaseUrlFromEnv()}/twilio/status`,
+      statusCallbackMethod: "POST",
+      statusCallbackEvent: ["initiated", "ringing", "answered", "completed"]
     });
     res.json({ ok: true, callSid: out?.sid || null, to: phone, url: callUrl });
   } catch (e) {
@@ -3677,6 +3746,30 @@ app.all("/twilio/voice", async (req, res) => {
       hangup: true
     });
   }
+});
+
+// Twilio status callback for outbound calls (used for per-list stats).
+// This endpoint is called by Twilio when we set `statusCallback` in calls.create().
+app.all("/twilio/status", (req, res) => {
+  try {
+    const to = normalizePhoneE164IL(String(getParam(req, "To") || ""));
+    const callSid = String(getParam(req, "CallSid") || "");
+    const callStatus = String(getParam(req, "CallStatus") || "").trim();
+    const dur = Number(getParam(req, "CallDuration") || 0);
+    if (to) {
+      try {
+        db.prepare(
+          `UPDATE contacts
+           SET last_call_sid = COALESCE(?, last_call_sid),
+               last_call_status = ?,
+               last_call_duration = CASE WHEN ? > 0 THEN ? ELSE last_call_duration END,
+               last_call_at = datetime('now')
+           WHERE phone = ?`
+        ).run(callSid || null, callStatus || null, dur, dur, to);
+      } catch {}
+    }
+  } catch {}
+  res.type("text/plain").send("ok");
 });
 
 app.all("/twilio/record", async (req, res) => {
@@ -4023,7 +4116,10 @@ async function runDialerOnce() {
         to: c.phone,
         from: process.env.TWILIO_FROM_NUMBER,
         url: callUrl,
-        method: "POST"
+        method: "POST",
+        statusCallback: `${publicBaseUrlFromEnv()}/twilio/status`,
+        statusCallbackMethod: "POST",
+        statusCallbackEvent: ["initiated", "ringing", "answered", "completed"]
       });
       markDialResult(db, c.phone, { status: "called" });
     } catch (e) {
