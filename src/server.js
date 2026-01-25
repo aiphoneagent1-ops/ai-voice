@@ -4109,41 +4109,56 @@ async function runDialerOnce() {
     // Business hours gate (Israel time)
     if (!dialerIsAllowedDay()) return;
     if (!dialerIsWithinBusinessHours()) return;
-  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM_NUMBER) return;
-  const voiceBase = String(process.env.VOICE_WEBHOOK_URL || "").trim().replace(/\/$/, "");
-  if (!voiceBase) return;
-  const callUrl = `${voiceBase}/twilio/voice`;
+    if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM_NUMBER) return;
+    const voiceBase = String(process.env.VOICE_WEBHOOK_URL || "").trim().replace(/\/$/, "");
+    if (!voiceBase) return;
+    const callUrl = `${voiceBase}/twilio/voice`;
 
-  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  const batch = fetchNextContactsToDial(db, autoDialBatchSize);
-  for (const c of batch) {
-    try {
-      // Hard requirement: ensure greeting is cached BEFORE placing the call.
-      // If ElevenLabs is busy, skip this contact (we prefer skipping over bad UX "silence on answer").
+    const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+    const concurrency = Math.max(1, Math.min(50, Number(autoDialBatchSize) || 1));
+    const batch = fetchNextContactsToDial(db, concurrency);
+
+    const dialOne = async (c) => {
       try {
-        const contact = getContactByPhone(db, c.phone);
-        const persona0 = pickPersona(contact);
-        const ok = await ensureGreetingCachedBeforeDial({ persona: persona0, timeoutMs: 12000 });
-        if (!ok) {
-          markDialResult(db, c.phone, { status: "failed", error: "TTS busy (greeting not cached)" });
-          continue;
+        // Hard requirement: ensure greeting is cached BEFORE placing the call.
+        // If ElevenLabs is busy, skip this contact (we prefer skipping over bad UX "silence on answer").
+        try {
+          const contact = getContactByPhone(db, c.phone);
+          const persona0 = pickPersona(contact);
+          const ok = await ensureGreetingCachedBeforeDial({ persona: persona0, timeoutMs: 12000 });
+          if (!ok) {
+            markDialResult(db, c.phone, { status: "failed", error: "TTS busy (greeting not cached)" });
+            return;
+          }
+        } catch {}
+
+        queueContactForDial(db, c.phone);
+        await client.calls.create({
+          to: c.phone,
+          from: process.env.TWILIO_FROM_NUMBER,
+          url: callUrl,
+          method: "POST",
+          statusCallback: `${publicBaseUrlFromEnv()}/twilio/status`,
+          statusCallbackMethod: "POST",
+          statusCallbackEvent: ["initiated", "ringing", "answered", "completed"]
+        });
+        markDialResult(db, c.phone, { status: "called" });
+      } catch (e) {
+        markDialResult(db, c.phone, { status: "failed", error: e?.message || String(e) });
+      }
+    };
+
+    // Run the batch with a concurrency cap (batch size == concurrency).
+    let idx = 0;
+    const workers = Array.from({ length: Math.min(concurrency, batch.length) }, () =>
+      (async () => {
+        while (idx < batch.length) {
+          const cur = batch[idx++];
+          await dialOne(cur);
         }
-      } catch {}
-      queueContactForDial(db, c.phone);
-      await client.calls.create({
-        to: c.phone,
-        from: process.env.TWILIO_FROM_NUMBER,
-        url: callUrl,
-        method: "POST",
-        statusCallback: `${publicBaseUrlFromEnv()}/twilio/status`,
-        statusCallbackMethod: "POST",
-        statusCallbackEvent: ["initiated", "ringing", "answered", "completed"]
-      });
-      markDialResult(db, c.phone, { status: "called" });
-    } catch (e) {
-      markDialResult(db, c.phone, { status: "failed", error: e?.message || String(e) });
-    }
-    }
+      })()
+    );
+    await Promise.all(workers);
   } finally {
     dialerInFlight = false;
   }

@@ -307,7 +307,7 @@ export function renderAdminPage() {
           </div>
           <div class="row">
             <div style="flex:1; min-width:220px;">
-              <label>קצב (כמה מספרים בכל ריצה)</label>
+              <label>קצב (כמה שיחות במקביל)</label>
               <select id="autoDialBatch">
                 <option value="1">1</option>
                 <option value="3">3</option>
