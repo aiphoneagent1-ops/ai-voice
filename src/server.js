@@ -50,11 +50,12 @@ import { renderAdminPage } from "./admin_page.js";
 import { normalizePhoneE164IL } from "./phone.js";
 
 const PORT = Number(process.env.PORT || 3000);
-// Admin UI protection (Basic Auth)
+// Admin UI protection (password gate)
 // NOTE: keep Twilio webhooks (/twilio/*) and WS upgrade endpoints public, otherwise calls break.
-const ADMIN_USER = String(process.env.ADMIN_USER || "admin");
 // User requested password: amota1122. Prefer setting ADMIN_PASSWORD in Render env.
 const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || "amota1122");
+const ADMIN_COOKIE_NAME = "admin_auth";
+const ADMIN_COOKIE_TTL_MS = 1000 * 60 * 60 * 12; // 12h
 
 // Twilio webhook security: validate X-Twilio-Signature for /twilio/* endpoints.
 // Modes:
@@ -62,11 +63,6 @@ const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || "amota1122");
 // - warn: log failures but still allow (safe default to avoid breaking deploys due to URL mismatch)
 // - block: reject invalid signatures with 403
 const TWILIO_SIGNATURE_MODE = String(process.env.TWILIO_SIGNATURE_MODE || "warn").trim().toLowerCase();
-
-function unauthorizedBasic(res) {
-  res.setHeader("WWW-Authenticate", 'Basic realm="Admin", charset="UTF-8"');
-  res.status(401).send("Authentication required");
-}
 
 function safeEq(a, b) {
   const aa = Buffer.from(String(a || ""), "utf8");
@@ -76,27 +72,152 @@ function safeEq(a, b) {
   return crypto.timingSafeEqual(aa, bb);
 }
 
-function adminAuth(req, res, next) {
-  // If password is empty/disabled, allow (but default is enabled).
-  if (!ADMIN_PASSWORD) return next();
+function b64urlEncode(input) {
+  const buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input || ""), "utf8");
+  return buf
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
 
-  const auth = String(req.headers.authorization || "");
-  if (!auth.startsWith("Basic ")) return unauthorizedBasic(res);
-  const b64 = auth.slice("Basic ".length).trim();
-  let decoded = "";
-  try {
-    decoded = Buffer.from(b64, "base64").toString("utf8");
-  } catch {
-    return unauthorizedBasic(res);
+function b64urlDecodeToString(s) {
+  const str = String(s || "").replace(/-/g, "+").replace(/_/g, "/");
+  // pad base64
+  const pad = str.length % 4 === 0 ? "" : "=".repeat(4 - (str.length % 4));
+  return Buffer.from(str + pad, "base64").toString("utf8");
+}
+
+function parseCookieHeader(cookieHeader) {
+  const out = {};
+  const s = String(cookieHeader || "").trim();
+  if (!s) return out;
+  for (const part of s.split(";")) {
+    const p = part.trim();
+    if (!p) continue;
+    const idx = p.indexOf("=");
+    const k = idx >= 0 ? p.slice(0, idx).trim() : p.trim();
+    const v = idx >= 0 ? p.slice(idx + 1).trim() : "";
+    if (!k) continue;
+    out[k] = v;
   }
-  const idx = decoded.indexOf(":");
-  const user = idx >= 0 ? decoded.slice(0, idx) : decoded;
-  const pass = idx >= 0 ? decoded.slice(idx + 1) : "";
+  return out;
+}
 
-  // constant-time check for both fields where possible
-  if (user !== ADMIN_USER) return unauthorizedBasic(res);
-  if (!safeEq(pass, ADMIN_PASSWORD)) return unauthorizedBasic(res);
-  return next();
+function adminCookieSecret() {
+  // If someone changes ADMIN_PASSWORD, old cookies become invalid automatically.
+  return String(process.env.ADMIN_COOKIE_SECRET || ADMIN_PASSWORD || "").trim();
+}
+
+function signAdminToken(payload) {
+  const secret = adminCookieSecret();
+  if (!secret) return "";
+  const h = crypto.createHmac("sha256", secret).update(payload).digest();
+  return b64urlEncode(h);
+}
+
+function issueAdminCookieValue() {
+  const ts = Date.now();
+  const payload = `ok|${ts}`;
+  const sig = signAdminToken(payload);
+  const token = `${b64urlEncode(payload)}.${sig}`;
+  return token;
+}
+
+function verifyAdminCookieValue(token) {
+  const secret = adminCookieSecret();
+  if (!secret) return false;
+  const t = String(token || "").trim();
+  const parts = t.split(".");
+  if (parts.length !== 2) return false;
+  const payloadB64 = parts[0];
+  const sig = parts[1];
+  let payload = "";
+  try {
+    payload = b64urlDecodeToString(payloadB64);
+  } catch {
+    return false;
+  }
+  if (!payload.startsWith("ok|")) return false;
+  const expected = signAdminToken(payload);
+  if (!expected) return false;
+  if (!safeEq(sig, expected)) return false;
+  const ts = Number(payload.split("|")[1] || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return false;
+  if (Date.now() - ts > ADMIN_COOKIE_TTL_MS) return false;
+  return true;
+}
+
+function isAdminAuthed(req) {
+  // If password is empty/disabled, allow (but default is enabled).
+  if (!ADMIN_PASSWORD) return true;
+  const cookies = parseCookieHeader(req.headers.cookie);
+  const v = cookies[ADMIN_COOKIE_NAME];
+  return verifyAdminCookieValue(v);
+}
+
+function setAdminCookie(res, req) {
+  const token = issueAdminCookieValue();
+  const isHttps =
+    String(req.headers["x-forwarded-proto"] || "").toLowerCase().includes("https") || !!req.secure || IS_RENDER;
+  // Session-ish cookie (no Max-Age). TTL is enforced server-side.
+  const attrs = [
+    `${ADMIN_COOKIE_NAME}=${token}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Strict"
+  ];
+  if (isHttps) attrs.push("Secure");
+  res.setHeader("Set-Cookie", attrs.join("; "));
+}
+
+function clearAdminCookie(res, req) {
+  const isHttps =
+    String(req.headers["x-forwarded-proto"] || "").toLowerCase().includes("https") || !!req.secure || IS_RENDER;
+  const attrs = [
+    `${ADMIN_COOKIE_NAME}=`,
+    "Path=/",
+    "Max-Age=0",
+    "HttpOnly",
+    "SameSite=Strict"
+  ];
+  if (isHttps) attrs.push("Secure");
+  res.setHeader("Set-Cookie", attrs.join("; "));
+}
+
+function renderAdminLoginPage({ error = "" } = {}) {
+  const msg = String(error || "").trim();
+  return `<!doctype html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>כניסה</title>
+    <style>
+      body{font-family:system-ui,-apple-system,Arial;margin:0;background:#0b1020;color:#fff}
+      .wrap{max-width:420px;margin:10vh auto;padding:16px}
+      .card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);border-radius:16px;padding:16px}
+      h1{margin:0 0 10px;font-size:18px}
+      p{margin:0 0 14px;opacity:.8;font-size:13px;line-height:1.5}
+      input{width:100%;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.25);color:#fff;outline:none}
+      button{margin-top:10px;width:100%;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(53,198,234,.35);color:#fff;cursor:pointer}
+      .err{margin-top:10px;color:#ff9a9a;font-size:13px}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>כניסה לממשק הניהול</h1>
+        <p>הזן סיסמה כדי להמשיך.</p>
+        <form method="POST" action="/admin/login">
+          <input name="password" type="password" placeholder="סיסמה" autocomplete="current-password" required />
+          <button type="submit">כניסה</button>
+        </form>
+        ${msg ? `<div class="err">${msg}</div>` : ""}
+      </div>
+    </div>
+  </body>
+</html>`;
 }
 
 function twilioSignatureUrlForReq(req) {
@@ -316,6 +437,13 @@ if (!IS_RENDER && process.platform === "darwin" && (RAW_DATA_DIR === "/var/data"
   console.warn(
     "[config] Detected Render-style DATA_DIR/DB_PATH on macOS. Falling back to local ./data. " +
       "If you want to override: set DATA_DIR=./data (or any writable path)."
+  );
+}
+if (IS_RENDER && !String(DB_PATH || "").startsWith("/var/data")) {
+  console.warn(
+    "[config] Render detected but DB_PATH is not under /var/data. " +
+      "Your SQLite DB will reset on every deploy unless you attach a persistent disk and set DATA_DIR=/var/data (or DB_PATH=/var/data/app.db). " +
+      `Current DB_PATH=${DB_PATH}`
   );
 }
 // Default to a high-quality model. You can override via OPENAI_MODEL in env.
@@ -1360,9 +1488,11 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: "2mb" }));
 
-// Protect Admin UI + Admin APIs
-app.use("/admin", adminAuth);
-app.use("/api", adminAuth);
+// Protect Admin APIs (UI itself is gated in the /admin route)
+app.use("/api", (req, res, next) => {
+  if (isAdminAuthed(req)) return next();
+  res.status(401).json({ error: "auth_required" });
+});
 
 // Protect Twilio webhooks (do NOT protect /twilio/mediastream WS here; handled in upgrade hook)
 app.use("/twilio", twilioAuth);
@@ -2953,7 +3083,31 @@ app.get("/health", (req, res) =>
 
 // Admin mini-site
 app.get("/admin", (req, res) => {
-  res.type("text/html").send(renderAdminPage());
+  if (isAdminAuthed(req)) {
+    res.type("text/html").send(renderAdminPage());
+    return;
+  }
+  res.status(401).type("text/html").send(renderAdminLoginPage());
+});
+
+app.post("/admin/login", (req, res) => {
+  const pass = String(req.body?.password || "").trim();
+  if (!ADMIN_PASSWORD) {
+    // auth disabled
+    res.redirect("/admin");
+    return;
+  }
+  if (!pass || !safeEq(pass, ADMIN_PASSWORD)) {
+    res.status(401).type("text/html").send(renderAdminLoginPage({ error: "סיסמה לא נכונה" }));
+    return;
+  }
+  setAdminCookie(res, req);
+  res.redirect("/admin");
+});
+
+app.get("/admin/logout", (req, res) => {
+  clearAdminCookie(res, req);
+  res.status(200).type("text/html").send(renderAdminLoginPage({ error: "התנתקת." }));
 });
 
 // Public transcript viewer (for Google Sheets "click here").
