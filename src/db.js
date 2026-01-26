@@ -482,61 +482,6 @@ export function computeListStats(db, { listId } = {}) {
   return out;
 }
 
-export function listContactsForListExport(db, { listId, bucket = "all" } = {}) {
-  const id = Number(listId || 0);
-  if (!id) return [];
-  const b = String(bucket || "all").trim().toLowerCase() || "all";
-
-  let extraWhere = "";
-  if (b === "no_answer") {
-    extraWhere = ` AND c.last_call_status = 'no-answer'`;
-  } else if (b === "not_available") {
-    // "לא זמין": busy/canceled. (We keep "failed" for erroneous.)
-    extraWhere = ` AND c.last_call_status IN ('busy','canceled')`;
-  } else if (b === "completed_disconnected") {
-    // "בוצע והיה ניתוק"
-    extraWhere = ` AND c.last_call_status = 'completed' AND COALESCE(c.last_call_duration, 0) < 5`;
-  } else if (b === "completed_progressed") {
-    // "בוצע והתקדם" => lead created as waiting
-    extraWhere = ` AND l.status = 'waiting'`;
-  } else if (b === "not_completed") {
-    // "לא בוצע": no call attempt completed yet (new/queued/unknown status)
-    extraWhere = ` AND (c.dial_status IN ('new','queued') OR c.last_call_status IS NULL OR c.last_call_status IN ('initiated','ringing','answered'))`;
-  } else if (b === "erroneous") {
-    // "שגוי": internal dial failed or Twilio reports failed
-    extraWhere = ` AND (c.dial_status = 'failed' OR c.last_call_status = 'failed')`;
-  } else if (b !== "all") {
-    return [];
-  }
-
-  return db
-    .prepare(
-      `
-      SELECT
-        c.first_name,
-        c.phone,
-        c.gender,
-        c.do_not_call,
-        c.dial_status,
-        c.dial_attempts,
-        c.last_dial_at,
-        c.last_dial_error,
-        c.last_call_status,
-        c.last_call_duration,
-        c.last_call_at,
-        COALESCE(l.status, '') AS lead_status,
-        COALESCE(l.updated_at, '') AS lead_updated_at
-      FROM contact_list_members m
-      JOIN contacts c ON c.phone = m.phone
-      LEFT JOIN leads l ON l.phone = c.phone
-      WHERE m.list_id = ?
-      ${extraWhere}
-      ORDER BY c.id DESC
-      `
-    )
-    .all(id);
-}
-
 export function fetchNextContactsToDial(db, limit = 10) {
   return db
     .prepare(

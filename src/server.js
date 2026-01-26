@@ -40,8 +40,7 @@ import {
   listContactsByList,
   renameContactList,
   deleteContactList,
-  computeListStats,
-  listContactsForListExport
+  computeListStats
 } from "./db.js";
 import { buildSystemPrompt, buildGreeting, buildSalesAgentSystemPrompt } from "./prompts.js";
 import { buildPlayAndHangup, buildRecordTwiML, buildSayAndHangup } from "./twiml.js";
@@ -1312,9 +1311,8 @@ const DEFAULT_KNOWLEDGE_BASE = `
 // Default openers (generic). Admin can override; keep defaults consistent with agent voice persona.
 function defaultOpeningForCallee(calleePersona) {
   const verb = AGENT_VOICE_PERSONA === "female" ? "מדברת" : "מדבר";
-  // Requirement: opening paragraph must mention "ללא עלות".
-  if (calleePersona === "female") return `שלום יקרה, ${verb} בנוגע להצעה קצרה ללא עלות—יש לך דקה?`;
-  return `שלום אחי, ${verb} בנוגע להצעה קצרה ללא עלות—יש לך דקה?`;
+  if (calleePersona === "female") return `שלום יקרה, ${verb} בנוגע להצעה קצרה—יש לך דקה?`;
+  return `שלום אחי, ${verb} בנוגע להצעה קצרה—יש לך דקה?`;
 }
 const DEFAULT_OPENING_MALE = defaultOpeningForCallee("male");
 const DEFAULT_OPENING_FEMALE = defaultOpeningForCallee("female");
@@ -3319,83 +3317,6 @@ app.post("/api/contact-lists/delete", (req, res) => {
   res.json({ ok: true, result });
 });
 
-// Export list details as CSV (per-bucket breakdown for admin)
-app.get("/api/contact-lists/export.csv", (req, res) => {
-  const listId = Number(req.query.listId || 0);
-  const bucket = String(req.query.bucket || "all").trim().toLowerCase() || "all";
-  const allowed = new Set([
-    "all",
-    "no_answer",
-    "not_available",
-    "completed_disconnected",
-    "completed_progressed",
-    "not_completed",
-    "erroneous"
-  ]);
-  if (!listId) return res.status(400).type("text/plain").send("missing listId");
-  if (!allowed.has(bucket)) return res.status(400).type("text/plain").send("invalid bucket");
-
-  const list = db.prepare(`SELECT id, name FROM contact_lists WHERE id = ?`).get(listId);
-  if (!list) return res.status(404).type("text/plain").send("list not found");
-
-  const rows = listContactsForListExport(db, { listId, bucket }) || [];
-
-  const csvEscape = (v) => {
-    const s = String(v ?? "");
-    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-    return s;
-  };
-
-  const header = [
-    "list_id",
-    "list_name",
-    "phone",
-    "first_name",
-    "gender",
-    "do_not_call",
-    "dial_status",
-    "dial_attempts",
-    "last_dial_at",
-    "last_dial_error",
-    "last_call_status",
-    "last_call_duration",
-    "last_call_at",
-    "lead_status",
-    "lead_updated_at"
-  ];
-
-  const lines = [];
-  lines.push(header.join(","));
-  for (const r of rows) {
-    const line = [
-      list.id,
-      list.name,
-      r.phone,
-      r.first_name,
-      r.gender,
-      r.do_not_call,
-      r.dial_status,
-      r.dial_attempts,
-      r.last_dial_at,
-      r.last_dial_error,
-      r.last_call_status,
-      r.last_call_duration,
-      r.last_call_at,
-      r.lead_status,
-      r.lead_updated_at
-    ]
-      .map(csvEscape)
-      .join(",");
-    lines.push(line);
-  }
-
-  const filename = `list-${String(list.id)}-${bucket}.csv`;
-  res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-  // UTF-8 BOM helps Excel open Hebrew correctly.
-  res.send("\uFEFF" + lines.join("\n"));
-});
-
 // Leads (waiting/not_interested)
 app.get("/api/leads/list", (req, res) => {
   const status = String(req.query.status || "all");
@@ -4776,8 +4697,6 @@ wssMediaStream.on("connection", (ws, req) => {
   let guidedLastQuestionAt = 0;
   let guidedCallbackTime = "";
   let guidedCloseAttempts = 0;
-  /** @type {""|"participants_low"} */
-  let guidedCloseReason = "";
   // One-time safety recheck for suspicious early "not interested" right after greeting.
   let guidedInterestRecheckAsked = false;
   // Google Sheets sync guard (avoid duplicate rows on ws close after explicit outcome)
@@ -4828,38 +4747,6 @@ wssMediaStream.on("connection", (ws, req) => {
   function confirmQuestionText() {
     // No-apology mode: never say "לא שמעתי/לא קלטתי/תחזור".
     return handoffQuestionTextForPersona(persona);
-  }
-
-  function participantsLowCallbackQuestionText() {
-    // Requirement (white-label): no "מהעמותה". Keep it as "נציגה".
-    return persona === "female"
-      ? "אני מבינה.. נציגה שלנו תחזור אלייך ממש בהקדם ותנסה לעזור לך לגבי מספר המשתתפות, היא תוכל גם לשלוח מודעת פרסום יפה שתוכלי להפיץ.. לחזור אלייך למספר זה?"
-      : "אני מבין.. נציגה שלנו תחזור אליך ממש בהקדם ותנסה לעזור לך לגבי מספר המשתתפות, היא תוכל גם לשלוח מודעת פרסום יפה שתוכל להפיץ.. לחזור אליך למספר זה?";
-  }
-
-  function participantsLowConfirmText() {
-    return persona === "female"
-      ? "מעולה יחזרו אלייך למספר הזה יום טוב ובשורות טובות"
-      : "מעולה יחזרו אליך למספר הזה יום טוב ובשורות טובות";
-  }
-
-  function participantsAnswerIndicatesLow(ns, n, minP) {
-    const t = String(ns || "");
-    if (n == null) return false;
-    // If they explicitly negate the number ("אין לי 15", "לא מגיעה ל-15") or say "פחות/מתחת".
-    const neg =
-      t.includes("אין לי") ||
-      t.includes("אין לנו") ||
-      t.includes("לא מגיעה") ||
-      t.includes("לא מגיע") ||
-      t.includes("לא יכולה") ||
-      t.includes("לא יכול") ||
-      t.includes("פחות") ||
-      t.includes("מתחת");
-    if (neg && n <= minP) return true;
-    // "רק 10" is low if below minimum.
-    if (t.includes("רק") && n < minP) return true;
-    return false;
   }
 
   async function sayFinalAndHangup({ text, outcome }) {
@@ -5998,11 +5885,7 @@ wssMediaStream.on("connection", (ws, req) => {
           detectTransferConsent(speech);
         if (yesLike) {
           msLog("guided", { callSid, kind: "handoff_confirm" });
-          if (guidedCloseReason === "participants_low") {
-            await sayFinalAndHangup({ text: participantsLowConfirmText(), outcome: "interested" });
-          } else {
-            await sayFinalAndHangup({ text: handoffConfirmCloseText({ persona }), outcome: "interested" });
-          }
+          await sayFinalAndHangup({ text: handoffConfirmCloseText({ persona }), outcome: "interested" });
           return;
         }
         // If user didn't confirm, do NOT hang up immediately (they may be asking questions).
@@ -6280,7 +6163,6 @@ wssMediaStream.on("connection", (ws, req) => {
         if (n == null && looksLikeUnknownAnswer(ns)) {
           msLog("guided", { callSid, kind: "participants_unknown", n: null });
           guidedStep = "CLOSE";
-          guidedCloseReason = "";
           const t = limitPhoneReply(flowText.FLOW_PARTICIPANTS_LOW_FALLBACK, 200);
           const q = handoffQuestionText();
           const msg = limitPhoneReply(`${t} ${q}`.trim(), 240);
@@ -6297,7 +6179,6 @@ wssMediaStream.on("connection", (ws, req) => {
           if (guidedParticipantsBadCount >= 2) {
             msLog("guided", { callSid, kind: "participants_unclear_fallback", attempts: guidedParticipantsBadCount });
             guidedStep = "CLOSE";
-            guidedCloseReason = "";
             const t = limitPhoneReply(
               flowText.FLOW_PARTICIPANTS_UNCLEAR_FALLBACK || "לא הצלחתי להבין את מספר המשתתפות. נציגה תחזור אלייך בהקדם עם כל הפרטים.",
               200
@@ -6317,13 +6198,10 @@ wssMediaStream.on("connection", (ws, req) => {
           await sayText(q0, { label: "reply" });
           return;
         }
-        // If caller says "אין לי 15" / "פחות מ-15" we must treat it as low, even if a number was extracted.
-        const lowByWording = participantsAnswerIndicatesLow(ns, n, minParticipants);
-        if (n != null && n >= minParticipants && !lowByWording) {
+        if (n != null && n >= minParticipants) {
           msLog("guided", { callSid, kind: "participants_ok", n });
           // Ask handoff question (rep will call back)
           guidedStep = "CLOSE";
-          guidedCloseReason = "";
           const ack = limitPhoneReply(flowText.FLOW_ACK_PARTICIPANTS || flowText.FLOW_ACK_GENERAL || "", 40);
           const q = limitPhoneReply(prependAckOnce(ack, handoffQuestionText()), 220);
           try {
@@ -6333,11 +6211,10 @@ wssMediaStream.on("connection", (ws, req) => {
           return;
         }
         msLog("guided", { callSid, kind: "participants_low_or_unknown", n });
-        // Requirement: don't go deep on the 15-participant limit. Transfer quickly to a representative.
-        guidedStep = "CLOSE";
-        guidedCloseReason = "participants_low";
-        guidedCloseAttempts = 0;
-        const q = limitPhoneReply(participantsLowCallbackQuestionText(), 320);
+        guidedStep = "PARTICIPANTS_PERSUADE";
+        participantsPersuadeAsked = true;
+        guidedPersuadeBadCount = 0;
+        const q = limitPhoneReply(flowText.FLOW_PARTICIPANTS_LOW, 200);
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
         } catch {}

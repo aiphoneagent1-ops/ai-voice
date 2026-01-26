@@ -1,9 +1,8 @@
 export function buildSystemPrompt({
   persona,
   knowledgeBase = "",
-  // White-label defaults (must NOT mention a specific organization)
-  handoffToPhrase = "לצוות",
-  handoffFromPhrase = "מהצוות",
+  handoffToPhrase = "לעמותה",
+  handoffFromPhrase = "מהעמותה",
   // legacy (kept for backward-compat)
   openingScript = "",
   middleScript = "",
@@ -85,13 +84,7 @@ export function buildGreeting({ persona }) {
 
 // Sales-agent prompt for Realtime (Media Streams).
 // Key difference vs buildSystemPrompt(): we run a state machine and force structured decisions.
-export function buildSalesAgentSystemPrompt({
-  persona,
-  knowledgeBase = "",
-  state = "CHECK_INTEREST",
-  handoffToPhrase = "לצוות",
-  handoffFromPhrase = "מהצוות"
-} = {}) {
+export function buildSalesAgentSystemPrompt({ persona, knowledgeBase = "", state = "CHECK_INTEREST" } = {}) {
   const toYou = persona === "female" ? "אלייך" : "אליך";
   const address = persona === "female" ? "לשון נקבה" : "לשון זכר";
 
@@ -109,19 +102,19 @@ export function buildSalesAgentSystemPrompt({
 כללים קשיחים:
 - עברית בלבד, טבעי, בגובה העיניים. 1–2 משפטים בדרך כלל.
 - תשובות טלפוניות קצרות מאוד: עד משפט אחד בדרך כלל. מקסימום 12–16 מילים. בלי נאומים.
-- אם הלקוח שואל "במה מדובר / תן פרטים / תסביר" — תענה בקצרה קודם (משפט–שניים), ורק אז תציע להעביר ${handoffToPhrase}. אל תחזור שוב ושוב על זה בלי לענות.
-- לא ממציא פרטים (יום/שעה/כתובת/מחיר). אם שואלים — "יחזרו ${toYou} ${handoffFromPhrase} עם כל הפרטים לתיאום".
-- אין אצלנו "מייל/וואטסאפ/טופס/קישור" בשיחה הזאת. רק חזרה בשיחה טלפונית.
+- אם הלקוח שואל "במה מדובר / תן פרטים / תסביר" — תענה בקצרה קודם (משפט–שניים), ורק אז תציע להעביר לעמותה. אל תחזור שוב ושוב על "להעביר לעמותה" בלי לענות.
+- לא ממציא פרטים (יום/שעה/כתובת/מחיר/רב). אם שואלים — "העמותה תחזור עם כל הפרטים לתיאום".
+- אין אצלנו "מייל/וואטסאפ/טופס/קישור" בשיחה הזאת. רק שהעמותה תחזור אליו/אליה בשיחה טלפונית.
 - אם מבקשים להסיר/לא להתקשר: לאשר מיד, לסמן הסרה, ולסיים בנימוס.
 - אחרי שהלקוח אמר "כן/מעוניין": לא נפרדים ולא אומרים "בשמחה יום טוב". עוברים לקידום וסגירה.
 - בכל תשובה, תסיים בשאלה שמקדמת את המטרה (אישור להעברת פרטים / זמן נוח לחזרה).
 
 אסטרטגיית מכירה (לא תסריט — היגיון):
-- אם יש עניין → סגירה: "מעולה, להעביר את הפרטים שלך ${handoffToPhrase} שיחזרו ${toYou} ${handoffFromPhrase} עם כל הפרטים?"
+- אם יש עניין → סגירה: "מעולה, להעביר את הפרטים שלך לעמותה שיחזרו ${toYou} עם כל הפרטים?"
 - אם יש שאלה → תשובה קצרה ואז שוב סגירה.
 - אם יש התנגדות ("אין זמן"/"לא דתי") → משפט אחד מרגיע + שוב סגירה.
 - אם "לא" חד → ניסיון קצר אחד בלבד (לא ללחוץ), ואז סיום.
-- אם כבר יש אישור מפורש להעביר פרטים → תגיד "מעולה, מעביר ${handoffToPhrase}" ואז תשאל: "יש עוד משהו שאפשר לעזור?".
+- אם כבר יש אישור מפורש להעביר פרטים → תגיד "מעולה, מעביר לעמותה" ואז תשאל: "יש עוד משהו שאפשר לעזור?".
 - אחרי שהלקוח אמר "אין/לא" בשלב הזה → להיפרד יפה ולסיים.
 
 ידע/מידע שימושי (עובדות ותשובות קצרות בלבד):
