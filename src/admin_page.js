@@ -192,12 +192,13 @@ export function renderAdminPage() {
                     <th>פעולות</th>
                     <th>שם רשימה</th>
                     <th>סה״כ</th>
-                    <th>נותר</th>
-                    <th>התקשרנו</th>
+                    <th>בוצע</th>
+                    <th>לא בוצע</th>
+                    <th>שגוי</th>
                     <th>אין מענה</th>
                     <th>לא זמין</th>
-                    <th>ניתוק &lt;5ש׳</th>
-                    <th>מעוניין</th>
+                    <th>בוצע + ניתוק</th>
+                    <th>בוצע + התקדם</th>
                     <th>לא מעוניין</th>
                   </tr>
                 </thead>
@@ -339,15 +340,15 @@ export function renderAdminPage() {
 
           <div style="height:12px;"></div>
           <h3 style="margin:0 0 8px; font-size:14px;">מי חוזר ללקוח (White‑label)</h3>
-          <p class="status" style="margin-top:0;">כאן מגדירים את הניסוח של החזרה אל הלקוח. לדוגמה: לעמותה/מהעמותה, לעסק/מהעסק.</p>
+          <p class="status" style="margin-top:0;">כאן מגדירים את הניסוח של החזרה אל הלקוח (White‑label). לדוגמה: לצוות/מהצוות, למוקד/מהמוקד, לנציגה/מנציגה.</p>
           <div class="row" style="gap:12px; align-items:flex-start;">
             <div style="flex:1; min-width:240px;">
               <label style="margin-top:0;">ניסוח “העברתי …”</label>
-              <input id="handoffToPhrase" placeholder='למשל: לעמותה / לעסק / לבעל העסק' />
+              <input id="handoffToPhrase" placeholder='למשל: לצוות / למוקד / לנציגה' />
             </div>
             <div style="flex:1; min-width:240px;">
               <label style="margin-top:0;">ניסוח “יחזרו …”</label>
-              <input id="handoffFromPhrase" placeholder='למשל: מהעמותה / מהעסק / מבעל העסק' />
+              <input id="handoffFromPhrase" placeholder='למשל: מהצוות / מהמוקד / מנציגה' />
             </div>
           </div>
 
@@ -517,8 +518,8 @@ export function renderAdminPage() {
           $("knowledgeBase").value = data.knowledgeBase || "";
           $("openingScriptMale").value = data.openingScriptMale || "";
           $("openingScriptFemale").value = data.openingScriptFemale || "";
-          if($("handoffToPhrase")) $("handoffToPhrase").value = data.handoffToPhrase || "לעמותה";
-          if($("handoffFromPhrase")) $("handoffFromPhrase").value = data.handoffFromPhrase || "מהעמותה";
+          if($("handoffToPhrase")) $("handoffToPhrase").value = data.handoffToPhrase || "לצוות";
+          if($("handoffFromPhrase")) $("handoffFromPhrase").value = data.handoffFromPhrase || "מהצוות";
           if($("campaignMode")) $("campaignMode").value = data.campaignMode || "handoff";
           if($("femaleOnly")) $("femaleOnly").checked = !!data.femaleOnly;
           if($("minParticipants")) $("minParticipants").value = data.minParticipants ?? 15;
@@ -1029,6 +1030,9 @@ export function renderAdminPage() {
                 '<button class="secondary" data-rename-list="' +
                 String(r.id) +
                 '" style="padding:6px 10px;">ערוך</button> ' +
+                '<button class="secondary" data-export-list="' +
+                String(r.id) +
+                '" style="padding:6px 10px;">הורד</button> ' +
                 '<button class="secondary" data-delete-list="' +
                 String(r.id) +
                 '" style="padding:6px 10px; border-color: rgba(179,38,38,.35);">מחק</button>' +
@@ -1040,10 +1044,13 @@ export function renderAdminPage() {
                 (s.total ?? 0) +
                 "</td>" +
                 "<td>" +
+                (s.called ?? 0) +
+                "</td>" +
+                "<td>" +
                 (s.remaining ?? 0) +
                 "</td>" +
                 "<td>" +
-                (s.called ?? 0) +
+                (s.failed ?? 0) +
                 "</td>" +
                 "<td>" +
                 (s.noAnswer ?? 0) +
@@ -1087,6 +1094,28 @@ export function renderAdminPage() {
             if($("listSelect") && String($("listSelect").value || "0") === String(id)) $("listSelect").value = "0";
             await loadLists();
             await loadContacts();
+          }));
+
+          tb.querySelectorAll("[data-export-list]").forEach(btn => btn.addEventListener("click", async (e) => {
+            const id = Number(e.currentTarget.getAttribute("data-export-list") || "0");
+            if(!id) return;
+            const help =
+              "בחר סוג להורדה (כתוב בדיוק אחד מאלה):\n" +
+              "- all\n" +
+              "- no_answer\n" +
+              "- not_available\n" +
+              "- completed_disconnected\n" +
+              "- completed_progressed\n" +
+              "- not_completed\n" +
+              "- erroneous";
+            const bucket = (prompt(help, "all") || "all").trim();
+            if(!bucket) return;
+            // Trigger download
+            window.location.href =
+              "/api/contact-lists/export.csv?listId=" +
+              encodeURIComponent(String(id)) +
+              "&bucket=" +
+              encodeURIComponent(bucket);
           }));
         }
       }

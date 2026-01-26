@@ -40,7 +40,8 @@ import {
   listContactsByList,
   renameContactList,
   deleteContactList,
-  computeListStats
+  computeListStats,
+  listContactsForListExport
 } from "./db.js";
 import { buildSystemPrompt, buildGreeting, buildSalesAgentSystemPrompt } from "./prompts.js";
 import { buildPlayAndHangup, buildRecordTwiML, buildSayAndHangup } from "./twiml.js";
@@ -49,6 +50,100 @@ import { renderAdminPage } from "./admin_page.js";
 import { normalizePhoneE164IL } from "./phone.js";
 
 const PORT = Number(process.env.PORT || 3000);
+// Admin UI protection (Basic Auth)
+// NOTE: keep Twilio webhooks (/twilio/*) and WS upgrade endpoints public, otherwise calls break.
+const ADMIN_USER = String(process.env.ADMIN_USER || "admin");
+// User requested password: amota1122. Prefer setting ADMIN_PASSWORD in Render env.
+const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || "amota1122");
+
+// Twilio webhook security: validate X-Twilio-Signature for /twilio/* endpoints.
+// Modes:
+// - off: do nothing
+// - warn: log failures but still allow (safe default to avoid breaking deploys due to URL mismatch)
+// - block: reject invalid signatures with 403
+const TWILIO_SIGNATURE_MODE = String(process.env.TWILIO_SIGNATURE_MODE || "warn").trim().toLowerCase();
+
+function unauthorizedBasic(res) {
+  res.setHeader("WWW-Authenticate", 'Basic realm="Admin", charset="UTF-8"');
+  res.status(401).send("Authentication required");
+}
+
+function safeEq(a, b) {
+  const aa = Buffer.from(String(a || ""), "utf8");
+  const bb = Buffer.from(String(b || ""), "utf8");
+  // timingSafeEqual requires equal length; compare lengths first, then constant-time compare.
+  if (aa.length !== bb.length) return false;
+  return crypto.timingSafeEqual(aa, bb);
+}
+
+function adminAuth(req, res, next) {
+  // If password is empty/disabled, allow (but default is enabled).
+  if (!ADMIN_PASSWORD) return next();
+
+  const auth = String(req.headers.authorization || "");
+  if (!auth.startsWith("Basic ")) return unauthorizedBasic(res);
+  const b64 = auth.slice("Basic ".length).trim();
+  let decoded = "";
+  try {
+    decoded = Buffer.from(b64, "base64").toString("utf8");
+  } catch {
+    return unauthorizedBasic(res);
+  }
+  const idx = decoded.indexOf(":");
+  const user = idx >= 0 ? decoded.slice(0, idx) : decoded;
+  const pass = idx >= 0 ? decoded.slice(idx + 1) : "";
+
+  // constant-time check for both fields where possible
+  if (user !== ADMIN_USER) return unauthorizedBasic(res);
+  if (!safeEq(pass, ADMIN_PASSWORD)) return unauthorizedBasic(res);
+  return next();
+}
+
+function twilioSignatureUrlForReq(req) {
+  // Twilio computes the signature over the full URL (scheme+host+path).
+  // Behind proxies, req.protocol may be "http" even if the public URL is https,
+  // so we prefer PUBLIC_BASE_URL / VOICE_WEBHOOK_URL logic already used elsewhere.
+  const base = String(publicBaseUrlFromEnv?.() || "").trim().replace(/\/$/, "");
+  const pathOnly = String(req.originalUrl || req.url || "").split("?")[0] || "";
+  if (base) return `${base}${pathOnly}`;
+  // Fallback (best-effort): derive from request host/proto.
+  const proto = (req.headers["x-forwarded-proto"] || req.protocol || "https").toString().split(",")[0].trim();
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").toString().split(",")[0].trim();
+  return host ? `${proto}://${host}${pathOnly}` : pathOnly;
+}
+
+function twilioAuth(req, res, next) {
+  if (TWILIO_SIGNATURE_MODE === "off") return next();
+  // Only validate if we have credentials.
+  if (!process.env.TWILIO_AUTH_TOKEN) return next();
+
+  const sig = String(req.headers["x-twilio-signature"] || "").trim();
+  if (!sig) {
+    if (TWILIO_SIGNATURE_MODE === "block") return res.status(403).type("text/plain").send("missing signature");
+    console.warn("Twilio signature missing for", req.method, req.originalUrl);
+    return next();
+  }
+
+  const url = twilioSignatureUrlForReq(req);
+  // Twilio validateRequest expects the POST params as an object; for GET it's the query params.
+  const params = req.method === "GET" ? (req.query || {}) : (req.body || {});
+  let ok = false;
+  try {
+    ok = twilio.validateRequest(process.env.TWILIO_AUTH_TOKEN, sig, url, params);
+  } catch (e) {
+    ok = false;
+  }
+
+  if (ok) return next();
+
+  const msg = `invalid signature (mode=${TWILIO_SIGNATURE_MODE}) url=${url}`;
+  if (TWILIO_SIGNATURE_MODE === "block") {
+    console.warn("Blocked Twilio request:", msg);
+    return res.status(403).type("text/plain").send("invalid signature");
+  }
+  console.warn("Twilio signature warning:", msg);
+  return next();
+}
 
 function normalizeOpenAIModel(raw) {
   const s = String(raw || "").trim();
@@ -1265,6 +1360,13 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: "2mb" }));
 
+// Protect Admin UI + Admin APIs
+app.use("/admin", adminAuth);
+app.use("/api", adminAuth);
+
+// Protect Twilio webhooks (do NOT protect /twilio/mediastream WS here; handled in upgrade hook)
+app.use("/twilio", twilioAuth);
+
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 // קבצי TTS (אם משתמשים ב-ElevenLabs)
@@ -1311,8 +1413,9 @@ const DEFAULT_KNOWLEDGE_BASE = `
 // Default openers (generic). Admin can override; keep defaults consistent with agent voice persona.
 function defaultOpeningForCallee(calleePersona) {
   const verb = AGENT_VOICE_PERSONA === "female" ? "מדברת" : "מדבר";
-  if (calleePersona === "female") return `שלום יקרה, ${verb} בנוגע להצעה קצרה—יש לך דקה?`;
-  return `שלום אחי, ${verb} בנוגע להצעה קצרה—יש לך דקה?`;
+  // Requirement: opening paragraph must mention "ללא עלות".
+  if (calleePersona === "female") return `שלום יקרה, ${verb} בנוגע להצעה קצרה ללא עלות—יש לך דקה?`;
+  return `שלום אחי, ${verb} בנוגע להצעה קצרה ללא עלות—יש לך דקה?`;
 }
 const DEFAULT_OPENING_MALE = defaultOpeningForCallee("male");
 const DEFAULT_OPENING_FEMALE = defaultOpeningForCallee("female");
@@ -3317,6 +3420,83 @@ app.post("/api/contact-lists/delete", (req, res) => {
   res.json({ ok: true, result });
 });
 
+// Export list details as CSV (per-bucket breakdown for admin)
+app.get("/api/contact-lists/export.csv", (req, res) => {
+  const listId = Number(req.query.listId || 0);
+  const bucket = String(req.query.bucket || "all").trim().toLowerCase() || "all";
+  const allowed = new Set([
+    "all",
+    "no_answer",
+    "not_available",
+    "completed_disconnected",
+    "completed_progressed",
+    "not_completed",
+    "erroneous"
+  ]);
+  if (!listId) return res.status(400).type("text/plain").send("missing listId");
+  if (!allowed.has(bucket)) return res.status(400).type("text/plain").send("invalid bucket");
+
+  const list = db.prepare(`SELECT id, name FROM contact_lists WHERE id = ?`).get(listId);
+  if (!list) return res.status(404).type("text/plain").send("list not found");
+
+  const rows = listContactsForListExport(db, { listId, bucket }) || [];
+
+  const csvEscape = (v) => {
+    const s = String(v ?? "");
+    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+
+  const header = [
+    "list_id",
+    "list_name",
+    "phone",
+    "first_name",
+    "gender",
+    "do_not_call",
+    "dial_status",
+    "dial_attempts",
+    "last_dial_at",
+    "last_dial_error",
+    "last_call_status",
+    "last_call_duration",
+    "last_call_at",
+    "lead_status",
+    "lead_updated_at"
+  ];
+
+  const lines = [];
+  lines.push(header.join(","));
+  for (const r of rows) {
+    const line = [
+      list.id,
+      list.name,
+      r.phone,
+      r.first_name,
+      r.gender,
+      r.do_not_call,
+      r.dial_status,
+      r.dial_attempts,
+      r.last_dial_at,
+      r.last_dial_error,
+      r.last_call_status,
+      r.last_call_duration,
+      r.last_call_at,
+      r.lead_status,
+      r.lead_updated_at
+    ]
+      .map(csvEscape)
+      .join(",");
+    lines.push(line);
+  }
+
+  const filename = `list-${String(list.id)}-${bucket}.csv`;
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  // UTF-8 BOM helps Excel open Hebrew correctly.
+  res.send("\uFEFF" + lines.join("\n"));
+});
+
 // Leads (waiting/not_interested)
 app.get("/api/leads/list", (req, res) => {
   const status = String(req.query.status || "all");
@@ -4109,12 +4289,12 @@ async function runDialerOnce() {
     // Business hours gate (Israel time)
     if (!dialerIsAllowedDay()) return;
     if (!dialerIsWithinBusinessHours()) return;
-    if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM_NUMBER) return;
-    const voiceBase = String(process.env.VOICE_WEBHOOK_URL || "").trim().replace(/\/$/, "");
-    if (!voiceBase) return;
-    const callUrl = `${voiceBase}/twilio/voice`;
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM_NUMBER) return;
+  const voiceBase = String(process.env.VOICE_WEBHOOK_URL || "").trim().replace(/\/$/, "");
+  if (!voiceBase) return;
+  const callUrl = `${voiceBase}/twilio/voice`;
 
-    const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
     const concurrency = Math.max(1, Math.min(50, Number(autoDialBatchSize) || 1));
     const batch = fetchNextContactsToDial(db, concurrency);
 
@@ -4132,20 +4312,20 @@ async function runDialerOnce() {
           }
         } catch {}
 
-        queueContactForDial(db, c.phone);
-        await client.calls.create({
-          to: c.phone,
-          from: process.env.TWILIO_FROM_NUMBER,
-          url: callUrl,
+      queueContactForDial(db, c.phone);
+      await client.calls.create({
+        to: c.phone,
+        from: process.env.TWILIO_FROM_NUMBER,
+        url: callUrl,
           method: "POST",
           statusCallback: `${publicBaseUrlFromEnv()}/twilio/status`,
           statusCallbackMethod: "POST",
           statusCallbackEvent: ["initiated", "ringing", "answered", "completed"]
-        });
-        markDialResult(db, c.phone, { status: "called" });
-      } catch (e) {
-        markDialResult(db, c.phone, { status: "failed", error: e?.message || String(e) });
-      }
+      });
+      markDialResult(db, c.phone, { status: "called" });
+    } catch (e) {
+      markDialResult(db, c.phone, { status: "failed", error: e?.message || String(e) });
+    }
     };
 
     // Run the batch with a concurrency cap (batch size == concurrency).
@@ -4697,6 +4877,8 @@ wssMediaStream.on("connection", (ws, req) => {
   let guidedLastQuestionAt = 0;
   let guidedCallbackTime = "";
   let guidedCloseAttempts = 0;
+  /** @type {""|"participants_low"} */
+  let guidedCloseReason = "";
   // One-time safety recheck for suspicious early "not interested" right after greeting.
   let guidedInterestRecheckAsked = false;
   // Google Sheets sync guard (avoid duplicate rows on ws close after explicit outcome)
@@ -4747,6 +4929,38 @@ wssMediaStream.on("connection", (ws, req) => {
   function confirmQuestionText() {
     // No-apology mode: never say "לא שמעתי/לא קלטתי/תחזור".
     return handoffQuestionTextForPersona(persona);
+  }
+
+  function participantsLowCallbackQuestionText() {
+    // Requirement (white-label): no "מהעמותה". Keep it as "נציגה".
+    return persona === "female"
+      ? "אני מבינה.. נציגה שלנו תחזור אלייך ממש בהקדם ותנסה לעזור לך לגבי מספר המשתתפות, היא תוכל גם לשלוח מודעת פרסום יפה שתוכלי להפיץ.. לחזור אלייך למספר זה?"
+      : "אני מבין.. נציגה שלנו תחזור אליך ממש בהקדם ותנסה לעזור לך לגבי מספר המשתתפות, היא תוכל גם לשלוח מודעת פרסום יפה שתוכל להפיץ.. לחזור אליך למספר זה?";
+  }
+
+  function participantsLowConfirmText() {
+    return persona === "female"
+      ? "מעולה יחזרו אלייך למספר הזה יום טוב ובשורות טובות"
+      : "מעולה יחזרו אליך למספר הזה יום טוב ובשורות טובות";
+  }
+
+  function participantsAnswerIndicatesLow(ns, n, minP) {
+    const t = String(ns || "");
+    if (n == null) return false;
+    // If they explicitly negate the number ("אין לי 15", "לא מגיעה ל-15") or say "פחות/מתחת".
+    const neg =
+      t.includes("אין לי") ||
+      t.includes("אין לנו") ||
+      t.includes("לא מגיעה") ||
+      t.includes("לא מגיע") ||
+      t.includes("לא יכולה") ||
+      t.includes("לא יכול") ||
+      t.includes("פחות") ||
+      t.includes("מתחת");
+    if (neg && n <= minP) return true;
+    // "רק 10" is low if below minimum.
+    if (t.includes("רק") && n < minP) return true;
+    return false;
   }
 
   async function sayFinalAndHangup({ text, outcome }) {
@@ -5885,7 +6099,11 @@ wssMediaStream.on("connection", (ws, req) => {
           detectTransferConsent(speech);
         if (yesLike) {
           msLog("guided", { callSid, kind: "handoff_confirm" });
-          await sayFinalAndHangup({ text: handoffConfirmCloseText({ persona }), outcome: "interested" });
+          if (guidedCloseReason === "participants_low") {
+            await sayFinalAndHangup({ text: participantsLowConfirmText(), outcome: "interested" });
+          } else {
+            await sayFinalAndHangup({ text: handoffConfirmCloseText({ persona }), outcome: "interested" });
+          }
           return;
         }
         // If user didn't confirm, do NOT hang up immediately (they may be asking questions).
@@ -6163,6 +6381,7 @@ wssMediaStream.on("connection", (ws, req) => {
         if (n == null && looksLikeUnknownAnswer(ns)) {
           msLog("guided", { callSid, kind: "participants_unknown", n: null });
           guidedStep = "CLOSE";
+          guidedCloseReason = "";
           const t = limitPhoneReply(flowText.FLOW_PARTICIPANTS_LOW_FALLBACK, 200);
           const q = handoffQuestionText();
           const msg = limitPhoneReply(`${t} ${q}`.trim(), 240);
@@ -6179,6 +6398,7 @@ wssMediaStream.on("connection", (ws, req) => {
           if (guidedParticipantsBadCount >= 2) {
             msLog("guided", { callSid, kind: "participants_unclear_fallback", attempts: guidedParticipantsBadCount });
             guidedStep = "CLOSE";
+            guidedCloseReason = "";
             const t = limitPhoneReply(
               flowText.FLOW_PARTICIPANTS_UNCLEAR_FALLBACK || "לא הצלחתי להבין את מספר המשתתפות. נציגה תחזור אלייך בהקדם עם כל הפרטים.",
               200
@@ -6198,10 +6418,13 @@ wssMediaStream.on("connection", (ws, req) => {
           await sayText(q0, { label: "reply" });
           return;
         }
-        if (n != null && n >= minParticipants) {
+        // If caller says "אין לי 15" / "פחות מ-15" we must treat it as low, even if a number was extracted.
+        const lowByWording = participantsAnswerIndicatesLow(ns, n, minParticipants);
+        if (n != null && n >= minParticipants && !lowByWording) {
           msLog("guided", { callSid, kind: "participants_ok", n });
           // Ask handoff question (rep will call back)
           guidedStep = "CLOSE";
+          guidedCloseReason = "";
           const ack = limitPhoneReply(flowText.FLOW_ACK_PARTICIPANTS || flowText.FLOW_ACK_GENERAL || "", 40);
           const q = limitPhoneReply(prependAckOnce(ack, handoffQuestionText()), 220);
           try {
@@ -6211,10 +6434,11 @@ wssMediaStream.on("connection", (ws, req) => {
           return;
         }
         msLog("guided", { callSid, kind: "participants_low_or_unknown", n });
-        guidedStep = "PARTICIPANTS_PERSUADE";
-        participantsPersuadeAsked = true;
-        guidedPersuadeBadCount = 0;
-        const q = limitPhoneReply(flowText.FLOW_PARTICIPANTS_LOW, 200);
+        // Requirement: don't go deep on the 15-participant limit. Transfer quickly to a representative.
+        guidedStep = "CLOSE";
+        guidedCloseReason = "participants_low";
+        guidedCloseAttempts = 0;
+        const q = limitPhoneReply(participantsLowCallbackQuestionText(), 320);
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q });
         } catch {}
@@ -6945,6 +7169,36 @@ server.on("upgrade", (req, socket, head) => {
   let pathname = rawUrl;
   try {
     pathname = new URL(rawUrl, "http://localhost").pathname;
+  } catch {}
+
+  // Optional Twilio signature validation for WS upgrade endpoints.
+  // Some Twilio WS clients do not send X-Twilio-Signature; we default to warn to avoid breakage.
+  try {
+    if (
+      (pathname === "/twilio/conversationrelay" || pathname === "/twilio/mediastream") &&
+      TWILIO_SIGNATURE_MODE !== "off" &&
+      process.env.TWILIO_AUTH_TOKEN
+    ) {
+      const sig = String(req?.headers?.["x-twilio-signature"] || "").trim();
+      const url = twilioSignatureUrlForReq({ ...req, originalUrl: pathname });
+      let ok = false;
+      if (sig) {
+        try {
+          ok = twilio.validateRequest(process.env.TWILIO_AUTH_TOKEN, sig, url, {});
+        } catch {}
+      }
+      if (!sig || !ok) {
+        const msg = `ws invalid/missing signature (mode=${TWILIO_SIGNATURE_MODE}) url=${url}`;
+        if (TWILIO_SIGNATURE_MODE === "block") {
+          console.warn("Blocked Twilio WS upgrade:", msg);
+          try {
+            socket.destroy();
+          } catch {}
+          return;
+        }
+        console.warn("Twilio WS signature warning:", msg);
+      }
+    }
   } catch {}
 
   // Logging (helps debug when Twilio can't connect)
