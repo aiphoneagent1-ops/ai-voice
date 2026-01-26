@@ -504,15 +504,10 @@ export function renderAdminPage() {
         window.__toastTimer = setTimeout(() => { t.style.display = "none"; }, 3200);
       }
       async function api(path, opts){
-        const res = await fetch(path, { credentials: "same-origin", ...(opts || {}) });
+        const res = await fetch(path, opts);
         const text = await res.text();
         let json = null;
         try { json = JSON.parse(text); } catch {}
-        if(res.status === 401){
-          // Session expired / not authenticated → go back to /admin (login page)
-          window.location.href = "/admin";
-          throw new Error("auth_required");
-        }
         if(!res.ok) throw new Error(json?.error || text || ("HTTP " + res.status));
         return json ?? text;
       }
