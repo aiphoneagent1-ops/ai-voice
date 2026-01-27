@@ -223,6 +223,47 @@ if (!IS_RENDER && process.platform === "darwin" && (RAW_DATA_DIR === "/var/data"
       "If you want to override: set DATA_DIR=./data (or any writable path)."
   );
 }
+
+// Render persistence guard:
+// If you don't mount a persistent disk to /var/data, your SQLite DB (and thus Admin settings, contacts, etc.)
+// can reset on deploy or restart. We warn loudly, and you can optionally force a crash to prevent silent data loss.
+const REQUIRE_PERSISTENT_DISK = String(process.env.REQUIRE_PERSISTENT_DISK || "").trim() === "1";
+if (IS_RENDER && !String(DB_PATH || "").startsWith("/var/data")) {
+  const msg =
+    "[config] Render detected but DB_PATH is not under /var/data. " +
+    "Your SQLite DB may reset on deploy/restart. Attach a persistent disk and set DATA_DIR=/var/data (or DB_PATH=/var/data/app.db). " +
+    `Current DB_PATH=${DB_PATH}`;
+  if (REQUIRE_PERSISTENT_DISK) {
+    // Fail fast instead of silently losing data.
+    throw new Error(msg);
+  } else {
+    console.warn(msg);
+  }
+}
+
+// Backup of admin settings to persistent disk (best-effort).
+// This protects against accidental clears and helps recover from DB resets when a disk exists.
+const ADMIN_SETTINGS_BACKUP_PATH = path.resolve(DATA_DIR, "admin-settings-backup.json");
+function readAdminSettingsBackup() {
+  try {
+    if (!fs.existsSync(ADMIN_SETTINGS_BACKUP_PATH)) return null;
+    const raw = fs.readFileSync(ADMIN_SETTINGS_BACKUP_PATH, "utf8");
+    const j = JSON.parse(raw);
+    return j && typeof j === "object" ? j : null;
+  } catch {
+    return null;
+  }
+}
+function writeAdminSettingsBackup(payload) {
+  try {
+    const tmp = `${ADMIN_SETTINGS_BACKUP_PATH}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
+    fs.renameSync(tmp, ADMIN_SETTINGS_BACKUP_PATH);
+    return true;
+  } catch {
+    return false;
+  }
+}
 // Default to a high-quality model. You can override via OPENAI_MODEL in env.
 // IMPORTANT: normalize common human-entered values (e.g. "GPT-5.2 Mini") → valid model id.
 const OPENAI_MODEL = normalizeOpenAIModel(process.env.OPENAI_MODEL || "gpt-4.1") || "gpt-4.1";
@@ -1412,6 +1453,45 @@ appendIfMissing("middleScriptFemale", {
   snippet:
     `דוגמאות תשובה (להחליף למה שמתאים לקמפיין):\n- "בגדול זה [תיאור קצר]. רוצה שיחזרו אלייך עם פרטים מסודרים?"\n- "אין לי פה את כל הפרטים המדויקים, יחזרו אלייך לתיאום."`
 });
+
+// Auto-restore from disk backup if DB got reset (or keys were cleared) and a backup exists.
+// We only restore if the current stored values are empty.
+try {
+  const backup = readAdminSettingsBackup();
+  if (backup && typeof backup === "object") {
+    const curKb = String(getSetting(db, "knowledgeBase", "") || "").trim();
+    const curOpenM = String(getSetting(db, "openingScriptMale", "") || "").trim();
+    const curOpenF = String(getSetting(db, "openingScriptFemale", "") || "").trim();
+    if (!curKb && backup.knowledgeBase) setSetting(db, "knowledgeBase", String(backup.knowledgeBase));
+    if (!curOpenM && backup.openingScriptMale) setSetting(db, "openingScriptMale", String(backup.openingScriptMale));
+    if (!curOpenF && backup.openingScriptFemale) setSetting(db, "openingScriptFemale", String(backup.openingScriptFemale));
+    if (!String(getSetting(db, "handoffToPhrase", "") || "").trim() && backup.handoffToPhrase)
+      setSetting(db, "handoffToPhrase", String(backup.handoffToPhrase));
+    if (!String(getSetting(db, "handoffFromPhrase", "") || "").trim() && backup.handoffFromPhrase)
+      setSetting(db, "handoffFromPhrase", String(backup.handoffFromPhrase));
+    if (!String(getSetting(db, "campaignMode", "") || "").trim() && backup.campaignMode)
+      setSetting(db, "campaignMode", String(backup.campaignMode));
+    if (getSetting(db, "femaleOnly", null) == null && backup.femaleOnly != null) setSetting(db, "femaleOnly", !!backup.femaleOnly);
+    if (getSetting(db, "minParticipants", null) == null && backup.minParticipants != null)
+      setSetting(db, "minParticipants", Math.max(1, Math.min(200, Number(backup.minParticipants) || 15)));
+    if (getSetting(db, "cooldownMonths", null) == null && backup.cooldownMonths != null)
+      setSetting(db, "cooldownMonths", Math.max(0, Math.min(60, Number(backup.cooldownMonths) || 6)));
+    if (getSetting(db, "autoDialEnabled", null) == null && backup.autoDialEnabled != null)
+      setSetting(db, "autoDialEnabled", !!backup.autoDialEnabled);
+    if (getSetting(db, "autoDialBatchSize", null) == null && backup.autoDialBatchSize != null)
+      setSetting(db, "autoDialBatchSize", Math.max(1, Math.min(50, Number(backup.autoDialBatchSize) || 5)));
+    if (getSetting(db, "autoDialIntervalSeconds", null) == null && backup.autoDialIntervalSeconds != null)
+      setSetting(db, "autoDialIntervalSeconds", Math.max(5, Math.min(3600, Number(backup.autoDialIntervalSeconds) || 300)));
+    if (getSetting(db, "autoDialHoursEnabled", null) == null && backup.autoDialHoursEnabled != null)
+      setSetting(db, "autoDialHoursEnabled", !!backup.autoDialHoursEnabled);
+    if (!String(getSetting(db, "autoDialStartTime", "") || "").trim() && backup.autoDialStartTime)
+      setSetting(db, "autoDialStartTime", String(backup.autoDialStartTime));
+    if (!String(getSetting(db, "autoDialEndTime", "") || "").trim() && backup.autoDialEndTime)
+      setSetting(db, "autoDialEndTime", String(backup.autoDialEndTime));
+    if (getSetting(db, "autoDialSkipFriSat", null) == null && backup.autoDialSkipFriSat != null)
+      setSetting(db, "autoDialSkipFriSat", !!backup.autoDialSkipFriSat);
+  }
+} catch {}
 
 function normalizePhone(raw) {
   if (!raw) return "";
@@ -2943,7 +3023,29 @@ app.post("/api/admin/settings", (req, res) => {
     femaleOnly = undefined,
     minParticipants = undefined,
     cooldownMonths = undefined
+    ,
+    // Safety: prevent accidental wipe of KB/scripts unless explicitly confirmed
+    forceClear = false
   } = req.body || {};
+
+  // Guard against accidental wiping of content (common after a DB reset + user hits "שמור").
+  const wantForce = forceClear === true || String(forceClear || "").trim().toUpperCase() === "CLEAR";
+  const prev = settingsSnapshot();
+  const nextKb = String(knowledgeBase ?? "").trim();
+  const nextOpenM = String(openingScriptMale ?? "").trim();
+  const nextOpenF = String(openingScriptFemale ?? "").trim();
+  if (!wantForce) {
+    if (String(prev.knowledgeBase || "").trim() && !nextKb) {
+      return res.status(400).json({ ok: false, error: "refusing_to_clear_knowledgeBase_without_forceClear" });
+    }
+    if (String(prev.openingScriptMale || "").trim() && !nextOpenM) {
+      return res.status(400).json({ ok: false, error: "refusing_to_clear_openingScriptMale_without_forceClear" });
+    }
+    if (String(prev.openingScriptFemale || "").trim() && !nextOpenF) {
+      return res.status(400).json({ ok: false, error: "refusing_to_clear_openingScriptFemale_without_forceClear" });
+    }
+  }
+
   setSetting(db, "knowledgeBase", String(knowledgeBase));
   setSetting(db, "openingScript", String(openingScript));
   setSetting(db, "middleScript", String(middleScript));
@@ -2969,6 +3071,11 @@ app.post("/api/admin/settings", (req, res) => {
     if (gMale) prefetchUlaw({ text: gMale, persona: AGENT_VOICE_PERSONA }).catch(() => {});
     if (gFemale) prefetchUlaw({ text: gFemale, persona: AGENT_VOICE_PERSONA }).catch(() => {});
     // NOTE: we no longer prefetch a "greeting filler" clip. We want the real greeting to be ready before dialing.
+  } catch {}
+  // Best-effort backup to disk (if persistent disk exists, this survives restarts/deploys).
+  try {
+    const snap = settingsSnapshot();
+    writeAdminSettingsBackup({ ...snap, backedUpAt: new Date().toISOString() });
   } catch {}
   res.json({ ok: true });
 });
