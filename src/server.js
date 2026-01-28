@@ -1414,6 +1414,8 @@ function renderLoginPage({ error = "" } = {}) {
       label{display:block;font-size:12px;opacity:.85;margin:10px 0 6px}
       input{width:100%;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.18);color:#fff;outline:none}
       input:focus{border-color:rgba(109,140,255,.7);box-shadow:0 0 0 4px rgba(109,140,255,.15)}
+      /* Force LTR typing for credentials (avoid RTL flip). */
+      input.ltr{ direction:ltr; text-align:left; unicode-bidi: plaintext; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
       button{width:100%;margin-top:14px;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(109,140,255,.25);color:#fff;cursor:pointer}
       .err{margin-top:10px;color:#ff9aa2;font-size:12px;white-space:pre-wrap}
     </style>
@@ -1423,9 +1425,9 @@ function renderLoginPage({ error = "" } = {}) {
       <h1>התחברות</h1>
       <div class="sub">הזן שם משתמש וסיסמה כדי להיכנס לממשק הניהול.</div>
       <label>שם משתמש</label>
-      <input name="username" placeholder="admin" />
+      <input class="ltr" dir="ltr" lang="en" inputmode="latin" autocapitalize="off" autocomplete="username" spellcheck="false" name="username" placeholder="admin" />
       <label>סיסמה</label>
-      <input name="password" type="password" placeholder="••••••••" />
+      <input class="ltr" dir="ltr" lang="en" inputmode="latin" autocapitalize="off" autocomplete="current-password" spellcheck="false" name="password" type="password" placeholder="admin$$" />
       <button type="submit">כניסה</button>
       ${safeErr ? `<div class="err">${escapeXmlText(safeErr)}</div>` : ""}
     </form>
