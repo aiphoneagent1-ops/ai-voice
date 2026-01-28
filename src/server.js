@@ -1311,6 +1311,52 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: "2mb" }));
 
+// ---------------------------
+// Admin Basic Auth (protect /admin + /api)
+// ---------------------------
+// Requirement: visiting https://.../admin must prompt for credentials.
+// Use HTTP Basic Auth so the browser prompts before rendering the page.
+const ADMIN_USER = "admin";
+const ADMIN_PASS = "admin$$";
+
+function safeEqual(a, b) {
+  const aa = Buffer.from(String(a ?? ""), "utf8");
+  const bb = Buffer.from(String(b ?? ""), "utf8");
+  if (aa.length !== bb.length) return false;
+  return crypto.timingSafeEqual(aa, bb);
+}
+
+function parseBasicAuth(header) {
+  const h = String(header || "");
+  if (!h.startsWith("Basic ")) return null;
+  const b64 = h.slice("Basic ".length).trim();
+  if (!b64) return null;
+  let decoded = "";
+  try {
+    decoded = Buffer.from(b64, "base64").toString("utf8");
+  } catch {
+    return null;
+  }
+  const idx = decoded.indexOf(":");
+  if (idx < 0) return null;
+  return { user: decoded.slice(0, idx), pass: decoded.slice(idx + 1) };
+}
+
+function requireAdminAuth(req, res, next) {
+  const p = String(req.path || "");
+  const needsAuth = p === "/" || p.startsWith("/admin") || p.startsWith("/api/");
+  if (!needsAuth) return next();
+
+  const creds = parseBasicAuth(req.headers?.authorization);
+  const ok = creds && safeEqual(creds.user, ADMIN_USER) && safeEqual(creds.pass, ADMIN_PASS);
+  if (ok) return next();
+
+  res.setHeader("WWW-Authenticate", 'Basic realm="Admin", charset="UTF-8"');
+  res.status(401).type("text/plain").send("Authentication required");
+}
+
+app.use(requireAdminAuth);
+
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 // קבצי TTS (אם משתמשים ב-ElevenLabs)
