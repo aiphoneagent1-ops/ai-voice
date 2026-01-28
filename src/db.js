@@ -48,6 +48,19 @@ export function openDb({ dbPath }) {
     CREATE INDEX IF NOT EXISTS idx_contact_list_members_list_id ON contact_list_members(list_id);
     CREATE INDEX IF NOT EXISTS idx_contact_list_members_phone ON contact_list_members(phone);
 
+    -- Import errors per list (invalid phones, parsing issues, etc.)
+    CREATE TABLE IF NOT EXISTS contact_import_errors (
+      id INTEGER PRIMARY KEY,
+      list_id INTEGER NOT NULL,
+      raw_phone TEXT NULL,
+      reason TEXT NULL,
+      row_json TEXT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY(list_id) REFERENCES contact_lists(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contact_import_errors_list_id ON contact_import_errors(list_id);
+
     CREATE TABLE IF NOT EXISTS calls (
       call_sid TEXT PRIMARY KEY,
       phone TEXT NOT NULL,
@@ -147,6 +160,12 @@ export function openDb({ dbPath }) {
     { name: "last_call_status", type: "TEXT NULL" },
     { name: "last_call_duration", type: "INTEGER NULL" },
     { name: "last_call_at", type: "TEXT NULL" }
+  ]);
+
+  // Safety / conversation guard columns (migration)
+  ensureColumns(db, "calls", [
+    { name: "off_topic_strikes", type: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "last_relevant_at", type: "TEXT NULL" }
   ]);
 
   // No default knowledge seeding: controlled from the admin scripts.
@@ -389,6 +408,7 @@ export function deleteContactList(db, { id } = {}) {
   const listId = Number(id || 0);
   if (!listId) return { ok: false };
   const tx = db.transaction(() => {
+    db.prepare(`DELETE FROM contact_import_errors WHERE list_id = ?`).run(listId);
     db.prepare(`DELETE FROM contact_list_members WHERE list_id = ?`).run(listId);
     const info = db.prepare(`DELETE FROM contact_lists WHERE id = ?`).run(listId);
     return Number(info?.changes || 0);
@@ -433,6 +453,51 @@ export function listContactLists(db) {
     .all();
 }
 
+export function addImportErrors(db, { listId, errors } = {}) {
+  const id = Number(listId || 0);
+  const arr = Array.isArray(errors) ? errors : [];
+  if (!id || !arr.length) return { ok: true, added: 0 };
+  const stmt = db.prepare(
+    `INSERT INTO contact_import_errors (list_id, raw_phone, reason, row_json, created_at)
+     VALUES (?, ?, ?, ?, datetime('now'))`
+  );
+  const tx = db.transaction((es) => {
+    let added = 0;
+    for (const e of es) {
+      const rawPhone = e?.rawPhone != null ? String(e.rawPhone).trim() : null;
+      const reason = e?.reason != null ? String(e.reason).trim() : null;
+      let rowJson = null;
+      try {
+        if (e?.row != null) rowJson = JSON.stringify(e.row);
+      } catch {
+        rowJson = null;
+      }
+      stmt.run(id, rawPhone || null, reason || null, rowJson || null);
+      added++;
+    }
+    return added;
+  });
+  const added = tx(arr);
+  return { ok: true, added };
+}
+
+export function listImportErrorsByList(db, { listId, limit = 5000, offset = 0 } = {}) {
+  const id = Number(listId || 0);
+  const lim = Math.max(1, Math.min(50000, Number(limit || 5000)));
+  const off = Math.max(0, Number(offset || 0));
+  if (!id) return { rows: [], limit: lim, offset: off };
+  const rows = db
+    .prepare(
+      `SELECT id, raw_phone AS rawPhone, reason, row_json AS rowJson, created_at AS createdAt
+       FROM contact_import_errors
+       WHERE list_id = ?
+       ORDER BY id ASC
+       LIMIT ? OFFSET ?`
+    )
+    .all(id, lim, off);
+  return { rows, limit: lim, offset: off };
+}
+
 export function listContactsByList(db, { listId, limit = 200, offset = 0 } = {}) {
   const id = Number(listId || 0);
   const lim = Math.max(1, Math.min(1000, Number(limit || 200)));
@@ -462,6 +527,7 @@ export function computeListStats(db, { listId } = {}) {
         COUNT(1) AS total,
         SUM(CASE WHEN c.do_not_call = 1 THEN 1 ELSE 0 END) AS dnc,
         SUM(CASE WHEN c.do_not_call = 0 AND c.dial_status = 'new' THEN 1 ELSE 0 END) AS remaining,
+        SUM(CASE WHEN c.do_not_call = 0 AND c.dial_status = 'queued' THEN 1 ELSE 0 END) AS queued,
         SUM(CASE WHEN c.dial_status = 'called' THEN 1 ELSE 0 END) AS called,
         SUM(CASE WHEN c.dial_status = 'failed' THEN 1 ELSE 0 END) AS failed,
         SUM(CASE WHEN c.last_call_status = 'no-answer' THEN 1 ELSE 0 END) AS noAnswer,
@@ -476,10 +542,39 @@ export function computeListStats(db, { listId } = {}) {
       `
     )
     .get(id);
+  const invalid = db
+    .prepare(`SELECT COUNT(1) AS c FROM contact_import_errors WHERE list_id = ?`)
+    .get(id)?.c;
   // Normalize to numbers
   const out = {};
   for (const [k, v] of Object.entries(row || {})) out[k] = Number(v || 0);
+  out.invalid = Number(invalid || 0);
+  out.notDone = Number(out.remaining || 0) + Number(out.queued || 0);
   return out;
+}
+
+export function getCallOffTopicStrikes(db, callSid) {
+  const sid = String(callSid || "").trim();
+  if (!sid) return 0;
+  const row = db.prepare(`SELECT off_topic_strikes AS s FROM calls WHERE call_sid = ?`).get(sid);
+  return Number(row?.s || 0);
+}
+
+export function incrementCallOffTopicStrikes(db, callSid) {
+  const sid = String(callSid || "").trim();
+  if (!sid) return 0;
+  db.prepare(
+    `UPDATE calls SET off_topic_strikes = COALESCE(off_topic_strikes, 0) + 1, updated_at = datetime('now') WHERE call_sid = ?`
+  ).run(sid);
+  return getCallOffTopicStrikes(db, sid);
+}
+
+export function resetCallOffTopicStrikes(db, callSid) {
+  const sid = String(callSid || "").trim();
+  if (!sid) return;
+  db.prepare(
+    `UPDATE calls SET off_topic_strikes = 0, last_relevant_at = datetime('now'), updated_at = datetime('now') WHERE call_sid = ?`
+  ).run(sid);
 }
 
 export function fetchNextContactsToDial(db, limit = 10) {

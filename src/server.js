@@ -36,11 +36,16 @@ import {
   markDialResult,
   upsertContactList,
   addContactsToList,
+  addImportErrors,
+  listImportErrorsByList,
   listContactLists,
   listContactsByList,
   renameContactList,
   deleteContactList,
-  computeListStats
+  computeListStats,
+  getCallOffTopicStrikes,
+  incrementCallOffTopicStrikes,
+  resetCallOffTopicStrikes
 } from "./db.js";
 import { buildSystemPrompt, buildGreeting, buildSalesAgentSystemPrompt } from "./prompts.js";
 import { buildPlayAndHangup, buildRecordTwiML, buildSayAndHangup } from "./twiml.js";
@@ -1962,6 +1967,179 @@ function detectTransferConsent(text) {
   return patterns.some((p) => t.includes(p));
 }
 
+function containsProfanity(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  // Keep conservative: only hard profanity / harassment triggers immediate hangup.
+  const patterns = [
+    "זונה",
+    "בן זונה",
+    "שרמוט",
+    "כוס",
+    "כוסאמק",
+    "כוס אמא",
+    "כוס אמק",
+    "כוסאמא",
+    "מניאק",
+    "מזדיין",
+    "תזדיין",
+    "תמות",
+    "לך לעזאזל",
+    "fuck",
+    "fucking",
+    "shit"
+  ];
+  return patterns.some((p) => t.includes(p));
+}
+
+function isLikelyRelevantToCampaign(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return true;
+  // Short acknowledgements should never be treated as off-topic.
+  if (t.length <= 5) return true;
+  if (detectAffirmativeShort(t) || detectNotInterested(t) || detectWaitRequest(t) || detectRepeatRequest(t)) return true;
+  // Generic relevance tokens (campaign-agnostic).
+  const keywords = [
+    "תיאום",
+    "לתאם",
+    "תאריך",
+    "מתי",
+    "שעה",
+    "בערב",
+    "יום",
+    "שבוע",
+    "חודש",
+    "אדר",
+    "עברי",
+    "כח",
+    "כ״",
+    "עלות",
+    "מחיר",
+    "כסף",
+    "יקר",
+    "חינם",
+    "בית",
+    "קטן",
+    "מקום",
+    "להזמין",
+    "מוזמנות",
+    "משתתפות",
+    "משתתפים",
+    "נשים",
+    "רבנית",
+    "רב",
+    "שיעור",
+    "תורה"
+  ];
+  return keywords.some((k) => t.includes(k)) || /\d/.test(t);
+}
+
+function isHandoffOrCallbackQuestion(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  // Generic handoff question
+  if (t.includes("רוצה שיחזרו") && t.includes("פרטים")) return true;
+  // Busy/callback specific
+  if (t.includes("זה בסדר") && (t.includes("תחזור") || t.includes("יחזרו"))) return true;
+  if (t.includes("אפשר") && t.includes("נציגה") && (t.includes("תחזור") || t.includes("יחזרו"))) return true;
+  return false;
+}
+
+function detectBusyOrCallLater(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  const patterns = [
+    "עסוק",
+    "עסוקה",
+    "אני עסוק",
+    "אני עסוקה",
+    "לא יכולה עכשיו",
+    "לא יכול עכשיו",
+    "אין לי זמן",
+    "תתקשרי אחר כך",
+    "תתקשר אחר כך",
+    "תחזרו אחר כך",
+    "תחזרי אחר כך",
+    "אחכ",
+    "עוד מעט",
+    "אחרי זה",
+    "בעוד",
+    "אני בנהיגה",
+    "אני בפגישה"
+  ];
+  return patterns.some((p) => t.includes(p));
+}
+
+function detectHebrewDateQuestion(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  // e.g. "כ\"ב באדר", "בתאריך עברי", "אדר"
+  const hasHebrewDate =
+    t.includes("תאריך עברי") ||
+    t.includes("לפי תאריך עברי") ||
+    t.includes("באדר") ||
+    t.includes("אדר") ||
+    t.includes("כ״ב") ||
+    t.includes('כ"ב') ||
+    t.includes("כב באדר");
+  return hasHebrewDate && (t.includes("אפשר") || t.includes("יכולות") || t.includes("אפשרי") || t.includes("לקיים") || t.includes("לעשות"));
+}
+
+function detectHouseSmall(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  return (t.includes("בית") && (t.includes("קטן") || t.includes("אין מקום") || t.includes("צפוף"))) || t.includes("הבית שלי קטן");
+}
+
+function detectNoMoney(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  return (
+    t.includes("אין לי כסף") ||
+    t.includes("יקר לי") ||
+    t.includes("יקר") ||
+    t.includes("לא יכולה להרשות") ||
+    t.includes("לא יכול להרשות") ||
+    (t.includes("אין לי") && t.includes("תקציב"))
+  );
+}
+
+function detectWillCallBack(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  return (
+    t.includes("אני אחזור") ||
+    t.includes("אני יחזור") ||
+    t.includes("אני אבדוק") ||
+    t.includes("אבדוק") ||
+    t.includes("ואחזור") ||
+    t.includes("ואחזור אליכם") ||
+    t.includes("ואחזור אליך") ||
+    t.includes("ואחזור אלייך")
+  );
+}
+
+function detectTimeOfEveningQuestion(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  return t.includes("איזה שעה") || t.includes("באיזה שעה") || t.includes("מתי בערב") || t.includes("שעה בערב");
+}
+
+function detectParticipantsConcern(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  return (
+    (t.includes("אין לי") && (t.includes("את מי להזמין") || t.includes("מי להזמין"))) ||
+    (t.includes("אין לי") && t.includes("משתתפות")) ||
+    t.includes("אין לי 15") ||
+    t.includes("אין לי חמש עשרה") ||
+    t.includes("אין לי כל כך את מי") ||
+    t.includes("לא מצליחה להגיע") ||
+    t.includes("לא אצליח להגיע") ||
+    (t.includes("לא") && t.includes("15") && t.includes("משתתפות"))
+  );
+}
+
 function detectNoMoreHelp(text) {
   const t = String(text || "").toLowerCase().trim();
   const patterns = ["לא", "לא תודה", "זהו", "זה הכל", "אין", "אין עוד", "לא צריך", "סיימנו"];
@@ -2427,12 +2605,14 @@ function guidedFlowTextFromKb(kb, { minParticipants, cooldownMonths }) {
     FLOW_ASK_DATE: "מתי נוח לך?",
     FLOW_ASK_PARTICIPANTS: "כמה משתתפים צפויים בערך?",
     // When we can't understand the participants answer (STT garbage), re-ask ONCE with a clearer hint.
-    FLOW_PARTICIPANTS_REASK: "סליחה, לא הבנתי. כמה משתתפות צפויות בערך? מספר כמו 15 או 20.",
+    FLOW_PARTICIPANTS_REASK: "סליחה, לא הבנתי. בערך כמה משתתפות צפויות?",
     // After 2 unclear attempts, stop looping and hand off to a human.
     // IMPORTANT: this will be appended with the handoff question in code.
     FLOW_PARTICIPANTS_UNCLEAR_FALLBACK: "לא הצלחתי להבין את מספר המשתתפות. נציגה תחזור אלייך בהקדם עם כל הפרטים.",
     FLOW_PARTICIPANTS_OK: "מצוין. נציגה תחזור אלייך בהקדם עם כל הפרטים.",
-    FLOW_PARTICIPANTS_LOW: `כדי שזה יעבוד אנחנו צריכים מינימום ${minParticipants} משתתפים. תצליחי להגיע ל־${minParticipants}?`,
+    // Don't go deep on participant minimums over the phone. Keep it short and escalate to a human.
+    FLOW_PARTICIPANTS_LOW:
+      "אני מבינה. לא ניכנס לזה עכשיו—נציגה תוכל לעזור לחשוב יחד מה מתאים לך. זה בסדר שנציגה תחזור אלייך בהקדם?",
     // IMPORTANT: this line is appended with the handoff question in code when we still need consent.
     // Keep it non-contradictory ("so that a rep can call you...") rather than "a rep will call you..." unconditionally.
     FLOW_PARTICIPANTS_LOW_FALLBACK: "הבנתי. כדי שנוכל לחזור אלייך עם כל הפרטים ולעזור גם לגבי המשתתפות—",
@@ -3151,6 +3331,7 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
 
   let imported = 0;
   let invalidPhones = 0;
+  const importErrors = [];
   let listId = null;
   const phonesForList = [];
   if (isCsv) {
@@ -3162,7 +3343,10 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
         pickFirstMatchingField(row, isPhoneHeader);
       const phone = normalizePhoneLooseIL(phoneRaw);
       if (!phone) {
-        if (phoneRaw) invalidPhones++;
+        if (phoneRaw) {
+          invalidPhones++;
+          importErrors.push({ rawPhone: phoneRaw, reason: "invalid_phone", row });
+        }
         continue;
       }
       const gender = parseGender(row.gender || row.Gender || "");
@@ -3178,7 +3362,10 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
     try {
       const name = listNameRaw || `CSV ${imported}`;
       listId = upsertContactList(db, { name, source: "csv_upload" });
-      if (listId) addContactsToList(db, { listId, phones: phonesForList });
+      if (listId) {
+        addContactsToList(db, { listId, phones: phonesForList });
+        if (importErrors.length) addImportErrors(db, { listId, errors: importErrors });
+      }
     } catch {}
     if (!imported) {
       const headers = records?.[0] ? Object.keys(records[0]) : [];
@@ -3235,7 +3422,10 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
         pickFirstMatchingField(r, isPhoneHeader);
       const phone = normalizePhoneLooseIL(phoneRaw);
       if (!phone) {
-        if (phoneRaw) invalidPhones++;
+        if (phoneRaw) {
+          invalidPhones++;
+          importErrors.push({ rawPhone: phoneRaw, reason: "invalid_phone", row: r });
+        }
         continue;
       }
     const gender = parseGender(r.gender || r.Gender || r.GENDER || "");
@@ -3251,7 +3441,10 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
   try {
     const name = listNameRaw || `XLSX ${imported}`;
     listId = upsertContactList(db, { name, source: "xlsx_upload" });
-    if (listId) addContactsToList(db, { listId, phones: phonesForList });
+    if (listId) {
+      addContactsToList(db, { listId, phones: phonesForList });
+      if (importErrors.length) addImportErrors(db, { listId, errors: importErrors });
+    }
   } catch {}
 
   if (!imported) {
@@ -3309,6 +3502,7 @@ app.post("/api/contacts/import-sheet", async (req, res) => {
   const records = csvParse(csv, { columns: true, skip_empty_lines: true });
   let imported = 0;
   let invalidPhones = 0;
+  const importErrors = [];
   const detectedHeaders = records?.[0] ? Object.keys(records[0]) : [];
   const phonesForList = [];
   for (const row of records) {
@@ -3325,7 +3519,10 @@ app.post("/api/contacts/import-sheet", async (req, res) => {
       ).trim() || pickFirstMatchingField(row, isPhoneHeader);
     const phone = normalizePhoneLooseIL(phoneRaw);
     if (!phone) {
-      if (phoneRaw) invalidPhones++;
+      if (phoneRaw) {
+        invalidPhones++;
+        importErrors.push({ rawPhone: phoneRaw, reason: "invalid_phone", row });
+      }
       continue;
     }
     const gender =
@@ -3364,7 +3561,10 @@ app.post("/api/contacts/import-sheet", async (req, res) => {
   try {
     const name = listNameRaw || `Google Sheets ${imported}`;
     listId = upsertContactList(db, { name, source: "google_sheets" });
-    if (listId) addContactsToList(db, { listId, phones: phonesForList });
+    if (listId) {
+      addContactsToList(db, { listId, phones: phonesForList });
+      if (importErrors.length) addImportErrors(db, { listId, errors: importErrors });
+    }
   } catch {}
 
   res.json({ ok: true, imported, invalidPhones, detectedHeaders, listId });
@@ -3422,6 +3622,125 @@ app.post("/api/contact-lists/delete", (req, res) => {
   if (!id) return res.status(400).json({ ok: false, error: "missing id" });
   const result = deleteContactList(db, { id });
   res.json({ ok: true, result });
+});
+
+// Export per-list data (CSV)
+app.get("/api/contact-lists/export", (req, res) => {
+  const listId = Number(req.query.listId || 0);
+  if (!listId) return res.status(400).json({ ok: false, error: "missing listId" });
+  const format = String(req.query.format || "csv").toLowerCase();
+  if (format !== "csv") return res.status(400).json({ ok: false, error: "unsupported format" });
+
+  const list = listContactLists(db).find((l) => Number(l.id) === listId);
+  const listName = String(list?.name || `list_${listId}`).trim() || `list_${listId}`;
+  const safeName = listName.replace(/[^\p{L}\p{N}\-_ ]/gu, "").trim().slice(0, 60) || `list_${listId}`;
+
+  const rows = db
+    .prepare(
+      `
+      SELECT
+        c.phone AS phone,
+        COALESCE(c.first_name, '') AS firstName,
+        COALESCE(c.gender, '') AS gender,
+        COALESCE(c.do_not_call, 0) AS doNotCall,
+        COALESCE(c.dial_status, '') AS dialStatus,
+        COALESCE(c.dial_attempts, 0) AS dialAttempts,
+        COALESCE(c.last_dial_error, '') AS lastDialError,
+        COALESCE(c.last_call_status, '') AS lastCallStatus,
+        COALESCE(c.last_call_duration, 0) AS lastCallDuration,
+        COALESCE(c.last_call_at, '') AS lastCallAt,
+        COALESCE(l.status, '') AS leadStatus
+      FROM contact_list_members m
+      JOIN contacts c ON c.phone = m.phone
+      LEFT JOIN leads l ON l.phone = c.phone
+      WHERE m.list_id = ?
+      ORDER BY c.id ASC
+      `
+    )
+    .all(listId);
+
+  const errOut = listImportErrorsByList(db, { listId, limit: 50000, offset: 0 });
+  const errors = errOut?.rows || [];
+
+  const classify = (r) => {
+    const dialStatus = String(r?.dialStatus || "");
+    const callStatus = String(r?.lastCallStatus || "");
+    const dur = Number(r?.lastCallDuration || 0);
+    const lead = String(r?.leadStatus || "");
+
+    if (lead === "waiting") return "בוצע והתקדם";
+    if (lead === "not_interested") return "בוצע - לא מעוניין";
+    if (callStatus === "no-answer") return "אין מענה";
+    if (callStatus === "busy" || callStatus === "failed" || callStatus === "canceled") return "לא זמין";
+    if (callStatus === "completed" && dur > 0 && dur < 5) return "בוצע והיה ניתוק";
+    if (dialStatus === "failed") return "לא בוצע - נכשל";
+    if (dialStatus === "new" || dialStatus === "queued" || !dialStatus) return "לא בוצע";
+    if (dialStatus === "called") return "בוצע";
+    return "לא ידוע";
+  };
+
+  const csvEscape = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const header = [
+    "category",
+    "phone",
+    "first_name",
+    "gender",
+    "do_not_call",
+    "dial_status",
+    "dial_attempts",
+    "last_call_status",
+    "last_call_duration",
+    "last_call_at",
+    "lead_status",
+    "last_dial_error"
+  ];
+  const lines = [header.map(csvEscape).join(",")];
+
+  for (const r of rows) {
+    const category = classify(r);
+    lines.push(
+      [
+        category,
+        r.phone,
+        r.firstName,
+        r.gender,
+        r.doNotCall,
+        r.dialStatus,
+        r.dialAttempts,
+        r.lastCallStatus,
+        r.lastCallDuration,
+        r.lastCallAt,
+        r.leadStatus,
+        r.lastDialError
+      ]
+        .map(csvEscape)
+        .join(",")
+    );
+  }
+  for (const e of errors) {
+    lines.push(
+      [
+        "שגוי",
+        e.rawPhone || "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        e.createdAt || "",
+        "",
+        e.reason || "invalid_phone"
+      ]
+        .map(csvEscape)
+        .join(",")
+    );
+  }
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(safeName)}.csv"`);
+  res.send("\uFEFF" + lines.join("\n"));
 });
 
 // Leads (waiting/not_interested)
@@ -4030,6 +4349,99 @@ app.all("/twilio/record", async (req, res) => {
 
     addMessage(db, { callSid, role: "user", content: speech });
     const updated = incrementTurn(db, callSid);
+
+    // If we just asked for consent to have a rep call back, handle the reply deterministically.
+    // This prevents: "כן" -> model rambles / misses the close.
+    try {
+      const recent = getMessages(db, callSid, { limit: 8 }) || [];
+      const lastAssistant = [...recent].reverse().find((m) => m?.role === "assistant")?.content || "";
+      if (isHandoffOrCallbackQuestion(lastAssistant)) {
+        const yes = detectTransferConsent(speech) || detectAffirmativeShort(speech) || detectInterested(speech);
+        const no = detectNotInterested(speech);
+        if (yes) {
+          try {
+            upsertLead(db, { phone, status: "waiting", callSid, persona });
+          } catch {}
+          const safe = sanitizeSayText(handoffConfirmCloseText({ persona }));
+          addMessage(db, { callSid, role: "assistant", content: safe });
+          await respondWithPlayAndMaybeHangup(req, res, { text: safe, persona, hangup: true });
+          return;
+        }
+        if (no) {
+          const selfCan = AGENT_VOICE_PERSONA === "female" ? "יכולה" : "יכול";
+          const safe = sanitizeSayText(`אוקיי, אין בעיה. יש עוד משהו שאני ${selfCan} לעזור בו?`);
+          addMessage(db, { callSid, role: "assistant", content: safe });
+          await respondWithPlayAndMaybeHangup(req, res, { text: safe, persona, hangup: false, retry: 0 });
+          return;
+        }
+      }
+    } catch {}
+
+    // Guard against abusive/off-topic calls (phone left open, profanity, unrelated chatter).
+    try {
+      if (containsProfanity(speech)) {
+        const safe = sanitizeSayText("אני עוצרת כאן. יום טוב.");
+        addMessage(db, { callSid, role: "assistant", content: safe });
+        await respondWithPlayAndMaybeHangup(req, res, { text: safe, persona, hangup: true });
+        return;
+      }
+      const relevant = isLikelyRelevantToCampaign(speech);
+      if (!relevant) {
+        // Be conservative: don't punish short/unclear utterances (STT can be noisy).
+        const ns = normalizeIntentText(speech);
+        if (String(ns || "").length < 14) {
+          // treat as neutral; let the flow continue
+        } else {
+        const strikes = incrementCallOffTopicStrikes(db, callSid);
+        const maxStrikes = Math.max(2, Math.min(6, Number(process.env.OFFTOPIC_MAX_STRIKES || 3)));
+        if (strikes >= maxStrikes) {
+          const safe = sanitizeSayText("נראה לי שזה לא הזמן המתאים. נסיים כאן. יום טוב ובשורות טובות.");
+          addMessage(db, { callSid, role: "assistant", content: safe });
+          await respondWithPlayAndMaybeHangup(req, res, { text: safe, persona, hangup: true });
+          return;
+        }
+        // One gentle nudge before we hang up on repeated off-topic
+        if (strikes === maxStrikes - 1) {
+          const safe = sanitizeSayText("רק כדי לוודא—זה קשור לתיאום? אם לא, נסיים כאן.");
+          addMessage(db, { callSid, role: "assistant", content: safe });
+          await respondWithPlayAndMaybeHangup(req, res, { text: safe, persona, hangup: false, retry: 0 });
+          return;
+        }
+        }
+      } else {
+        // Reset strikes on any relevant utterance.
+        if (getCallOffTopicStrikes(db, callSid) > 0) resetCallOffTopicStrikes(db, callSid);
+      }
+    } catch {}
+
+    // Always-on high-signal replies based on real calls (kept short + escalate to a human).
+    try {
+      const toYou = persona === "female" ? "אלייך" : "אליך";
+      let forced = "";
+      if (detectHebrewDateQuestion(speech)) {
+        forced = `כן, אפשר גם לפי תאריך עברי. זה בסדר שנציגה תחזור ${toYou} בהקדם ותתאם איתך?`;
+      } else if (detectBusyOrCallLater(speech)) {
+        forced = `אין בעיה בכלל. נציגה תחזור ${toYou} בהקדם, זה בסדר?`;
+      } else if (detectWillCallBack(speech)) {
+        forced = `אין בעיה. אפשר שבינתיים נציגה תחזור ${toYou} ותוכלו לתאם ביחד?`;
+      } else if (detectTimeOfEveningQuestion(speech)) {
+        forced = `זה משתנה. נציגה תוכל לתאם איתך הכל מקצה לקצה—זה בסדר שנציגה תחזור ${toYou}?`;
+      } else if (detectHouseSmall(speech)) {
+        forced =
+          `זה מצוין—ככל שהבית יותר קטן, הלב מתרחב. מזיזים קצת ספה וקצת שולחן והכול מסתדר. זה בסדר שנציגה תחזור ${toYou} לתיאום?`;
+      } else if (detectNoMoney(speech)) {
+        forced = `מבינה לגמרי. נציגה תוכל להסביר לך הכל ולמצוא מה מתאים. זה בסדר שנציגה תחזור ${toYou}?`;
+      } else if (detectParticipantsConcern(speech)) {
+        forced = `הבנתי. לא ניכנס לזה עכשיו—נציגה תוכל לעזור לחשוב יחד מה מתאים. זה בסדר שנציגה תחזור ${toYou}?`;
+      }
+
+      if (forced) {
+        const safe = sanitizeSayText(forced);
+        addMessage(db, { callSid, role: "assistant", content: safe });
+        await respondWithPlayAndMaybeHangup(req, res, { text: safe, persona, hangup: false, retry: 0 });
+        return;
+      }
+    } catch {}
 
     if (updated.turn_count >= MAX_TURNS) {
       await respondWithPlayAndMaybeHangup(req, res, { text: "תודה רבה על הזמן. יום טוב!", persona, hangup: true });

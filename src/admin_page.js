@@ -192,13 +192,14 @@ export function renderAdminPage() {
                     <th>פעולות</th>
                     <th>שם רשימה</th>
                     <th>סה״כ</th>
-                    <th>נותר</th>
+                    <th>לא בוצע</th>
                     <th>התקשרנו</th>
                     <th>אין מענה</th>
                     <th>לא זמין</th>
                     <th>ניתוק &lt;5ש׳</th>
                     <th>מעוניין</th>
                     <th>לא מעוניין</th>
+                    <th>שגוי</th>
                   </tr>
                 </thead>
                 <tbody id="listsBody"></tbody>
@@ -1026,6 +1027,9 @@ export function renderAdminPage() {
                 '<button class="secondary" data-open-list="' +
                 String(r.id) +
                 '" style="padding:6px 10px;">פתח</button> ' +
+                '<button class="secondary" data-export-list="' +
+                String(r.id) +
+                '" style="padding:6px 10px;">CSV</button> ' +
                 '<button class="secondary" data-rename-list="' +
                 String(r.id) +
                 '" style="padding:6px 10px;">ערוך</button> ' +
@@ -1040,7 +1044,7 @@ export function renderAdminPage() {
                 (s.total ?? 0) +
                 "</td>" +
                 "<td>" +
-                (s.remaining ?? 0) +
+                (s.notDone ?? s.remaining ?? 0) +
                 "</td>" +
                 "<td>" +
                 (s.called ?? 0) +
@@ -1060,6 +1064,9 @@ export function renderAdminPage() {
                 "<td>" +
                 (s.notInterested ?? 0) +
                 "</td>" +
+                "<td>" +
+                (s.invalid ?? 0) +
+                "</td>" +
                 "</tr>"
               );
             })
@@ -1068,6 +1075,12 @@ export function renderAdminPage() {
             const id = String(e.currentTarget.getAttribute("data-open-list") || "0");
             if($("listSelect")) $("listSelect").value = id;
             await loadContacts();
+          }));
+          tb.querySelectorAll("[data-export-list]").forEach(btn => btn.addEventListener("click", async (e) => {
+            const id = String(e.currentTarget.getAttribute("data-export-list") || "0");
+            if(!id || id === "0") return;
+            // Direct download (CSV)
+            window.location.href = "/api/contact-lists/export?format=csv&listId=" + encodeURIComponent(id);
           }));
           tb.querySelectorAll("[data-rename-list]").forEach(btn => btn.addEventListener("click", async (e) => {
             const id = Number(e.currentTarget.getAttribute("data-rename-list") || "0");
