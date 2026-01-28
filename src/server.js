@@ -1407,6 +1407,7 @@ function renderLoginPage({ error = "" } = {}) {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>התחברות - סוכן AI טלפוני</title>
     <style>
+      *{ box-sizing:border-box; }
       body{font-family:system-ui,-apple-system,Arial;margin:0;background:#0b1020;color:#fff;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:16px}
       .card{width:100%;max-width:420px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:16px}
       h1{margin:0 0 8px;font-size:16px}
@@ -1425,9 +1426,9 @@ function renderLoginPage({ error = "" } = {}) {
       <h1>התחברות</h1>
       <div class="sub">הזן שם משתמש וסיסמה כדי להיכנס לממשק הניהול.</div>
       <label>שם משתמש</label>
-      <input class="ltr" dir="ltr" lang="en" inputmode="latin" autocapitalize="off" autocomplete="username" spellcheck="false" name="username" placeholder="admin" />
+      <input class="ltr" dir="ltr" lang="en" inputmode="latin" autocapitalize="off" autocomplete="username" spellcheck="false" name="username" />
       <label>סיסמה</label>
-      <input class="ltr" dir="ltr" lang="en" inputmode="latin" autocapitalize="off" autocomplete="current-password" spellcheck="false" name="password" type="password" placeholder="admin$$" />
+      <input class="ltr" dir="ltr" lang="en" inputmode="latin" autocapitalize="off" autocomplete="current-password" spellcheck="false" name="password" type="password" />
       <button type="submit">כניסה</button>
       ${safeErr ? `<div class="err">${escapeXmlText(safeErr)}</div>` : ""}
     </form>
