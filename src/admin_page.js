@@ -1094,7 +1094,7 @@ export function renderAdminPage() {
           tb.querySelectorAll("[data-delete-list]").forEach(btn => btn.addEventListener("click", async (e) => {
             const id = Number(e.currentTarget.getAttribute("data-delete-list") || "0");
             const cur = rows.find(x => Number(x.id) === id);
-            if(!confirm("למחוק את הרשימה '" + (cur?.name || id) + "'? (זה לא מוחק אנשי קשר מהמערכת)")) return;
+            if(!confirm("למחוק את הרשימה '" + (cur?.name || id) + "'?\nזה גם ימחק אנשי קשר ששייכים רק לרשימה הזאת (מספרים ששייכים גם לרשימות אחרות לא יימחקו).")) return;
             await api("/api/contact-lists/delete", { method:"POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ id }) });
             toast("נמחק", "הרשימה נמחקה", true);
             if($("listSelect") && String($("listSelect").value || "0") === String(id)) $("listSelect").value = "0";

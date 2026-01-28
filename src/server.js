@@ -3371,9 +3371,11 @@ app.post("/api/admin/dialer", (req, res) => {
 // Import contacts: XLSX upload
 app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "missing file" });
-  const filename = String(req.file.originalname || "").toLowerCase();
+  const originalName = String(req.file.originalname || "").trim();
+  const filename = originalName.toLowerCase();
   const isCsv = filename.endsWith(".csv");
   const listNameRaw = String(req.body?.listName || req.body?.list_name || "").trim();
+  const defaultListNameFromFile = originalName || (isCsv ? "contacts.csv" : "contacts.xlsx");
 
   let imported = 0;
   let invalidPhones = 0;
@@ -3406,7 +3408,7 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
     }
     // Create list (after we know count so default name can include it)
     try {
-      const name = listNameRaw || `CSV ${imported}`;
+      const name = listNameRaw || defaultListNameFromFile;
       listId = upsertContactList(db, { name, source: "csv_upload" });
       if (listId) {
         addContactsToList(db, { listId, phones: phonesForList });
@@ -3485,7 +3487,7 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
   }
 
   try {
-    const name = listNameRaw || `XLSX ${imported}`;
+    const name = listNameRaw || defaultListNameFromFile;
     listId = upsertContactList(db, { name, source: "xlsx_upload" });
     if (listId) {
       addContactsToList(db, { listId, phones: phonesForList });

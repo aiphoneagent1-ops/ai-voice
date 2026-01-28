@@ -408,14 +408,54 @@ export function deleteContactList(db, { id } = {}) {
   const listId = Number(id || 0);
   if (!listId) return { ok: false };
   const tx = db.transaction(() => {
+    // Capture phones that belong to this list BEFORE deleting the membership rows.
+    const phones = db
+      .prepare(`SELECT phone FROM contact_list_members WHERE list_id = ?`)
+      .all(listId)
+      .map((r) => String(r?.phone || "").trim())
+      .filter(Boolean);
+
     db.prepare(`DELETE FROM contact_import_errors WHERE list_id = ?`).run(listId);
     db.prepare(`DELETE FROM contact_list_members WHERE list_id = ?`).run(listId);
     const info = db.prepare(`DELETE FROM contact_lists WHERE id = ?`).run(listId);
-    return Number(info?.changes || 0);
+
+    // Delete contacts that are now "orphaned" (not in any remaining list).
+    // Important: if a phone exists in another list, it stays in the system.
+    if (phones.length) {
+      const stmtDeleteContacts = db.prepare(
+        `
+        DELETE FROM contacts
+        WHERE phone = ?
+          AND NOT EXISTS (SELECT 1 FROM contact_list_members m2 WHERE m2.phone = contacts.phone)
+      `
+      );
+      const stmtDeleteLeads = db.prepare(
+        `
+        DELETE FROM leads
+        WHERE phone = ?
+          AND NOT EXISTS (SELECT 1 FROM contact_list_members m2 WHERE m2.phone = leads.phone)
+      `
+      );
+      const tx2 = db.transaction((ps) => {
+        let deletedContacts = 0;
+        let deletedLeads = 0;
+        for (const p of ps) {
+          const a = stmtDeleteContacts.run(p);
+          deletedContacts += Number(a?.changes || 0);
+          const b = stmtDeleteLeads.run(p);
+          deletedLeads += Number(b?.changes || 0);
+        }
+        return { deletedContacts, deletedLeads };
+      });
+      const r = tx2(phones);
+      return { deletedList: Number(info?.changes || 0), ...r };
+    }
+
+    return { deletedList: Number(info?.changes || 0), deletedContacts: 0, deletedLeads: 0 };
   });
   try {
-    const deleted = tx();
-    return { ok: true, deleted };
+    const out = tx();
+    return { ok: true, ...out };
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
   }
