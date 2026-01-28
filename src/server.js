@@ -4145,8 +4145,11 @@ function dialerIsAllowedDay() {
   const snap = settingsSnapshot();
   if (!snap.autoDialSkipFriSat) return true;
   const wd = nowWeekdayInIsrael();
-  // Fail-open: if timezone conversion fails, do not block the dialer.
-  if (wd == null) return true;
+  // Fail-closed: if timezone conversion fails, block the dialer (safety > dialing).
+  if (wd == null) {
+    console.warn("[dialer] failed to compute Israel weekday; blocking auto-dial (autoDialSkipFriSat=1)");
+    return false;
+  }
   // Fri (5) + Sat (6)
   return wd !== 5 && wd !== 6;
 }
@@ -4157,8 +4160,11 @@ function dialerIsWithinBusinessHours() {
   const startMin = parseHHMMToMinutes(snap.autoDialStartTime, 9 * 60);
   const endMin = parseHHMMToMinutes(snap.autoDialEndTime, 17 * 60);
   const nowMin = nowMinutesInIsrael();
-  // Fail-open: if timezone conversion fails, do not block the dialer.
-  if (nowMin == null) return true;
+  // Fail-closed: if timezone conversion fails, block the dialer (safety > dialing).
+  if (nowMin == null) {
+    console.warn("[dialer] failed to compute Israel time; blocking auto-dial (autoDialHoursEnabled=1)");
+    return false;
+  }
   return isWithinWindowMinutes(nowMin, startMin, endMin);
 }
 
