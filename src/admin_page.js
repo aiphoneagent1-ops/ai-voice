@@ -504,11 +504,25 @@ export function renderAdminPage() {
         window.__toastTimer = setTimeout(() => { t.style.display = "none"; }, 3200);
       }
       async function api(path, opts){
-        const res = await fetch(path, opts);
+        const o = Object.assign({ credentials: "same-origin", cache: "no-store" }, (opts || {}));
+        const res = await fetch(path, o);
         const text = await res.text();
         let json = null;
         try { json = JSON.parse(text); } catch {}
-        if(!res.ok) throw new Error(json?.error || text || ("HTTP " + res.status));
+        if(!res.ok){
+          // With Basic Auth, browsers often won't show a credentials prompt for fetch/XHR.
+          // If we get 401, force a top-level navigation to trigger the prompt.
+          if(res.status === 401){
+            try{
+              setStatus($("topStatus"), "צריך להתחבר מחדש (שם משתמש/סיסמה).", false);
+            }catch{}
+            try{
+              // Add a cache-buster so the browser won't reuse a cached 401 response.
+              window.location.href = "/admin?reauth=1&ts=" + Date.now();
+            }catch{}
+          }
+          throw new Error(json?.error || text || ("HTTP " + res.status));
+        }
         return json ?? text;
       }
 
