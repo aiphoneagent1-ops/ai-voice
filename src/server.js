@@ -1938,7 +1938,22 @@ function detectRepeatRequest(text) {
 function detectSmalltalk(text) {
   const t = normalizeIntentText(text);
   // common Israeli smalltalk right after pickup
-  const patterns = ["מה נשמע", "מה שלומך", "מה קורה", "מה העניינים", "הכל טוב", "שלום לך", "שלום מה נשמע"];
+  const patterns = [
+    "מה נשמע",
+    "מה שלומך",
+    "מה קורה",
+    "מה העניינים",
+    "הכל טוב",
+    "שלום לך",
+    "שלום מה נשמע",
+    // very common call openers / mic checks
+    "הלו",
+    "הי",
+    "היי",
+    "שומעים",
+    "שומעת",
+    "שומע"
+  ];
   return patterns.some((p) => t.includes(p));
 }
 
@@ -5296,6 +5311,7 @@ wssMediaStream.on("connection", (ws, req) => {
   let greeting = "";
   let closed = false;
   let leadWaiting = false;
+  let greetingInterrupted = false;
 
   // We want a "normal call":
   // - Greeting plays fully (no barge-in, no listening)
@@ -6247,6 +6263,23 @@ wssMediaStream.on("connection", (ws, req) => {
     if (campaignMode === "guided") {
       const flowText = guidedFlowTextFromKb(snap.knowledgeBase, { minParticipants, cooldownMonths });
 
+      // If the caller interrupted the greeting with "היי/הלו/מה נשמע" style smalltalk,
+      // respond quickly and re-ask the interest question instead of advancing the guided steps.
+      if (greetingInterrupted && detectSmalltalk(speech)) {
+        greetingInterrupted = false;
+        guidedInterestRecheckAsked = true;
+        const ack = "הכל מעולה, תודה.";
+        const q = String(flowText.FLOW_INTEREST_RECHECK || "רק כדי לוודא—רוצה לשמוע עוד פרטים?").trim();
+        const msg = limitPhoneReply(`${ack} ${q}`.trim(), 200);
+        msLog("guided", { callSid, kind: "greeting_barge_smalltalk_recheck", step: guidedStep });
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+        } catch {}
+        guidedLastQuestionAt = Date.now();
+        await sayText(msg, { label: "reply" });
+        return;
+      }
+
       // If STT returned garbage/non-Hebrew/prompt-echo, do not advance the flow. Just repeat the current question.
       if (isSuspiciousTranscript(speech)) {
         msLog("guided", { callSid, kind: "stt_suspicious", step: guidedStep, text: String(speech || "").slice(0, 60) });
@@ -6325,6 +6358,15 @@ wssMediaStream.on("connection", (ws, req) => {
           guidedInterestRecheckAsked = false;
           msLog("guided", { callSid, kind: "not_interested_confirmed" });
           await sayFinalAndHangup({ text: "אין בעיה, תודה על הזמן. יום טוב ובשורות טובות.", outcome: "not_interested" });
+          return;
+        } else if (detectSmalltalk(ns) || ns === "הלו") {
+          const msg = limitPhoneReply(String(flowText.FLOW_INTEREST_RECHECK || "רק כדי לוודא—רוצה לשמוע עוד פרטים?").trim(), 180);
+          msLog("guided", { callSid, kind: "recheck_repeat_smalltalk", step: guidedStep });
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+          } catch {}
+          guidedLastQuestionAt = Date.now();
+          await sayText(msg, { label: "reply" });
           return;
         } else {
           guidedInterestRecheckAsked = false;
@@ -7454,6 +7496,9 @@ wssMediaStream.on("connection", (ws, req) => {
                 frames: bargeInFrames
               });
               bargeInFrames = 0;
+              if (String(currentPlay?.label || "") === "greeting") {
+                greetingInterrupted = true;
+              }
               // Stop agent playback immediately and start listening for the caller.
               stopPlayback({ clear: true });
               allowListen = true;
