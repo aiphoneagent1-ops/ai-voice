@@ -2352,6 +2352,32 @@ function normalizeGreetingForLatency({ greeting, persona }) {
   return raw;
 }
 
+function splitGreetingForResume(greetingText) {
+  const g = sanitizeSayText(String(greetingText || "").trim());
+  if (!g) return { part1: "", part2: "" };
+  // Prefer splitting at a natural boundary: "רציתי" / "רציתי להציע" / "אני רוצה"
+  const idx =
+    g.indexOf(" רציתי ") >= 0
+      ? g.indexOf(" רציתי ")
+      : g.indexOf("רציתי ") === 0
+        ? 0
+        : g.indexOf(" אני רוצה ") >= 0
+          ? g.indexOf(" אני רוצה ")
+          : g.indexOf("רציתי") >= 0
+            ? g.indexOf("רציתי")
+            : -1;
+  if (idx > 0 && idx < g.length - 6) {
+    return { part1: g.slice(0, idx).trim(), part2: g.slice(idx).trim() };
+  }
+  // Fallback: split after first sentence punctuation (.) (! ?) (…)
+  const m = g.match(/[.!?…]/);
+  const i = m ? g.indexOf(m[0]) : -1;
+  if (i >= 0 && i < g.length - 2) {
+    return { part1: g.slice(0, i + 1).trim(), part2: g.slice(i + 1).trim() };
+  }
+  return { part1: g, part2: "" };
+}
+
 function extractClosingLine(script, { interested }) {
   const s = String(script || "").trim();
   if (!s) return "";
@@ -5312,6 +5338,8 @@ wssMediaStream.on("connection", (ws, req) => {
   let closed = false;
   let leadWaiting = false;
   let greetingInterrupted = false;
+  let greetingPart2 = "";
+  let shouldResumeGreetingPart2AfterSmalltalk = false;
 
   // We want a "normal call":
   // - Greeting plays fully (no barge-in, no listening)
@@ -6268,6 +6296,26 @@ wssMediaStream.on("connection", (ws, req) => {
       if (greetingInterrupted && detectSmalltalk(speech)) {
         greetingInterrupted = false;
         guidedInterestRecheckAsked = true;
+        // If we interrupted only the first part of the greeting, resume the rest after a quick ack.
+        if (shouldResumeGreetingPart2AfterSmalltalk && greetingPart2) {
+          shouldResumeGreetingPart2AfterSmalltalk = false;
+          const ack = "הכל מעולה, תודה.";
+          msLog("guided", { callSid, kind: "greeting_barge_smalltalk_resume", step: guidedStep });
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: ack });
+          } catch {}
+          guidedLastQuestionAt = Date.now();
+          await sayText(ack, { label: "reply" });
+          // Resume the greeting from part2, which contains the pitch + question.
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: greetingPart2 });
+          } catch {}
+          await sayText(greetingPart2, { label: "greeting_resume" });
+          // Wait for the caller's answer to the greeting question (interest recheck).
+          guidedInterestRecheckAsked = true;
+          return;
+        }
+
         const ack = "הכל מעולה, תודה.";
         const q = String(flowText.FLOW_INTEREST_RECHECK || "רק כדי לוודא—רוצה לשמוע עוד פרטים?").trim();
         const msg = limitPhoneReply(`${ack} ${q}`.trim(), 200);
@@ -7410,8 +7458,25 @@ wssMediaStream.on("connection", (ws, req) => {
             if (!existing && g) addMessage(db, { callSid, role: "assistant", content: g });
           }
         } catch {}
+        // Play greeting in two parts so if the caller interrupts early,
+        // we can resume from a natural point (part2) after a quick acknowledgement.
+        const split = splitGreetingForResume(g);
+        const g1 = split.part1 || g;
+        const g2 = split.part2 || "";
+        greetingPart2 = g2;
+
+        // Prefetch part2 so resume is instant (best-effort).
+        try {
+          if (g2 && !isUlawCached({ text: g2, persona: AGENT_VOICE_PERSONA })) {
+            prefetchUlaw({ text: g2, persona: AGENT_VOICE_PERSONA }).catch(() => {});
+          }
+        } catch {}
+
         msLog("greeting", { chars: g.length });
-        await sayText(g, { label: "greeting" });
+        await sayText(g1, { label: "greeting_1" });
+        if (!closed && !shouldResumeGreetingPart2AfterSmalltalk && g2) {
+          await sayText(g2, { label: "greeting_2" });
+        }
         msLog("greeting sent (awaiting mark to enable listening)");
 
         // If the user already spoke during greeting, and we're already past end-of-speech,
@@ -7498,6 +7563,9 @@ wssMediaStream.on("connection", (ws, req) => {
               bargeInFrames = 0;
               if (String(currentPlay?.label || "") === "greeting") {
                 greetingInterrupted = true;
+              }
+              if (String(currentPlay?.label || "") === "greeting_1" && greetingPart2) {
+                shouldResumeGreetingPart2AfterSmalltalk = true;
               }
               // Stop agent playback immediately and start listening for the caller.
               stopPlayback({ clear: true });
