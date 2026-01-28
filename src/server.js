@@ -1957,6 +1957,29 @@ function detectSmalltalk(text) {
   return patterns.some((p) => t.includes(p));
 }
 
+function looksLikeSeekingButUnfinished(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  // Common fragment that isn't a real answer in our flow (often the user starts a sentence and stops).
+  // Examples: "אני מחפש", "אני מחפשת", "אני מחפש משהו"
+  return t === "אני מחפש" || t === "אני מחפשת" || t.startsWith("אני מחפש ") || t.startsWith("אני מחפשת ");
+}
+
+function stripQuestionLikeSuffix(raw) {
+  const s = sanitizeSayText(String(raw || "").trim());
+  if (!s) return "";
+  // If someone configured FLOW_SMALLTALK_REPLY with an actual question (e.g. "… לאיזו מטרה…"),
+  // keep only the first short acknowledgment clause.
+  if (/[?？]/.test(s)) return s.split(/[?？]/)[0].trim();
+  const cutWords = ["לאיזו", "לאיזה", "מתי", "כמה", "איפה", "אפשר", "תרצי", "רוצה"];
+  for (const w of cutWords) {
+    const idx = s.indexOf(` ${w} `);
+    if (idx > 0) return s.slice(0, idx).trim();
+  }
+  // If it's long, cut to a reasonable short prefix.
+  return s.length > 40 ? s.slice(0, 40).trim() : s;
+}
+
 function looksLikeDateAnswer(text) {
   const t = normalizeIntentText(text);
   if (!t) return false;
@@ -6463,12 +6486,12 @@ wssMediaStream.on("connection", (ws, req) => {
       // - If user says "מה נשמע/מה שלומך" → respond politely and re-ask the current step question.
       // - If user says "מה אמרת/מה נאמר/לא הבנתי" → repeat the current step question.
       const ns0 = normalizeIntentText(speech);
-      if (detectRepeatRequest(ns0) || detectSmalltalk(ns0)) {
+      if (detectRepeatRequest(ns0) || detectSmalltalk(ns0) || looksLikeSeekingButUnfinished(ns0)) {
         let prefix = "";
-        if (detectSmalltalk(ns0)) {
+        if (detectSmalltalk(ns0) || looksLikeSeekingButUnfinished(ns0)) {
           // Optional override in KB (white-label friendly):
           // FLOW_SMALLTALK_REPLY=הכל טוב, תודה. :)
-          prefix = String(flowText.FLOW_SMALLTALK_REPLY || "הכל טוב, תודה.").trim();
+          prefix = stripQuestionLikeSuffix(String(flowText.FLOW_SMALLTALK_REPLY || "הכל טוב, תודה.").trim()) || "הכל טוב, תודה.";
         }
         let q0 = "";
         if (guidedStep === "ASK_PURPOSE") q0 = flowText.FLOW_ASK_PURPOSE;
@@ -6477,7 +6500,11 @@ wssMediaStream.on("connection", (ws, req) => {
         else if (guidedStep === "PARTICIPANTS_PERSUADE") q0 = flowText.FLOW_PARTICIPANTS_LOW;
         else if (guidedStep === "CLOSE") q0 = handoffQuestionText();
         const msg = limitPhoneReply(`${prefix ? prefix + " " : ""}${q0 || ""}`.trim() || q0, 240);
-        msLog("guided", { callSid, kind: detectSmalltalk(ns0) ? "smalltalk" : "repeat_request", step: guidedStep });
+        msLog("guided", {
+          callSid,
+          kind: looksLikeSeekingButUnfinished(ns0) ? "seeking_unfinished" : detectSmalltalk(ns0) ? "smalltalk" : "repeat_request",
+          step: guidedStep
+        });
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
         } catch {}
