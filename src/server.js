@@ -488,7 +488,9 @@ const MS_TEST_TONE = process.env.MS_TEST_TONE === "1" || process.env.MS_TEST_TON
 // Barge-in tuning: avoid clearing agent speech on line noise/echo.
 const MS_BARGE_IN_FRAMES = Number(process.env.MS_BARGE_IN_FRAMES || 15); // 15 frames * 20ms = 300ms
 const MS_BARGE_IN_GRACE_MS = Number(process.env.MS_BARGE_IN_GRACE_MS || 400); // don't barge-in instantly after agent starts
-const MS_BARGE_IN_MIN_RMS = Number(process.env.MS_BARGE_IN_MIN_RMS || 2200); // extra safety: ignore low-level line noise/echo
+// Barge-in threshold: too high means caller can't interrupt the greeting (common on mobile speaker/quiet voice).
+// Default tuned to allow interruption while still filtering typical low-level echo.
+const MS_BARGE_IN_MIN_RMS = Number(process.env.MS_BARGE_IN_MIN_RMS || 1500);
 // Default: allow caller to interrupt/stops agent speech (barge-in) so overlapping speech won't confuse the turn.
 // Set MS_ENABLE_BARGE_IN=0/false to disable.
 const MS_ENABLE_BARGE_IN = !(
