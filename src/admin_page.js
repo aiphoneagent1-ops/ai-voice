@@ -577,11 +577,11 @@ export function renderAdminPage({ adminToken = "" } = {}) {
       $("uploadXlsxBtn").addEventListener("click", async () => {
         const f = $("xlsxFile").files?.[0];
         if(!f) return setStatus($("importStatus"), "בחר קובץ קודם", false);
-        // If the user didn't provide a list name, default to the uploaded filename.
-        // This makes it easy to see which Excel was imported.
+        // If the user didn't explicitly edit the name, default to the uploaded filename.
         try{
-          const nm = String($("importListName")?.value || "").trim();
-          if(!nm && f?.name) $("importListName").value = f.name;
+          const el = $("importListName");
+          const touched = el && el.getAttribute("data-touched") === "1";
+          if(el && !touched && f?.name) el.value = f.name;
         }catch{}
         const fd = new FormData();
         fd.append("file", f);
@@ -591,6 +591,9 @@ export function renderAdminPage({ adminToken = "" } = {}) {
           const extra = out?.listId ? (" • רשימה #" + out.listId) : "";
           setStatus($("importStatus"), "יובאו " + out.imported + " אנשי קשר (" + (out.type || "file") + ")" + extra, true);
           toast("ייבוא הושלם", "יובאו " + out.imported + " אנשי קשר" + extra, true);
+          // Reset for next import (avoid reusing the previous list name/file).
+          try{ if($("importListName")) { $("importListName").value = ""; $("importListName").setAttribute("data-touched","0"); } }catch{}
+          try{ if($("xlsxFile")) $("xlsxFile").value = ""; }catch{}
           await loadAll();
           if($("listSection")?.style.display !== "none"){
             await loadLists();
@@ -611,6 +614,8 @@ export function renderAdminPage({ adminToken = "" } = {}) {
           const extra = out?.listId ? (" • רשימה #" + out.listId) : "";
           setStatus($("sheetStatus"), "יובאו " + out.imported + " אנשי קשר" + extra, true);
           toast("ייבוא הושלם", "יובאו " + out.imported + " אנשי קשר" + extra, true);
+          // Reset for next import.
+          try{ if($("importListName")) { $("importListName").value = ""; $("importListName").setAttribute("data-touched","0"); } }catch{}
           await loadAll();
           if($("listSection")?.style.display !== "none"){
             await loadLists();
@@ -688,11 +693,32 @@ export function renderAdminPage({ adminToken = "" } = {}) {
         if(!f) return;
         $("xlsxFile").files = e.dataTransfer.files;
         try{
-          const nm = String($("importListName")?.value || "").trim();
-          if(!nm && f?.name) $("importListName").value = f.name;
+          const el = $("importListName");
+          const touched = el && el.getAttribute("data-touched") === "1";
+          if(el && !touched && f?.name) el.value = f.name;
         }catch{}
         $("uploadXlsxBtn").click();
       });
+
+      // Import list name UX: only override from filename if user didn't type manually.
+      try{
+        const nameEl = $("importListName");
+        if(nameEl){
+          nameEl.setAttribute("data-touched","0");
+          nameEl.addEventListener("input", () => {
+            nameEl.setAttribute("data-touched", String((nameEl.value || "").trim() ? "1" : "0"));
+          });
+        }
+        const fileEl = $("xlsxFile");
+        if(fileEl){
+          fileEl.addEventListener("change", () => {
+            const f = fileEl.files?.[0];
+            const el = $("importListName");
+            const touched = el && el.getAttribute("data-touched") === "1";
+            if(f?.name && el && !touched) el.value = f.name;
+          });
+        }
+      }catch{}
 
       // Calls modal (transcripts)
       const callsModal = $("callsModal");
@@ -920,7 +946,8 @@ export function renderAdminPage({ adminToken = "" } = {}) {
           if(!phone) return;
           btn.disabled = true;
           try{
-            const out = await api("/api/contacts/dial", { method:"POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ phone }) });
+            const listId = Number(($("listSelect") && $("listSelect").value) ? $("listSelect").value : 0) || 0;
+            const out = await api("/api/contacts/dial", { method:"POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ phone, listId }) });
             toast("מחייג...", "יצאה שיחה ל-" + (out.to || phone), true);
             if($("listSection").style.display !== "none") await loadContacts();
           }catch(err){

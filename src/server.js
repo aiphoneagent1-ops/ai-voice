@@ -43,6 +43,10 @@ import {
   renameContactList,
   deleteContactList,
   computeListStats,
+  fetchNextListMembersToDial,
+  queueListMemberForDial,
+  markListMemberDialResult,
+  updateListMemberCallStatus,
   getCallOffTopicStrikes,
   incrementCallOffTopicStrikes,
   resetCallOffTopicStrikes
@@ -3947,12 +3951,12 @@ app.get("/api/contact-lists/export", (req, res) => {
         COALESCE(c.first_name, '') AS firstName,
         COALESCE(c.gender, '') AS gender,
         COALESCE(c.do_not_call, 0) AS doNotCall,
-        COALESCE(c.dial_status, '') AS dialStatus,
-        COALESCE(c.dial_attempts, 0) AS dialAttempts,
-        COALESCE(c.last_dial_error, '') AS lastDialError,
-        COALESCE(c.last_call_status, '') AS lastCallStatus,
-        COALESCE(c.last_call_duration, 0) AS lastCallDuration,
-        COALESCE(c.last_call_at, '') AS lastCallAt,
+        COALESCE(m.dial_status, '') AS dialStatus,
+        COALESCE(m.dial_attempts, 0) AS dialAttempts,
+        COALESCE(m.last_dial_error, '') AS lastDialError,
+        COALESCE(m.last_call_status, '') AS lastCallStatus,
+        COALESCE(m.last_call_duration, 0) AS lastCallDuration,
+        COALESCE(m.last_call_at, '') AS lastCallAt,
         COALESCE(l.status, '') AS leadStatus
       FROM contact_list_members m
       JOIN contacts c ON c.phone = m.phone
@@ -4267,6 +4271,7 @@ app.post("/api/contacts/dial", async (req, res) => {
   const rawPhone = String(req.body?.phone ?? "").trim();
   const phone = normalizePhoneE164IL(rawPhone);
   if (!phone) return res.status(400).json({ error: "מספר לא תקין" });
+  const listId = Number(req.body?.listId || 0);
 
   const contact = getContactByPhone(db, phone);
   if (contact?.do_not_call) return res.status(400).json({ error: "המספר מסומן DNC (לא להתקשר)" });
@@ -4282,18 +4287,20 @@ app.post("/api/contacts/dial", async (req, res) => {
   const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
   try {
     queueContactForDial(db, phone);
+    if (listId) queueListMemberForDial(db, { listId, phone });
     const out = await client.calls.create({
       to: phone,
       from: process.env.TWILIO_FROM_NUMBER,
       url: callUrl,
       method: "POST",
-      statusCallback: `${publicBaseUrlFromEnv()}/twilio/status`,
+      statusCallback: `${publicBaseUrlFromEnv()}/twilio/status${listId ? `?listId=${encodeURIComponent(String(listId))}` : ""}`,
       statusCallbackMethod: "POST",
       statusCallbackEvent: ["initiated", "ringing", "answered", "completed"]
     });
     res.json({ ok: true, callSid: out?.sid || null, to: phone, url: callUrl });
   } catch (e) {
     markDialResult(db, phone, { status: "failed", error: String(e?.message || e) });
+    if (listId) markListMemberDialResult(db, { listId, phone, status: "failed", error: String(e?.message || e) });
     res.status(500).json({ error: String(e?.message || e) });
   }
 });
@@ -4510,6 +4517,7 @@ app.all("/twilio/status", (req, res) => {
     const callSid = String(getParam(req, "CallSid") || "");
     const callStatus = String(getParam(req, "CallStatus") || "").trim();
     const dur = Number(getParam(req, "CallDuration") || 0);
+    const listId = Number(req.query?.listId || getParam(req, "listId") || 0);
     if (to) {
       try {
         db.prepare(
@@ -4520,6 +4528,10 @@ app.all("/twilio/status", (req, res) => {
                last_call_at = datetime('now')
            WHERE phone = ?`
         ).run(callSid || null, callStatus || null, dur, dur, to);
+      } catch {}
+      // Per-list status (if provided)
+      try {
+        if (listId) updateListMemberCallStatus(db, { listId, phone: to, callSid, callStatus, duration: dur });
       } catch {}
     }
   } catch {}
@@ -4945,7 +4957,8 @@ async function runDialerOnce() {
 
   const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
     const concurrency = Math.max(1, Math.min(50, Number(autoDialBatchSize) || 1));
-    const batch = fetchNextContactsToDial(db, concurrency);
+    // IMPORTANT: dial state is tracked per import list membership.
+    const batch = fetchNextListMembersToDial(db, concurrency);
 
     const dialOne = async (c) => {
       try {
@@ -4962,18 +4975,21 @@ async function runDialerOnce() {
         } catch {}
 
       queueContactForDial(db, c.phone);
+      if (c.listId) queueListMemberForDial(db, { listId: c.listId, phone: c.phone });
       await client.calls.create({
         to: c.phone,
         from: process.env.TWILIO_FROM_NUMBER,
         url: callUrl,
           method: "POST",
-          statusCallback: `${publicBaseUrlFromEnv()}/twilio/status`,
+          statusCallback: `${publicBaseUrlFromEnv()}/twilio/status?listId=${encodeURIComponent(String(c.listId || 0))}`,
           statusCallbackMethod: "POST",
           statusCallbackEvent: ["initiated", "ringing", "answered", "completed"]
       });
       markDialResult(db, c.phone, { status: "called" });
+      if (c.listId) markListMemberDialResult(db, { listId: c.listId, phone: c.phone, status: "called" });
     } catch (e) {
       markDialResult(db, c.phone, { status: "failed", error: e?.message || String(e) });
+      if (c.listId) markListMemberDialResult(db, { listId: c.listId, phone: c.phone, status: "failed", error: e?.message || String(e) });
     }
     };
 

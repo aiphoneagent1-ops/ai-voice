@@ -162,6 +162,36 @@ export function openDb({ dbPath }) {
     { name: "last_call_at", type: "TEXT NULL" }
   ]);
 
+  // Per-list dialing columns (migration): dialing state must be tracked per import list, not globally per contact.
+  ensureColumns(db, "contact_list_members", [
+    { name: "dial_status", type: "TEXT NOT NULL DEFAULT 'new'" }, // new|queued|called|failed
+    { name: "dial_attempts", type: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "last_dial_at", type: "TEXT NULL" },
+    { name: "last_dial_error", type: "TEXT NULL" },
+    // Twilio status callback enrichment (per list)
+    { name: "last_call_sid", type: "TEXT NULL" },
+    { name: "last_call_status", type: "TEXT NULL" },
+    { name: "last_call_duration", type: "INTEGER NULL" },
+    { name: "last_call_at", type: "TEXT NULL" }
+  ]);
+
+  // Best-effort backfill: if list member status is NULL (older data), copy from contacts.
+  try {
+    db.exec(`
+      UPDATE contact_list_members
+      SET
+        dial_status = COALESCE(dial_status, (SELECT c.dial_status FROM contacts c WHERE c.phone = contact_list_members.phone)),
+        dial_attempts = COALESCE(dial_attempts, (SELECT c.dial_attempts FROM contacts c WHERE c.phone = contact_list_members.phone)),
+        last_dial_at = COALESCE(last_dial_at, (SELECT c.last_dial_at FROM contacts c WHERE c.phone = contact_list_members.phone)),
+        last_dial_error = COALESCE(last_dial_error, (SELECT c.last_dial_error FROM contacts c WHERE c.phone = contact_list_members.phone)),
+        last_call_sid = COALESCE(last_call_sid, (SELECT c.last_call_sid FROM contacts c WHERE c.phone = contact_list_members.phone)),
+        last_call_status = COALESCE(last_call_status, (SELECT c.last_call_status FROM contacts c WHERE c.phone = contact_list_members.phone)),
+        last_call_duration = COALESCE(last_call_duration, (SELECT c.last_call_duration FROM contacts c WHERE c.phone = contact_list_members.phone)),
+        last_call_at = COALESCE(last_call_at, (SELECT c.last_call_at FROM contacts c WHERE c.phone = contact_list_members.phone))
+      WHERE dial_status IS NULL OR dial_attempts IS NULL OR last_call_status IS NULL;
+    `);
+  } catch {}
+
   // Safety / conversation guard columns (migration)
   ensureColumns(db, "calls", [
     { name: "off_topic_strikes", type: "INTEGER NOT NULL DEFAULT 0" },
@@ -545,8 +575,9 @@ export function listContactsByList(db, { listId, limit = 200, offset = 0 } = {})
   if (!id) return { rows: [], limit: lim, offset: off };
   const rows = db
     .prepare(
-      `SELECT c.id, c.first_name, c.phone, c.gender, c.do_not_call, c.dial_status, c.dial_attempts, c.last_dial_at, c.last_dial_error,
-              c.last_call_status, c.last_call_duration, c.last_call_at
+      `SELECT c.id, c.first_name, c.phone, c.gender, c.do_not_call,
+              m.dial_status, m.dial_attempts, m.last_dial_at, m.last_dial_error,
+              m.last_call_status, m.last_call_duration, m.last_call_at
        FROM contact_list_members m
        JOIN contacts c ON c.phone = m.phone
        WHERE m.list_id = ?
@@ -566,13 +597,13 @@ export function computeListStats(db, { listId } = {}) {
       SELECT
         COUNT(1) AS total,
         SUM(CASE WHEN c.do_not_call = 1 THEN 1 ELSE 0 END) AS dnc,
-        SUM(CASE WHEN c.do_not_call = 0 AND c.dial_status = 'new' THEN 1 ELSE 0 END) AS remaining,
-        SUM(CASE WHEN c.do_not_call = 0 AND c.dial_status = 'queued' THEN 1 ELSE 0 END) AS queued,
-        SUM(CASE WHEN c.dial_status = 'called' THEN 1 ELSE 0 END) AS called,
-        SUM(CASE WHEN c.dial_status = 'failed' THEN 1 ELSE 0 END) AS failed,
-        SUM(CASE WHEN c.last_call_status = 'no-answer' THEN 1 ELSE 0 END) AS noAnswer,
-        SUM(CASE WHEN c.last_call_status IN ('busy','failed','canceled') THEN 1 ELSE 0 END) AS notAvailable,
-        SUM(CASE WHEN c.last_call_status = 'completed' AND COALESCE(c.last_call_duration, 0) < 5 THEN 1 ELSE 0 END) AS answeredUnder5,
+        SUM(CASE WHEN c.do_not_call = 0 AND COALESCE(m.dial_status,'new') = 'new' THEN 1 ELSE 0 END) AS remaining,
+        SUM(CASE WHEN c.do_not_call = 0 AND COALESCE(m.dial_status,'') = 'queued' THEN 1 ELSE 0 END) AS queued,
+        SUM(CASE WHEN COALESCE(m.dial_status,'') = 'called' THEN 1 ELSE 0 END) AS called,
+        SUM(CASE WHEN COALESCE(m.dial_status,'') = 'failed' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN COALESCE(m.last_call_status,'') = 'no-answer' THEN 1 ELSE 0 END) AS noAnswer,
+        SUM(CASE WHEN COALESCE(m.last_call_status,'') IN ('busy','failed','canceled') THEN 1 ELSE 0 END) AS notAvailable,
+        SUM(CASE WHEN COALESCE(m.last_call_status,'') = 'completed' AND COALESCE(m.last_call_duration, 0) < 5 THEN 1 ELSE 0 END) AS answeredUnder5,
         SUM(CASE WHEN l.status = 'waiting' THEN 1 ELSE 0 END) AS interested,
         SUM(CASE WHEN l.status = 'not_interested' THEN 1 ELSE 0 END) AS notInterested
       FROM contact_list_members m
@@ -591,6 +622,69 @@ export function computeListStats(db, { listId } = {}) {
   out.invalid = Number(invalid || 0);
   out.notDone = Number(out.remaining || 0) + Number(out.queued || 0);
   return out;
+}
+
+export function fetchNextListMembersToDial(db, limit = 10) {
+  const lim = Math.max(1, Math.min(200, Number(limit || 10)));
+  return db
+    .prepare(
+      `
+      SELECT
+        m.list_id AS listId,
+        m.phone AS phone,
+        c.gender AS gender,
+        c.first_name AS firstName
+      FROM contact_list_members m
+      JOIN contacts c ON c.phone = m.phone
+      WHERE c.do_not_call = 0
+        AND COALESCE(m.dial_status,'new') = 'new'
+      ORDER BY m.created_at ASC
+      LIMIT ?
+      `
+    )
+    .all(lim);
+}
+
+export function queueListMemberForDial(db, { listId, phone, error = null } = {}) {
+  const id = Number(listId || 0);
+  const normalized = normalizePhoneE164IL(phone);
+  if (!id || !normalized) return;
+  db.prepare(
+    `UPDATE contact_list_members
+     SET dial_status = 'queued',
+         dial_attempts = COALESCE(dial_attempts, 0) + 1,
+         last_dial_at = datetime('now'),
+         last_dial_error = ?
+     WHERE list_id = ? AND phone = ?`
+  ).run(error, id, normalized);
+}
+
+export function markListMemberDialResult(db, { listId, phone, status, error = null } = {}) {
+  const id = Number(listId || 0);
+  const normalized = normalizePhoneE164IL(phone);
+  if (!id || !normalized) return;
+  const st = String(status || "").trim() || "failed";
+  db.prepare(
+    `UPDATE contact_list_members
+     SET dial_status = ?,
+         last_dial_error = ?
+     WHERE list_id = ? AND phone = ?`
+  ).run(st, error, id, normalized);
+}
+
+export function updateListMemberCallStatus(db, { listId, phone, callSid, callStatus, duration } = {}) {
+  const id = Number(listId || 0);
+  const normalized = normalizePhoneE164IL(phone);
+  if (!id || !normalized) return;
+  const dur = Number(duration || 0);
+  db.prepare(
+    `UPDATE contact_list_members
+     SET last_call_sid = COALESCE(?, last_call_sid),
+         last_call_status = ?,
+         last_call_duration = CASE WHEN ? > 0 THEN ? ELSE last_call_duration END,
+         last_call_at = datetime('now')
+     WHERE list_id = ? AND phone = ?`
+  ).run(callSid || null, callStatus || null, dur, dur, id, normalized);
 }
 
 export function getCallOffTopicStrikes(db, callSid) {
