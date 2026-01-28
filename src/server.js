@@ -1417,6 +1417,7 @@ function renderLoginPage({ error = "" } = {}) {
       input:focus{border-color:rgba(109,140,255,.7);box-shadow:0 0 0 4px rgba(109,140,255,.15)}
       /* Force LTR typing for credentials (avoid RTL flip). */
       input.ltr{ direction:ltr; text-align:left; unicode-bidi: plaintext; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+      .hint{opacity:.72;font-size:12px;margin-top:6px}
       button{width:100%;margin-top:14px;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(109,140,255,.25);color:#fff;cursor:pointer}
       .err{margin-top:10px;color:#ff9aa2;font-size:12px;white-space:pre-wrap}
     </style>
@@ -1426,12 +1427,48 @@ function renderLoginPage({ error = "" } = {}) {
       <h1>התחברות</h1>
       <div class="sub">הזן שם משתמש וסיסמה כדי להיכנס לממשק הניהול.</div>
       <label>שם משתמש</label>
-      <input class="ltr" dir="ltr" lang="en" inputmode="latin" autocapitalize="off" autocomplete="username" spellcheck="false" name="username" />
+      <input class="ltr" dir="ltr" lang="en" inputmode="latin" autocapitalize="off" autocomplete="username" spellcheck="false" name="username" required pattern="^[\\x21-\\x7E]+$" />
+      <div class="hint">אנגלית בלבד.</div>
       <label>סיסמה</label>
-      <input class="ltr" dir="ltr" lang="en" inputmode="latin" autocapitalize="off" autocomplete="current-password" spellcheck="false" name="password" type="password" />
+      <input class="ltr" dir="ltr" lang="en" inputmode="latin" autocapitalize="off" autocomplete="current-password" spellcheck="false" name="password" type="password" required pattern="^[\\x21-\\x7E]+$" />
       <button type="submit">כניסה</button>
       ${safeErr ? `<div class="err">${escapeXmlText(safeErr)}</div>` : ""}
     </form>
+    <script>
+      (function(){
+        const ascii = /^[\\x21-\\x7E]*$/; // printable ASCII, no spaces
+        const sanitize = (s) => String(s||"").replace(/[^\\x21-\\x7E]/g, "");
+        function hardenInput(el){
+          if(!el) return;
+          el.addEventListener("beforeinput", (e) => {
+            try{
+              if(e && typeof e.data === "string" && e.data && !ascii.test(e.data)){
+                e.preventDefault();
+              }
+            }catch{}
+          });
+          el.addEventListener("input", () => {
+            const v = String(el.value||"");
+            const sv = sanitize(v);
+            if(v !== sv) el.value = sv;
+          });
+          el.addEventListener("paste", (e) => {
+            try{
+              const t = (e.clipboardData && e.clipboardData.getData("text")) || "";
+              if(t && !ascii.test(t)){
+                e.preventDefault();
+                const sv = sanitize(t);
+                const start = el.selectionStart ?? el.value.length;
+                const end = el.selectionEnd ?? el.value.length;
+                el.value = el.value.slice(0,start) + sv + el.value.slice(end);
+              }
+            }catch{}
+          });
+        }
+        hardenInput(document.querySelector('input[name="username"]'));
+        hardenInput(document.querySelector('input[name="password"]'));
+      })();
+    </script>
   </body>
 </html>`;
 }
@@ -3245,6 +3282,11 @@ app.post("/admin/login", (req, res) => {
   try {
     const user = String(req.body?.username ?? req.body?.user ?? "").trim();
     const pass = String(req.body?.password ?? req.body?.pass ?? "").trim();
+    const asciiNoSpace = /^[\x21-\x7E]+$/; // printable ASCII, no spaces
+    if (!asciiNoSpace.test(user) || !asciiNoSpace.test(pass)) {
+      res.status(400).type("text/html").send(renderLoginPage({ error: "בשם משתמש/סיסמה מותרת אנגלית בלבד." }));
+      return;
+    }
     const ok = safeEqual(user, ADMIN_USER) && safeEqual(pass, ADMIN_PASS);
     if (!ok) {
       res.status(401).type("text/html").send(renderLoginPage({ error: "שם משתמש או סיסמה שגויים." }));
