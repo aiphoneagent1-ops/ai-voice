@@ -1423,6 +1423,22 @@ function renderLoginPage({ error = "" } = {}) {
       input:focus{border-color:rgba(109,140,255,.7);box-shadow:0 0 0 4px rgba(109,140,255,.15)}
       /* Force LTR typing for credentials (avoid RTL flip). */
       input.ltr{ direction:ltr; text-align:left; unicode-bidi: plaintext; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+      .pwRow{ display:flex; gap:8px; align-items:center; }
+      .pwRow input{ flex: 1 1 auto; }
+      .pwToggle{
+        width: 44px;
+        height: 40px;
+        margin-top: 0;
+        padding: 0;
+        border-radius: 12px;
+        border: 1px solid rgba(255,255,255,.14);
+        background: rgba(255,255,255,.08);
+        display:inline-flex;
+        align-items:center;
+        justify-content:center;
+      }
+      .pwToggle:hover{ filter: brightness(1.08); }
+      .pwToggle svg{ width: 18px; height: 18px; opacity: .9; }
       .hint{opacity:.72;font-size:12px;margin-top:6px}
       button{width:100%;margin-top:14px;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(109,140,255,.25);color:#fff;cursor:pointer}
       .err{margin-top:10px;color:#ff9aa2;font-size:12px;white-space:pre-wrap}
@@ -1436,7 +1452,16 @@ function renderLoginPage({ error = "" } = {}) {
       <input class="ltr" dir="ltr" lang="en" inputmode="latin" autocapitalize="off" autocomplete="username" spellcheck="false" name="username" required pattern="^[\\x21-\\x7E]+$" />
       <div class="hint">אנגלית בלבד.</div>
       <label>סיסמה</label>
-      <input class="ltr" dir="ltr" lang="en" inputmode="latin" autocapitalize="off" autocomplete="current-password" spellcheck="false" name="password" type="password" required pattern="^[\\x21-\\x7E]+$" />
+      <div class="pwRow">
+        <!-- Default: show password as typed (per request). -->
+        <input class="ltr" dir="ltr" lang="en" inputmode="latin" autocapitalize="off" autocomplete="current-password" spellcheck="false" name="password" type="text" required pattern="^[\\x21-\\x7E]+$" />
+        <button class="pwToggle" type="button" id="pwToggle" aria-label="הסתר/הצג סיסמה" title="הסתר/הצג">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" stroke="rgba(255,255,255,.92)" stroke-width="1.6" stroke-linejoin="round"/>
+            <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" stroke="rgba(255,255,255,.92)" stroke-width="1.6"/>
+          </svg>
+        </button>
+      </div>
       <button type="submit">כניסה</button>
       ${safeErr ? `<div class="err">${escapeXmlText(safeErr)}</div>` : ""}
     </form>
@@ -1472,7 +1497,21 @@ function renderLoginPage({ error = "" } = {}) {
           });
         }
         hardenInput(document.querySelector('input[name="username"]'));
-        hardenInput(document.querySelector('input[name="password"]'));
+        const pw = document.querySelector('input[name="password"]');
+        hardenInput(pw);
+        // Password visibility toggle. Default is visible (type="text").
+        try{
+          const btn = document.getElementById("pwToggle");
+          if(btn && pw){
+            btn.addEventListener("click", () => {
+              const isVisible = (pw.getAttribute("type") || "text") === "text";
+              pw.setAttribute("type", isVisible ? "password" : "text");
+              btn.setAttribute("aria-label", isVisible ? "הצג סיסמה" : "הסתר סיסמה");
+              btn.setAttribute("title", isVisible ? "הצג" : "הסתר");
+              try{ pw.focus(); }catch{}
+            });
+          }
+        }catch{}
       })();
     </script>
   </body>
