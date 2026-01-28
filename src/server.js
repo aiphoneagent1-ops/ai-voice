@@ -1312,10 +1312,18 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: "2mb" }));
 
 // ---------------------------
-// Admin Basic Auth (protect /admin + /api)
+// Admin login (custom, forces login on refresh)
 // ---------------------------
-// Requirement: visiting https://.../admin must prompt for credentials.
-// Use HTTP Basic Auth so the browser prompts before rendering the page.
+// Requirements:
+// - /admin shows a login screen (not browser basic-auth prompt)
+// - Credentials: admin / admin$$
+// - After successful login, the admin app works normally
+// - On refresh / new visit: must require login again
+//
+// Implementation:
+// - POST /admin/login creates a one-time nonce cookie (HttpOnly) mapped to a short-lived API token.
+// - GET /admin/app consumes the nonce (clears cookie) and serves the admin HTML with the API token embedded in JS memory.
+// - /api/* requires X-Admin-Token header; since the token is only in-memory JS, refresh loses it and forces login.
 const ADMIN_USER = "admin";
 const ADMIN_PASS = "admin$$";
 
@@ -1326,36 +1334,104 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(aa, bb);
 }
 
-function parseBasicAuth(header) {
-  const h = String(header || "");
-  if (!h.startsWith("Basic ")) return null;
-  const b64 = h.slice("Basic ".length).trim();
-  if (!b64) return null;
-  let decoded = "";
-  try {
-    decoded = Buffer.from(b64, "base64").toString("utf8");
-  } catch {
-    return null;
+function parseCookies(req) {
+  const header = String(req.headers?.cookie || "");
+  const out = {};
+  if (!header) return out;
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx < 0) continue;
+    const k = part.slice(0, idx).trim();
+    const v = part.slice(idx + 1).trim();
+    if (!k) continue;
+    try {
+      out[k] = decodeURIComponent(v);
+    } catch {
+      out[k] = v;
+    }
   }
-  const idx = decoded.indexOf(":");
-  if (idx < 0) return null;
-  return { user: decoded.slice(0, idx), pass: decoded.slice(idx + 1) };
+  return out;
 }
 
-function requireAdminAuth(req, res, next) {
-  const p = String(req.path || "");
-  const needsAuth = p === "/" || p.startsWith("/admin") || p.startsWith("/api/");
-  if (!needsAuth) return next();
-
-  const creds = parseBasicAuth(req.headers?.authorization);
-  const ok = creds && safeEqual(creds.user, ADMIN_USER) && safeEqual(creds.pass, ADMIN_PASS);
-  if (ok) return next();
-
-  res.setHeader("WWW-Authenticate", 'Basic realm="Admin", charset="UTF-8"');
-  res.status(401).type("text/plain").send("Authentication required");
+function randomToken(bytes = 24) {
+  return crypto.randomBytes(bytes).toString("base64url");
 }
 
-app.use(requireAdminAuth);
+const ADMIN_ONCE_COOKIE = "admin_once";
+const ADMIN_ONCE_TTL_MS = 5 * 60 * 1000; // 5 minutes to open /admin/app after login
+const ADMIN_TOKEN_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours (in-memory) for API calls while page is open
+const adminOnce = new Map(); // nonce -> { token, expiresAt }
+const adminTokens = new Map(); // token -> { expiresAt }
+
+function pruneAdminAuthMaps() {
+  const now = Date.now();
+  for (const [k, v] of adminOnce.entries()) if (!v || v.expiresAt <= now) adminOnce.delete(k);
+  for (const [k, v] of adminTokens.entries()) if (!v || v.expiresAt <= now) adminTokens.delete(k);
+}
+
+function isSecureReq(req) {
+  const xfProto = req.headers["x-forwarded-proto"];
+  const p = Array.isArray(xfProto) ? xfProto[0] : xfProto;
+  if (p) return String(p).toLowerCase() === "https";
+  return !!req.secure;
+}
+
+function setCookie(res, { name, value, maxAgeSeconds = null, httpOnly = true, sameSite = "Lax", path = "/", secure = null } = {}) {
+  const parts = [`${name}=${encodeURIComponent(String(value ?? ""))}`, `Path=${path}`, `SameSite=${sameSite}`];
+  if (httpOnly) parts.push("HttpOnly");
+  const sec = secure == null ? false : !!secure;
+  if (sec) parts.push("Secure");
+  if (typeof maxAgeSeconds === "number") parts.push(`Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`);
+  res.setHeader("Set-Cookie", parts.join("; "));
+}
+
+function clearCookie(res, name) {
+  setCookie(res, { name, value: "", maxAgeSeconds: 0 });
+}
+
+function requireAdminToken(req, res, next) {
+  pruneAdminAuthMaps();
+  const token = String(req.headers["x-admin-token"] || "").trim();
+  if (!token) return res.status(401).json({ error: "unauthorized" });
+  const row = adminTokens.get(token);
+  if (!row || row.expiresAt <= Date.now()) return res.status(401).json({ error: "unauthorized" });
+  return next();
+}
+
+function renderLoginPage({ error = "" } = {}) {
+  const safeErr = String(error || "").trim();
+  return `<!doctype html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>התחברות - סוכן AI טלפוני</title>
+    <style>
+      body{font-family:system-ui,-apple-system,Arial;margin:0;background:#0b1020;color:#fff;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:16px}
+      .card{width:100%;max-width:420px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:16px}
+      h1{margin:0 0 8px;font-size:16px}
+      .sub{opacity:.8;font-size:12px;margin-bottom:12px}
+      label{display:block;font-size:12px;opacity:.85;margin:10px 0 6px}
+      input{width:100%;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.18);color:#fff;outline:none}
+      input:focus{border-color:rgba(109,140,255,.7);box-shadow:0 0 0 4px rgba(109,140,255,.15)}
+      button{width:100%;margin-top:14px;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(109,140,255,.25);color:#fff;cursor:pointer}
+      .err{margin-top:10px;color:#ff9aa2;font-size:12px;white-space:pre-wrap}
+    </style>
+  </head>
+  <body>
+    <form class="card" method="POST" action="/admin/login" autocomplete="off">
+      <h1>התחברות</h1>
+      <div class="sub">הזן שם משתמש וסיסמה כדי להיכנס לממשק הניהול.</div>
+      <label>שם משתמש</label>
+      <input name="username" placeholder="admin" />
+      <label>סיסמה</label>
+      <input name="password" type="password" placeholder="••••••••" />
+      <button type="submit">כניסה</button>
+      ${safeErr ? `<div class="err">${escapeXmlText(safeErr)}</div>` : ""}
+    </form>
+  </body>
+</html>`;
+}
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -3154,9 +3230,58 @@ app.get("/health", (req, res) =>
   })
 );
 
-// Admin mini-site
+// Protect ALL /api/* with our admin token (Twilio endpoints are NOT under /api).
+app.use("/api", requireAdminToken);
+
+// Admin mini-site (custom login)
 app.get("/admin", (req, res) => {
-  res.type("text/html").send(renderAdminPage());
+  res.type("text/html").send(renderLoginPage({ error: "" }));
+});
+
+app.post("/admin/login", (req, res) => {
+  try {
+    const user = String(req.body?.username ?? req.body?.user ?? "").trim();
+    const pass = String(req.body?.password ?? req.body?.pass ?? "").trim();
+    const ok = safeEqual(user, ADMIN_USER) && safeEqual(pass, ADMIN_PASS);
+    if (!ok) {
+      res.status(401).type("text/html").send(renderLoginPage({ error: "שם משתמש או סיסמה שגויים." }));
+      return;
+    }
+
+    pruneAdminAuthMaps();
+    const token = randomToken(24);
+    const nonce = randomToken(18);
+    const now = Date.now();
+    adminTokens.set(token, { expiresAt: now + ADMIN_TOKEN_TTL_MS });
+    adminOnce.set(nonce, { token, expiresAt: now + ADMIN_ONCE_TTL_MS });
+
+    // One-time cookie to open /admin/app once; will be cleared there.
+    setCookie(res, { name: ADMIN_ONCE_COOKIE, value: nonce, httpOnly: true, sameSite: "Lax", secure: isSecureReq(req) });
+    res.redirect(302, "/admin/app");
+  } catch (e) {
+    res.status(500).type("text/html").send(renderLoginPage({ error: "תקלה בהתחברות. נסה שוב." }));
+  }
+});
+
+app.get("/admin/app", (req, res) => {
+  pruneAdminAuthMaps();
+  const cookies = parseCookies(req);
+  const nonce = String(cookies[ADMIN_ONCE_COOKIE] || "").trim();
+  const row = nonce ? adminOnce.get(nonce) : null;
+  if (!row || row.expiresAt <= Date.now()) {
+    // No valid one-time cookie → always force login.
+    clearCookie(res, ADMIN_ONCE_COOKIE);
+    res.redirect(302, "/admin");
+    return;
+  }
+
+  // Consume one-time cookie so refresh/new visit forces login again.
+  adminOnce.delete(nonce);
+  clearCookie(res, ADMIN_ONCE_COOKIE);
+
+  // Serve admin HTML with an in-memory token for API calls.
+  const html = renderAdminPage({ adminToken: row.token });
+  res.type("text/html").send(html);
 });
 
 // Public transcript viewer (for Google Sheets "click here").

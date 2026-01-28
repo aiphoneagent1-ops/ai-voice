@@ -1,4 +1,4 @@
-export function renderAdminPage() {
+export function renderAdminPage({ adminToken = "" } = {}) {
   return `<!doctype html>
 <html lang="he" dir="rtl">
   <head>
@@ -483,6 +483,10 @@ export function renderAdminPage() {
     </div>
 
     <script>
+      // Injected by the server (GET /admin/app). This token lives only in JS memory.
+      // If you refresh, it disappears and you'll be redirected back to /admin (login).
+      window.__ADMIN_TOKEN = ${JSON.stringify(String(adminToken || ""))};
+
       const $ = (id) => document.getElementById(id);
       // Basic HTML escaping for rendering user-provided list names safely.
       function escapeHtml(s){
@@ -504,21 +508,23 @@ export function renderAdminPage() {
         window.__toastTimer = setTimeout(() => { t.style.display = "none"; }, 3200);
       }
       async function api(path, opts){
-        const o = Object.assign({ credentials: "same-origin", cache: "no-store" }, (opts || {}));
-        const res = await fetch(path, o);
+        const tok = String(window.__ADMIN_TOKEN || "").trim();
+        const base = Object.assign({ cache: "no-store" }, (opts || {}));
+        const headers = Object.assign({}, (base.headers || {}));
+        if(tok) headers["X-Admin-Token"] = tok;
+        base.headers = headers;
+        const res = await fetch(path, base);
         const text = await res.text();
         let json = null;
         try { json = JSON.parse(text); } catch {}
         if(!res.ok){
-          // With Basic Auth, browsers often won't show a credentials prompt for fetch/XHR.
-          // If we get 401, force a top-level navigation to trigger the prompt.
+          // If we get 401 (expired/missing token), force a redirect to the login screen.
           if(res.status === 401){
             try{
-              setStatus($("topStatus"), "צריך להתחבר מחדש (שם משתמש/סיסמה).", false);
+              setStatus($("topStatus"), "צריך להתחבר מחדש.", false);
             }catch{}
             try{
-              // Add a cache-buster so the browser won't reuse a cached 401 response.
-              window.location.href = "/admin?reauth=1&ts=" + Date.now();
+              window.location.href = "/admin?ts=" + Date.now();
             }catch{}
           }
           throw new Error(json?.error || text || ("HTTP " + res.status));
