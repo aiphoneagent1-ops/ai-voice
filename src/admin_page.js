@@ -557,6 +557,12 @@ export function renderAdminPage() {
       $("uploadXlsxBtn").addEventListener("click", async () => {
         const f = $("xlsxFile").files?.[0];
         if(!f) return setStatus($("importStatus"), "בחר קובץ קודם", false);
+        // If the user didn't provide a list name, default to the uploaded filename.
+        // This makes it easy to see which Excel was imported.
+        try{
+          const nm = String($("importListName")?.value || "").trim();
+          if(!nm && f?.name) $("importListName").value = f.name;
+        }catch{}
         const fd = new FormData();
         fd.append("file", f);
         fd.append("listName", String($("importListName")?.value || "").trim());
@@ -661,6 +667,10 @@ export function renderAdminPage() {
         const f = e.dataTransfer.files?.[0];
         if(!f) return;
         $("xlsxFile").files = e.dataTransfer.files;
+        try{
+          const nm = String($("importListName")?.value || "").trim();
+          if(!nm && f?.name) $("importListName").value = f.name;
+        }catch{}
         $("uploadXlsxBtn").click();
       });
 
