@@ -621,6 +621,9 @@ export function computeListStats(db, { listId } = {}) {
   for (const [k, v] of Object.entries(row || {})) out[k] = Number(v || 0);
   out.invalid = Number(invalid || 0);
   out.notDone = Number(out.remaining || 0) + Number(out.queued || 0);
+  // "בוצע" = attempts that actually happened (anything not pending), excluding DNC phones.
+  // We consider a number "done" once it left the pending pool (new/queued).
+  out.done = Math.max(0, Number(out.total || 0) - Number(out.dnc || 0) - Number(out.notDone || 0));
   return out;
 }
 

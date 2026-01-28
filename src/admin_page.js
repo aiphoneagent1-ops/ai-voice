@@ -70,6 +70,9 @@ export function renderAdminPage({ adminToken = "" } = {}) {
       .badge{ display:inline-flex; padding: 3px 8px; border-radius: 999px; border:1px solid rgba(7,26,42,.14); background: rgba(241,252,255,.92); font-size: 11px; }
       .badge.good{ border-color: rgba(11,122,67,.25); color: var(--good); }
       .badge.bad{ border-color: rgba(179,38,38,.25); color: var(--bad); }
+      tr.dncRow td{ background: rgba(179,38,38,.16); }
+      tr.dncRow td strong, tr.dncRow td{ color: rgba(179,38,38,.96); }
+      tr.dncRow .badge.good{ border-color: rgba(179,38,38,.22); color: rgba(179,38,38,.96); }
       .drop {
         border: 1px dashed rgba(14,165,198,.70);
         background: rgba(216,246,255,.92);
@@ -193,12 +196,13 @@ export function renderAdminPage({ adminToken = "" } = {}) {
                     <th>שם רשימה</th>
                     <th>סה״כ</th>
                     <th>לא בוצע</th>
-                    <th>התקשרנו</th>
+                    <th>בוצע</th>
                     <th>אין מענה</th>
                     <th>לא זמין</th>
                     <th>ניתוק &lt;5ש׳</th>
                     <th>מעוניין</th>
                     <th>לא מעוניין</th>
+                    <th>לא להתקשר יותר</th>
                     <th>שגוי</th>
                   </tr>
                 </thead>
@@ -811,6 +815,7 @@ export function renderAdminPage({ adminToken = "" } = {}) {
             const isNew = (r.dial_status || "new") === "new";
             const status = isNew ? '<span class="badge good">לא בוצעה שיחה</span>' : '<span class="badge bad">בוצעה שיחה</span>';
             const dncBadge = r.do_not_call ? '<span class="badge bad">לא להתקשר</span>' : '<span class="badge good">אפשר להתקשר</span>';
+            if(r.do_not_call) tr.className = "dncRow";
             const dncBtn =
               '<button class="iconBtn dncBtn" data-phone="'+(r.phone||"")+'" data-dnc="'+(r.do_not_call?1:0)+'" title="שנה סטטוס התקשרות">' +
               '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
@@ -1104,7 +1109,7 @@ export function renderAdminPage({ adminToken = "" } = {}) {
                 (s.notDone ?? s.remaining ?? 0) +
                 "</td>" +
                 "<td>" +
-                (s.called ?? 0) +
+                (s.done ?? 0) +
                 "</td>" +
                 "<td>" +
                 (s.noAnswer ?? 0) +
@@ -1120,6 +1125,9 @@ export function renderAdminPage({ adminToken = "" } = {}) {
                 "</td>" +
                 "<td>" +
                 (s.notInterested ?? 0) +
+                "</td>" +
+                "<td>" +
+                (s.dnc ?? 0) +
                 "</td>" +
                 "<td>" +
                 (s.invalid ?? 0) +
