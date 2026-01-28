@@ -1980,6 +1980,19 @@ function stripQuestionLikeSuffix(raw) {
   return s.length > 40 ? s.slice(0, 40).trim() : s;
 }
 
+function enforceNeutralOrgPhrases(raw, { handoffToPhrase = "לנציגה", handoffFromPhrase = "מהצוות" } = {}) {
+  const s = sanitizeSayText(String(raw || ""));
+  if (!s) return "";
+  const to = String(handoffToPhrase || "לנציגה").trim() || "לנציגה";
+  const from = String(handoffFromPhrase || "מהצוות").trim() || "מהצוות";
+  // Normalize common branded phrases (some might be present in KB answers).
+  return s
+    .replaceAll("מהעמותה", from)
+    .replaceAll("מהארגון", from)
+    .replaceAll("לעמותה", to)
+    .replaceAll("לארגון", to);
+}
+
 function looksLikeDateAnswer(text) {
   const t = normalizeIntentText(text);
   if (!t) return false;
@@ -5752,6 +5765,10 @@ wssMediaStream.on("connection", (ws, req) => {
       thinkingTimer = null;
     }
     stopPlayback({ clear: true });
+    // If we start a new playback before Twilio acks the previous mark,
+    // we must not treat the previous ack as "end of current playback".
+    // Reset so only the NEW playback's mark can re-enable listening.
+    lastMarkName = "";
     playing = true;
     playingSince = Date.now();
     agentSpeaking = true;
@@ -5948,6 +5965,8 @@ wssMediaStream.on("connection", (ws, req) => {
       thinkingTimer = null;
     }
     stopPlayback({ clear: true });
+    // Same as buffered playback: prevent a previous mark ack from enabling listening mid-speech.
+    lastMarkName = "";
     playing = true;
     playingSince = Date.now();
     agentSpeaking = true;
@@ -6554,7 +6573,11 @@ wssMediaStream.on("connection", (ws, req) => {
         nsFaq.includes("עלות");
       const faqAnswer = matchFaqAnswerFromKb({ kb: snap.knowledgeBase, userText: speech, minScore: looksLikeShortQuestion ? 1 : 2 });
       if (faqAnswer) {
-        const a = limitPhoneReply(sanitizeSayText(faqAnswer), 220);
+        const { handoffToPhrase, handoffFromPhrase } = settingsSnapshot();
+        const a = limitPhoneReply(
+          enforceNeutralOrgPhrases(faqAnswer, { handoffToPhrase: handoffToPhrase || "לנציגה", handoffFromPhrase: handoffFromPhrase || "מהצוות" }),
+          220
+        );
         let followUp = "";
         if (guidedStep === "ASK_PURPOSE") followUp = flowText.FLOW_ASK_PURPOSE;
         else if (guidedStep === "ASK_DATE") followUp = flowText.FLOW_ASK_DATE;
@@ -7388,10 +7411,9 @@ wssMediaStream.on("connection", (ws, req) => {
       // Speak greeting immediately
       inFlight = (async () => {
         // During greeting: do NOT run STT/LLM by default (prevents echo/noise from cutting speech),
-        // but DO allow barge-in so the caller can interrupt the greeting.
-        // Listening is enabled either after the greeting mark ack, or immediately on barge-in.
+        // and (in strict turn-taking) do NOT allow barge-in; we only listen after the agent finishes speaking.
         allowListen = false;
-        allowBargeIn = MS_ENABLE_BARGE_IN;
+        allowBargeIn = false;
         pendingEnableListenOnMark = true;
 
         // Debug: prove audio-out works even without ElevenLabs/OpenAI (beep tone)
@@ -7813,10 +7835,13 @@ wssMediaStream.on("connection", (ws, req) => {
       // Always clear "agentSpeaking" for the last playback mark.
       // Whether we enable listening depends on pendingEnableListenOnMark.
       if (name && name === lastMarkName) {
-        agentSpeaking = false;
+        // Only flip to "not speaking" when we are truly idle (no active playback).
+        // Marks from a previous clip can be acked while a new clip already started.
+        if (!playing) agentSpeaking = false;
         if (pendingEnableListenOnMark && !pendingHangupOnMark && !ignoreInbound) {
           allowListen = true;
-          allowBargeIn = MS_ENABLE_BARGE_IN;
+          // Strict turn-taking: never interrupt agent speech.
+          allowBargeIn = false;
           calibrateUntil = Date.now() + MS_NOISE_CALIBRATION_MS;
           msLog("listening enabled");
         }
