@@ -2970,8 +2970,15 @@ function selectRelevantKnowledge({ knowledgeBase, query, maxChars = 1800, maxChu
 }
 
 function pickPersona(contact) {
-  if (contact?.gender === "female") return "female";
-  return "male";
+  // Campaign knob: if this campaign is women-only, treat every callee as female.
+  // This prevents accidental "men-only block" when gender wasn't provided in the imported list.
+  try {
+    if (settingsSnapshot()?.femaleOnly) return "female";
+  } catch {}
+  const g = contact?.gender;
+  if (g === "female" || g === "male") return g;
+  // Default: assume female (most campaigns here are women-only, and it avoids accidental blocking).
+  return "female";
 }
 
 function getConversationPhone(req) {
@@ -7261,10 +7268,11 @@ wssMediaStream.on("connection", (ws, req) => {
 
       // Speak greeting immediately
       inFlight = (async () => {
-        // During greeting: do NOT listen and do NOT barge-in (prevents echo/noise from cutting speech).
-        // We will enable listening only after Twilio confirms playback finished via the mark ack.
+        // During greeting: do NOT run STT/LLM by default (prevents echo/noise from cutting speech),
+        // but DO allow barge-in so the caller can interrupt the greeting.
+        // Listening is enabled either after the greeting mark ack, or immediately on barge-in.
         allowListen = false;
-        allowBargeIn = false;
+        allowBargeIn = MS_ENABLE_BARGE_IN;
         pendingEnableListenOnMark = true;
 
         // Debug: prove audio-out works even without ElevenLabs/OpenAI (beep tone)
