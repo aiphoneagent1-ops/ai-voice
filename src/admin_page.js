@@ -104,6 +104,13 @@ export function renderAdminPage({ adminToken = "" } = {}) {
       }
       .iconBtn:hover{ filter: brightness(1.12); }
       .iconBtn svg{ width: 18px; height: 18px; opacity: .95; }
+      /* Make action icons clearly visible on light background */
+      .iconBtn svg *{ stroke: rgba(7,26,42,.92) !important; }
+      .delBtn{ background: rgba(179,38,38,.12); border-color: rgba(179,38,38,.45); }
+      .delBtn:hover{ filter: brightness(1.08); }
+      .delBtn svg *{ stroke: rgba(179,38,38,.92) !important; }
+      .dncBtn{ background: rgba(7,26,42,.10); border-color: rgba(7,26,42,.35); }
+      .dncBtn:hover{ filter: brightness(1.08); }
 
       /* Modal */
       .modalOverlay{
