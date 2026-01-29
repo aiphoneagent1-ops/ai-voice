@@ -1990,13 +1990,20 @@ function detectSmalltalk(text) {
   const t = normalizeIntentText(text);
   // common Israeli smalltalk right after pickup
   const patterns = [
+    "שלום",
     "מה נשמע",
     "מה שלומך",
     "מה קורה",
     "מה העניינים",
     "הכל טוב",
     "שלום לך",
-    "שלום מה נשמע"
+    "שלום מה נשמע",
+    "בוקר טוב",
+    "צהריים טובים",
+    "צהרים טובים",
+    "ערב טוב",
+    "לילה טוב",
+    "שלום בוקר"
   ];
   return patterns.some((p) => t.includes(p));
 }
@@ -2044,7 +2051,7 @@ function looksLikeVeryShortUnclear(text) {
   const t = normalizeIntentText(text);
   if (!t) return true;
   // Treat pure filler as unclear (avoid looping).
-  const fillers = new Set(["היי", "הי", "טוב", "וואי", "מה", "כן כן", "כן", "אוקיי", "אוקי", "שלום"]);
+  const fillers = new Set(["היי", "הי", "טוב", "וואי", "מה", "כן כן", "כן", "אוקיי", "אוקי"]);
   if (fillers.has(t)) return true;
   // 1–2 words with no clear intent => unclear
   const words = t.split(/\s+/).filter(Boolean);
@@ -5694,6 +5701,7 @@ wssMediaStream.on("connection", (ws, req) => {
   let guidedAskedCooldownRule = false;
   let guidedLastQuestionAt = 0;
   let guidedCallbackTime = "";
+  let guidedCallbackBadCount = 0;
   let guidedCloseAttempts = 0;
   // One-time safety recheck for suspicious early "not interested" right after greeting.
   let guidedInterestRecheckAsked = false;
@@ -5793,7 +5801,7 @@ wssMediaStream.on("connection", (ws, req) => {
   async function handleUnclearOrEmptySpeech(reason) {
     if (closed) return;
     // Only allow one confirm question; then end politely to avoid loops.
-    if (confirmCount >= 1) {
+    if (confirmCount >= 2) {
       const finalText = "סבבה, נסיים כאן. יום טוב ובשורות טובות.";
       try {
         if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: finalText });
@@ -6615,7 +6623,17 @@ wssMediaStream.on("connection", (ws, req) => {
           msLog("guided", { callSid, kind: "not_interested_confirmed" });
           await sayFinalAndHangup({ text: "אין בעיה, תודה על הזמן. יום טוב ובשורות טובות.", outcome: "not_interested" });
           return;
-        } else if (detectSmalltalk(ns) || ns === "הלו") {
+        } else if (detectMicCheck(ns)) {
+          const msg = persona === "female" ? "כן, שומעת אותך. את שומעת אותי?" : "כן, שומע אותך. אתה שומע אותי?";
+          msLog("guided", { callSid, kind: "recheck_mic_check", step: guidedStep });
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+          } catch {}
+          guidedLastQuestionAt = Date.now();
+          await sayText(msg, { label: "reply" });
+          // Keep guidedInterestRecheckAsked=true; we still need the yes/no after they confirm audio.
+          return;
+        } else if (detectSmalltalk(ns)) {
           const msg = limitPhoneReply(String(flowText.FLOW_INTEREST_RECHECK || "רק כדי לוודא—רוצה לשמוע עוד פרטים?").trim(), 180);
           msLog("guided", { callSid, kind: "recheck_repeat_smalltalk", step: guidedStep });
           try {
@@ -6697,7 +6715,12 @@ wssMediaStream.on("connection", (ws, req) => {
         else if (guidedStep === "ASK_PARTICIPANTS") q0 = flowText.FLOW_ASK_PARTICIPANTS;
         else if (guidedStep === "PARTICIPANTS_PERSUADE") q0 = flowText.FLOW_PARTICIPANTS_LOW;
         else if (guidedStep === "CLOSE") q0 = handoffQuestionText();
-        const msg = limitPhoneReply(`${prefix ? prefix + " " : ""}${q0 || ""}`.trim() || q0, 240);
+        const shouldAppendStepQ =
+          !!q0 && !detectMicCheck(ns0) && !looksLikeVeryShortUnclear(ns0) && !looksLikeSeekingButUnfinished(ns0);
+        const msg = limitPhoneReply(
+          `${prefix ? prefix + " " : ""}${shouldAppendStepQ ? q0 : ""}`.trim() || prefix || q0,
+          240
+        );
         msLog("guided", {
           callSid,
           kind: detectWhereCallingFrom(ns0)
@@ -6724,6 +6747,7 @@ wssMediaStream.on("connection", (ws, req) => {
       // Busy-now flow: capture a preferred callback time (and reflect it later in summary/Sheets).
       if (guidedStep !== "ASK_CALLBACK_TIME" && detectBusyNow(speech)) {
         guidedStep = "ASK_CALLBACK_TIME";
+        guidedCallbackBadCount = 0;
         const q0 = limitPhoneReply(flowText.FLOW_ASK_CALLBACK_TIME || "ברור לגמרי. מתי נוח לך שנציגה תחזור אלייך?", 200);
         try {
           if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
@@ -6997,6 +7021,7 @@ wssMediaStream.on("connection", (ws, req) => {
           guidedCallbackTime = guidedCallbackTime || "";
           guidedStep = "CLOSE";
           guidedCloseAttempts = 0;
+          guidedCallbackBadCount = 0;
           const msg = limitPhoneReply(`סבבה. ${handoffQuestionText()}`.trim(), 200);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
@@ -7006,6 +7031,21 @@ wssMediaStream.on("connection", (ws, req) => {
         }
         if (!looksLikeCallbackTimeAnswer(s)) {
           if (guidedLastQuestionAt && Date.now() - guidedLastQuestionAt < GUIDED_REASK_MIN_MS) return;
+          guidedCallbackBadCount++;
+          if (guidedCallbackBadCount >= 2) {
+            guidedStep = "CLOSE";
+            guidedCloseAttempts = 0;
+            guidedCallbackBadCount = 0;
+            const msg = limitPhoneReply(
+              `סבבה. גם אם עוד לא סגרת זמן—${handoffQuestionText()}`.trim(),
+              220
+            );
+            try {
+              if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+            } catch {}
+            await sayText(msg, { label: "reply" });
+            return;
+          }
           const q0 = limitPhoneReply(flowText.FLOW_ASK_CALLBACK_TIME || "מתי נוח לך שנחזור אלייך?", 180);
           try {
             if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: q0 });
@@ -7017,6 +7057,7 @@ wssMediaStream.on("connection", (ws, req) => {
         guidedCallbackTime = s;
         guidedStep = "CLOSE";
         guidedCloseAttempts = 0;
+        guidedCallbackBadCount = 0;
         const confirm = limitPhoneReply(
           (flowText.FLOW_CALLBACK_TIME_CONFIRM || `מעולה. אני מעדכנת שיחזרו אלייך ${s}.`).trim(),
           180
@@ -7033,6 +7074,31 @@ wssMediaStream.on("connection", (ws, req) => {
       if (guidedStep === "ASK_PURPOSE") {
         const s = String(speech || "").trim();
         const ns = normalizeIntentText(s);
+        // If caller is greeting / checking audio / confused, do NOT treat it as a "purpose".
+        // Re-check interest first (prevents: "שלום בוקר" -> advancing to date).
+        if (detectSmalltalk(ns) || detectMicCheck(ns) || detectWhereCallingFrom(ns) || looksLikeVeryShortUnclear(ns)) {
+          guidedInterestRecheckAsked = true;
+          const prefix = detectWhereCallingFrom(ns)
+            ? "מדברת נועה מהמרכז הארצי להפרשת חלה."
+            : detectMicCheck(ns)
+              ? persona === "female"
+                ? "כן, שומעת אותך. את שומעת אותי?"
+                : "כן, שומע אותך. אתה שומע אותי?"
+              : detectSmalltalk(ns)
+                ? "בוקר טוב."
+                : persona === "female"
+                  ? "לא בטוח שהבנתי—תוכלי לחזור על זה בקצרה?"
+                  : "לא בטוח שהבנתי—תוכל לחזור על זה בקצרה?";
+          const q = String(flowText.FLOW_INTEREST_RECHECK || "רק כדי לוודא—רוצה לשמוע עוד פרטים?").trim();
+          const msg = limitPhoneReply(`${prefix} ${q}`.trim(), 220);
+          msLog("guided", { callSid, kind: "purpose_guard_interest_recheck", step: guidedStep });
+          try {
+            if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+          } catch {}
+          guidedLastQuestionAt = Date.now();
+          await sayText(msg, { label: "reply" });
+          return;
+        }
         const ackLike =
           ns === "תודה" ||
           ns === "תודה רבה" ||
