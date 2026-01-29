@@ -627,8 +627,32 @@ export function computeListStats(db, { listId } = {}) {
   return out;
 }
 
-export function fetchNextListMembersToDial(db, limit = 10) {
+export function fetchNextListMembersToDial(db, { limit = 10, listIds = [] } = {}) {
   const lim = Math.max(1, Math.min(200, Number(limit || 10)));
+  const ids = Array.isArray(listIds) ? listIds.map((x) => Number(x || 0)).filter((n) => Number.isFinite(n) && n > 0) : [];
+
+  // If ids is empty => all lists.
+  if (!ids.length) {
+    return db
+      .prepare(
+        `
+        SELECT
+          m.list_id AS listId,
+          m.phone AS phone,
+          c.gender AS gender,
+          c.first_name AS firstName
+        FROM contact_list_members m
+        JOIN contacts c ON c.phone = m.phone
+        WHERE c.do_not_call = 0
+          AND COALESCE(m.dial_status,'new') = 'new'
+        ORDER BY m.created_at ASC
+        LIMIT ?
+        `
+      )
+      .all(lim);
+  }
+
+  const placeholders = ids.map(() => "?").join(",");
   return db
     .prepare(
       `
@@ -641,11 +665,12 @@ export function fetchNextListMembersToDial(db, limit = 10) {
       JOIN contacts c ON c.phone = m.phone
       WHERE c.do_not_call = 0
         AND COALESCE(m.dial_status,'new') = 'new'
+        AND m.list_id IN (${placeholders})
       ORDER BY m.created_at ASC
       LIMIT ?
       `
     )
-    .all(lim);
+    .all(...ids, lim);
 }
 
 export function queueListMemberForDial(db, { listId, phone, error = null } = {}) {

@@ -322,9 +322,17 @@ export function renderAdminPage({ adminToken = "" } = {}) {
             <div style="flex:1; min-width:220px;">
               <label>הפרש בין ריצות</label>
               <select id="autoDialInterval">
+                <option value="120">כל 2 דקות</option>
                 <option value="300">כל 5 דקות</option>
                 <option value="600">כל 10 דקות</option>
               </select>
+            </div>
+          </div>
+          <div class="row">
+            <div style="flex:1; min-width:220px;">
+              <label>על אילו רשימות לרוץ (אפשר לבחור כמה, או “כולם”)</label>
+              <select id="autoDialLists" multiple size="6"></select>
+              <div class="hint">אם לא בוחרים כלום — זה מתנהג כמו “כולם”.</div>
             </div>
           </div>
           <div class="row" style="margin-top:10px;">
@@ -555,6 +563,10 @@ export function renderAdminPage({ adminToken = "" } = {}) {
           if($("autoDialStartTime")) $("autoDialStartTime").value = String(data.autoDialStartTime || "09:00");
           if($("autoDialEndTime")) $("autoDialEndTime").value = String(data.autoDialEndTime || "17:00");
           if($("autoDialSkipFriSat")) $("autoDialSkipFriSat").checked = data.autoDialSkipFriSat !== false;
+          // Auto-dial target lists (multi-select)
+          try{
+            await loadAutoDialLists(Array.isArray(data.autoDialListIds) ? data.autoDialListIds : []);
+          }catch{}
           setStatus($("topStatus"), "מחובר. עודכן: " + (data.updatedAt || "—"), true);
           try{
             const s = await api("/api/contacts/stats");
@@ -576,6 +588,39 @@ export function renderAdminPage({ adminToken = "" } = {}) {
         }catch(e){
           setStatus($("topStatus"), "שגיאה בטעינה: " + e.message, false);
         }
+      }
+
+      async function loadAutoDialLists(selectedIds){
+        const sel = $("autoDialLists");
+        if(!sel) return;
+        const out = await api("/api/contact-lists");
+        const rows = out?.rows || [];
+        const chosen = new Set((Array.isArray(selectedIds)?selectedIds:[]).map((x)=>Number(x||0)).filter((n)=>n>0));
+        sel.innerHTML =
+          '<option value="0">כולם</option>' +
+          rows.map((r)=>{
+            const nm = escapeHtml(r.name || ("רשימה " + r.id));
+            return '<option value="' + String(r.id) + '">' + nm + "</option>";
+          }).join("");
+        // If none selected => select "all" for clarity
+        if(!chosen.size){
+          Array.from(sel.options).forEach(o => o.selected = String(o.value)==="0");
+        } else {
+          Array.from(sel.options).forEach(o => o.selected = chosen.has(Number(o.value||0)));
+        }
+        // UX rule: selecting "all" clears others; selecting others clears "all".
+        sel.addEventListener("change", () => {
+          const vals = Array.from(sel.selectedOptions).map(o => Number(o.value||0));
+          if(vals.includes(0)){
+            Array.from(sel.options).forEach(o => o.selected = String(o.value)==="0");
+          } else {
+            const any = vals.some(v => v>0);
+            if(any){
+              const allOpt = Array.from(sel.options).find(o => String(o.value)==="0");
+              if(allOpt) allOpt.selected = false;
+            }
+          }
+        }, { once:false });
       }
 
       $("uploadXlsxBtn").addEventListener("click", async () => {
@@ -664,6 +709,9 @@ export function renderAdminPage({ adminToken = "" } = {}) {
 
       $("saveDialerBtn").addEventListener("click", async () => {
         try{
+          const listSel = $("autoDialLists");
+          const selected = listSel ? Array.from(listSel.selectedOptions).map(o => Number(o.value||0)) : [];
+          const autoDialListIds = selected.filter(n => Number.isFinite(n) && n > 0);
           await api("/api/admin/dialer", {
             method:"POST",
             headers: {"Content-Type":"application/json"},
@@ -674,7 +722,8 @@ export function renderAdminPage({ adminToken = "" } = {}) {
               autoDialHoursEnabled: $("autoDialHoursEnabled") ? $("autoDialHoursEnabled").checked : true,
               autoDialStartTime: $("autoDialStartTime") ? String($("autoDialStartTime").value || "09:00") : "09:00",
               autoDialEndTime: $("autoDialEndTime") ? String($("autoDialEndTime").value || "17:00") : "17:00",
-              autoDialSkipFriSat: $("autoDialSkipFriSat") ? $("autoDialSkipFriSat").checked : true
+              autoDialSkipFriSat: $("autoDialSkipFriSat") ? $("autoDialSkipFriSat").checked : true,
+              autoDialListIds
             })
           });
           setStatus($("dialerStatus"), "נשמר", true);

@@ -3175,6 +3175,12 @@ function settingsSnapshot() {
   const autoDialStartTime = String(getSetting(db, "autoDialStartTime", "09:00") || "09:00").trim() || "09:00";
   const autoDialEndTime = String(getSetting(db, "autoDialEndTime", "17:00") || "17:00").trim() || "17:00";
   const autoDialSkipFriSat = getBool("autoDialSkipFriSat", true);
+  // Which lists auto-dialer should run on.
+  // [] (or missing) = all lists
+  const autoDialListIdsRaw = getSetting(db, "autoDialListIds", []);
+  const autoDialListIds = Array.isArray(autoDialListIdsRaw)
+    ? autoDialListIdsRaw.map((x) => Number(x || 0)).filter((n) => Number.isFinite(n) && n > 0)
+    : [];
 
   // White-label phrases MUST be short (examples: "לצוות", "מהצוות", "למוקד", "מהמוקד").
   // If someone pastes the whole greeting here, it creates a repetition loop like:
@@ -3213,6 +3219,7 @@ function settingsSnapshot() {
     autoDialStartTime,
     autoDialEndTime,
     autoDialSkipFriSat,
+    autoDialListIds,
     handoffToPhrase,
     handoffFromPhrase,
     campaignMode,
@@ -3655,7 +3662,8 @@ app.post("/api/admin/dialer", (req, res) => {
     autoDialHoursEnabled = true,
     autoDialStartTime = "09:00",
     autoDialEndTime = "17:00",
-    autoDialSkipFriSat = true
+    autoDialSkipFriSat = true,
+    autoDialListIds = []
   } = req.body || {};
   setSetting(db, "autoDialEnabled", !!autoDialEnabled);
   setSetting(db, "autoDialBatchSize", Math.max(1, Math.min(50, Number(autoDialBatchSize) || 5)));
@@ -3664,6 +3672,16 @@ app.post("/api/admin/dialer", (req, res) => {
   setSetting(db, "autoDialStartTime", String(autoDialStartTime || "09:00").trim() || "09:00");
   setSetting(db, "autoDialEndTime", String(autoDialEndTime || "17:00").trim() || "17:00");
   setSetting(db, "autoDialSkipFriSat", !!autoDialSkipFriSat);
+  // [] means "all lists"
+  try {
+    const arr = Array.isArray(autoDialListIds) ? autoDialListIds : [];
+    const ids = arr
+      .map((x) => Number(x || 0))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    setSetting(db, "autoDialListIds", ids);
+  } catch {
+    setSetting(db, "autoDialListIds", []);
+  }
   res.json({ ok: true });
 });
 
@@ -4980,7 +4998,7 @@ app.all("/twilio/record", async (req, res) => {
 let dialerTimer = null;
 let dialerInFlight = false;
 async function runDialerOnce() {
-  const { autoDialEnabled, autoDialBatchSize } = settingsSnapshot();
+  const { autoDialEnabled, autoDialBatchSize, autoDialListIds } = settingsSnapshot();
   if (!autoDialEnabled) return;
   // Prevent overlapping runs if the interval is short or Twilio is slow.
   if (dialerInFlight) return;
@@ -4997,7 +5015,8 @@ async function runDialerOnce() {
   const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
     const concurrency = Math.max(1, Math.min(50, Number(autoDialBatchSize) || 1));
     // IMPORTANT: dial state is tracked per import list membership.
-    const batch = fetchNextListMembersToDial(db, concurrency);
+    // autoDialListIds=[] means "all lists".
+    const batch = fetchNextListMembersToDial(db, { limit: concurrency, listIds: autoDialListIds || [] });
 
     const dialOne = async (c) => {
       try {
