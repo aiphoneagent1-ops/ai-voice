@@ -308,11 +308,13 @@ const MS_MODE = REALTIME_MODE === "2";
 // Twilio <Record> max length per utterance. If too small, callers get cut mid-sentence.
 // We enforce a sane minimum; override by setting a larger value.
 const RECORD_MAX_LENGTH_SECONDS = Math.max(6, Number(process.env.RECORD_MAX_LENGTH_SECONDS || 6));
-const RECORD_TIMEOUT_SECONDS = Number(process.env.RECORD_TIMEOUT_SECONDS || 1);
-// Twilio <Record> "timeout" is silence timeout (seconds). Historically we forced a minimum of 2s to avoid premature "לא שמעתי".
-// If you want faster turn-taking, set RECORD_TIMEOUT_MIN_SECONDS=1 and RECORD_TIMEOUT_SECONDS=1.
-const RECORD_TIMEOUT_MIN_SECONDS = Number(process.env.RECORD_TIMEOUT_MIN_SECONDS || 2);
-const NO_SPEECH_MAX_RETRIES = Number(process.env.NO_SPEECH_MAX_RETRIES || 2);
+// Twilio <Record> "timeout" is silence timeout (seconds).
+// Defaulting too low causes the agent to "continue talking" / reprompt without giving the callee a real chance to answer.
+// You can override via env if you prefer faster turn-taking.
+const RECORD_TIMEOUT_SECONDS = Number(process.env.RECORD_TIMEOUT_SECONDS || 3);
+const RECORD_TIMEOUT_MIN_SECONDS = Number(process.env.RECORD_TIMEOUT_MIN_SECONDS || 3);
+// In real calls, some people take a few seconds to answer; allow more retries before ending.
+const NO_SPEECH_MAX_RETRIES = Number(process.env.NO_SPEECH_MAX_RETRIES || 4);
 
 function recordTimeoutSeconds() {
   const min = Number.isFinite(RECORD_TIMEOUT_MIN_SECONDS) ? RECORD_TIMEOUT_MIN_SECONDS : 2;
