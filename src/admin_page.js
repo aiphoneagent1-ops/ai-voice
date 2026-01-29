@@ -384,13 +384,6 @@ export function renderAdminPage({ adminToken = "" } = {}) {
                 <option value="guided">Guided (תסריט שלבים)</option>
               </select>
             </div>
-            <div style="flex:1; min-width:240px;">
-              <label style="margin-top:0;">פונים לנשים בלבד</label>
-              <label style="margin:0; display:flex; gap:8px; align-items:center;">
-                <input type="checkbox" id="femaleOnly" style="width:auto;" />
-                חסום/סיים שיחה לגברים
-              </label>
-            </div>
           </div>
           <div class="row" style="gap:12px; align-items:flex-start;">
             <div style="flex:1; min-width:240px;">
@@ -407,12 +400,8 @@ export function renderAdminPage({ adminToken = "" } = {}) {
           <label>פתיח קבוע (מה אומרים ישר כשעונים)</label>
           <div class="row" style="gap:12px; align-items:flex-start;">
             <div style="flex:1; min-width:240px;">
-              <label style="margin-top:0;">לגברים</label>
-              <textarea id="openingScriptMale" placeholder="פתיח לגברים..."></textarea>
-            </div>
-            <div style="flex:1; min-width:240px;">
-              <label style="margin-top:0;">לנשים</label>
-              <textarea id="openingScriptFemale" placeholder="פתיח לנשים..."></textarea>
+              <label style="margin-top:0;">פתיח</label>
+              <textarea id="openingScriptFemale" placeholder="פתיח (נשים בלבד)..."></textarea>
             </div>
           </div>
           <div class="row" style="margin-top:10px;">
@@ -432,17 +421,11 @@ export function renderAdminPage({ adminToken = "" } = {}) {
           <h3>הוספת מספר בדיקה</h3>
           <button class="secondary" id="closeTestModalBtn">סגור</button>
         </div>
-        <div class="status" style="margin-top:4px;">ממלאים שם, מספר ומין — וזה נכנס לאנשי הקשר. אחרי זה אפשר ללחוץ על אייקון החיוג בטבלה.</div>
+        <div class="status" style="margin-top:4px;">ממלאים שם ומספר — וזה נכנס לאנשי הקשר. אחרי זה אפשר ללחוץ על אייקון החיוג בטבלה.</div>
         <label>שם</label>
         <input id="testName" placeholder="למשל: מיכה צור" />
         <label>מספר טלפון</label>
         <input id="testPhone" placeholder="למשל: 0549050710 או +9725..." />
-        <label>מין</label>
-        <select id="testGender">
-          <option value="">לא יודע</option>
-          <option value="male">זכר</option>
-          <option value="female">נקבה</option>
-        </select>
         <div class="row" style="margin-top:12px;">
           <button id="saveTestBtn">שמור לאנשי קשר</button>
           <span class="status" id="testStatus"></span>
@@ -555,12 +538,10 @@ export function renderAdminPage({ adminToken = "" } = {}) {
         try{
           const data = await api("/api/admin/state");
           $("knowledgeBase").value = data.knowledgeBase || "";
-          $("openingScriptMale").value = data.openingScriptMale || "";
           $("openingScriptFemale").value = data.openingScriptFemale || "";
           if($("handoffToPhrase")) $("handoffToPhrase").value = data.handoffToPhrase || "לעמותה";
           if($("handoffFromPhrase")) $("handoffFromPhrase").value = data.handoffFromPhrase || "מהעמותה";
           if($("campaignMode")) $("campaignMode").value = data.campaignMode || "handoff";
-          if($("femaleOnly")) $("femaleOnly").checked = !!data.femaleOnly;
           if($("minParticipants")) $("minParticipants").value = data.minParticipants ?? 15;
           if($("cooldownMonths")) $("cooldownMonths").value = data.cooldownMonths ?? 6;
           $("autoDialEnabled").checked = !!data.autoDialEnabled;
@@ -690,12 +671,10 @@ export function renderAdminPage({ adminToken = "" } = {}) {
             headers: {"Content-Type":"application/json"},
             body: JSON.stringify({
               knowledgeBase: $("knowledgeBase").value,
-              openingScriptMale: $("openingScriptMale").value,
               openingScriptFemale: $("openingScriptFemale").value,
               handoffToPhrase: $("handoffToPhrase") ? $("handoffToPhrase").value : undefined,
               handoffFromPhrase: $("handoffFromPhrase") ? $("handoffFromPhrase").value : undefined,
               campaignMode: $("campaignMode") ? $("campaignMode").value : undefined,
-              femaleOnly: $("femaleOnly") ? $("femaleOnly").checked : undefined,
               minParticipants: $("minParticipants") ? Number($("minParticipants").value || 15) : undefined,
               cooldownMonths: $("cooldownMonths") ? Number($("cooldownMonths").value || 6) : undefined
             })
@@ -961,10 +940,9 @@ export function renderAdminPage({ adminToken = "" } = {}) {
       $("saveTestBtn").addEventListener("click", async () => {
         const name = ($("testName").value || "").trim();
         const phone = ($("testPhone").value || "").trim();
-        const gender = ($("testGender").value || "").trim();
         if(!phone) return setStatus($("testStatus"), "חסר מספר טלפון", false);
         try{
-          const out = await api("/api/contacts/add", { method:"POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ first_name: name, phone, gender }) });
+          const out = await api("/api/contacts/add", { method:"POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ first_name: name, phone }) });
           setStatus($("testStatus"), "נשמר: " + (out.contact?.phone || ""), true);
           toast("נשמר", "המספר נוסף לאנשי הקשר", true);
           // clear for next entry

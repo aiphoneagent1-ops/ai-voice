@@ -413,7 +413,9 @@ function normalizeAgentVoicePersona(raw) {
   const v = String(raw || "").trim().toLowerCase();
   return v === "female" ? "female" : "male";
 }
-const AGENT_VOICE_PERSONA = normalizeAgentVoicePersona(process.env.AGENT_VOICE_PERSONA || "male");
+// Women-only system: force female agent voice/persona to avoid any "male" phrasing/voice.
+// (We intentionally ignore AGENT_VOICE_PERSONA env to prevent misconfiguration.)
+const AGENT_VOICE_PERSONA = "female";
 
 // ConversationRelay (Realtime voice via Twilio)
 const CR_ENABLED = CR_MODE;
@@ -761,16 +763,15 @@ function greetingTextForPersona({ persona }) {
   // IMPORTANT: this must match the exact greeting that `/twilio/voice` (MS_MODE)
   // will persist into `call_messages` and that Media Streams will actually play.
   const snap = settingsSnapshot();
-  const { openingScript, openingScriptMale, openingScriptFemale } = snap || {};
-  const personaOpening =
-    persona === "female" ? (openingScriptFemale || openingScript) : (openingScriptMale || openingScript);
+  const { openingScript, openingScriptFemale } = snap || {};
+  const personaOpening = openingScriptFemale || openingScript;
   const g0 = normalizeGreetingForLatency({
     greeting: String(personaOpening || "").trim() || buildGreeting({ persona }),
     persona
   });
   // Store/play without any directives/tags so cache key matches what MS actually says.
   const clean = sanitizeSayText(String(extractTtsDirectives(g0).text || "").trim());
-  return clean || sanitizeSayText(buildGreeting({ persona }));
+  return clean || sanitizeSayText(buildGreeting({ persona: "female" }));
 }
 
 async function ensureGreetingCachedBeforeDial({ persona, timeoutMs = 12000 }) {
@@ -1650,7 +1651,8 @@ setDefaultIfEmpty("handoffToPhrase", "לצוות");
 setDefaultIfEmpty("handoffFromPhrase", "מהצוות");
 // Campaign / flow knobs (no campaign text here; only generic behavior toggles)
 setDefaultIfEmpty("campaignMode", "handoff"); // "handoff" | "guided"
-setDefaultIfEmpty("femaleOnly", false);
+// Women-only system: keep the knob true by default (UI removed, but DB may exist).
+setDefaultIfEmpty("femaleOnly", true);
 setDefaultIfEmpty("minParticipants", 15);
 setDefaultIfEmpty("cooldownMonths", 6);
 
@@ -3211,14 +3213,7 @@ function selectRelevantKnowledge({ knowledgeBase, query, maxChars = 1800, maxChu
 }
 
 function pickPersona(contact) {
-  // Campaign knob: if this campaign is women-only, treat every callee as female.
-  // This prevents accidental "men-only block" when gender wasn't provided in the imported list.
-  try {
-    if (settingsSnapshot()?.femaleOnly) return "female";
-  } catch {}
-  const g = contact?.gender;
-  if (g === "female" || g === "male") return g;
-  // Default: assume female (most campaigns here are women-only, and it avoids accidental blocking).
+  // Women-only system: always treat every callee as female.
   return "female";
 }
 
@@ -3263,7 +3258,6 @@ function settingsSnapshot() {
   const closingScript = getSetting(db, "closingScript", "");
 
   // persona-specific keys (preferred)
-  const openingScriptMale = getSetting(db, "openingScriptMale", "");
   const openingScriptFemale = getSetting(db, "openingScriptFemale", "");
   const middleScriptMale = getSetting(db, "middleScriptMale", "");
   const middleScriptFemale = getSetting(db, "middleScriptFemale", "");
@@ -3316,7 +3310,8 @@ function settingsSnapshot() {
   });
 
   const campaignMode = String(getSetting(db, "campaignMode", "handoff") || "handoff").trim() || "handoff";
-  const femaleOnly = getBool("femaleOnly", false);
+  // נשים בלבד
+  const femaleOnly = true;
   const minParticipants = Math.max(1, Math.min(200, getNum("minParticipants", 15) || 15));
   const cooldownMonths = Math.max(0, Math.min(60, getNum("cooldownMonths", 6) || 6));
 
@@ -3325,7 +3320,6 @@ function settingsSnapshot() {
     openingScript,
     middleScript,
     closingScript,
-    openingScriptMale,
     openingScriptFemale,
     middleScriptMale,
     middleScriptFemale,
@@ -3833,7 +3827,7 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
         }
         continue;
       }
-      const gender = parseGender(row.gender || row.Gender || "");
+      const gender = "female";
       const firstName =
         (String(row.first_name || row.firstName || row.name || row.Name || "").trim() ||
           pickFirstMatchingField(row, isNameHeader) ||
@@ -3912,7 +3906,7 @@ app.post("/api/contacts/import-xlsx", upload.single("file"), (req, res) => {
         }
         continue;
       }
-    const gender = parseGender(r.gender || r.Gender || r.GENDER || "");
+    const gender = "female";
       const firstName =
         (String(r.first_name || r.firstName || r.name || r.Name || "").trim() ||
           pickFirstMatchingField(r, isNameHeader) ||
@@ -4035,10 +4029,7 @@ app.post("/api/contacts/import-sheet", async (req, res) => {
       }
       continue;
     }
-    const gender =
-      parseGender(row.gender || row.Gender || row["מין"] || "") ||
-      // If this campaign is women-only, default to female for imported rows.
-      "female";
+    const gender = "female";
     const firstName =
       String(
         row.first_name ||
@@ -4324,7 +4315,8 @@ app.post("/api/contacts/set-dnc", (req, res) => {
 app.post("/api/contacts/add", (req, res) => {
   const firstName = String(req.body?.first_name ?? req.body?.firstName ?? req.body?.name ?? "").trim();
   const rawPhone = String(req.body?.phone ?? "").trim();
-  const gender = parseGender(req.body?.gender);
+  // נשים בלבד
+  const gender = "female";
 
   const phone = normalizePhoneE164IL(rawPhone);
   if (!phone) return res.status(400).json({ error: "מספר לא תקין. השתמש ב-05XXXXXXXX או +972..." });
@@ -4526,11 +4518,10 @@ async function handleTwilioVoice(req, res) {
   const persona = pickPersona(contact);
   createOrGetCall(db, { callSid, phone, persona });
 
-  const { openingScript, openingScriptMale, openingScriptFemale } = settingsSnapshot();
-  // אם לא הוגדר פתיח, ניפול לברירת מחדל טכנית (כדי שלא יהיה שקט).
-  const personaOpening =
-    persona === "female" ? (openingScriptFemale || openingScript) : (openingScriptMale || openingScript);
-  const greeting = sanitizeSayText(String(personaOpening || "").trim() || buildGreeting({ persona }));
+  const { openingScript, openingScriptFemale } = settingsSnapshot();
+  // נשים בלבד: משתמשים רק בפתיח לנשים.
+  const personaOpening = openingScriptFemale || openingScript;
+  const greeting = sanitizeSayText(String(personaOpening || "").trim() || buildGreeting({ persona: "female" }));
 
   // קריטי: לשמור את הפתיח בהיסטוריה כדי שהמודל לא יחזור עליו אחרי שהלקוח אומר "כן יש לי דקה".
   // עושים את זה פעם אחת לכל שיחה (idempotent).
@@ -4588,12 +4579,11 @@ app.all("/twilio/voice", async (req, res) => {
       const persona = pickPersona(contact);
       createOrGetCall(db, { callSid, phone, persona });
 
-      const { openingScript, openingScriptMale, openingScriptFemale } = settingsSnapshot();
-      const personaOpening =
-        persona === "female" ? (openingScriptFemale || openingScript) : (openingScriptMale || openingScript);
+      const { openingScript, openingScriptFemale } = settingsSnapshot();
+      const personaOpening = openingScriptFemale || openingScript;
       const greeting = normalizeGreetingForLatency({
-        greeting: String(personaOpening || "").trim() || buildGreeting({ persona }),
-        persona
+        greeting: String(personaOpening || "").trim() || buildGreeting({ persona: "female" }),
+        persona: "female"
       });
 
       // Save greeting once so the LLM won't repeat it.
@@ -4615,7 +4605,7 @@ app.all("/twilio/voice", async (req, res) => {
         customParameters: {
           callSid,
           phone,
-          persona,
+          persona: "female",
           greeting
         }
       });
@@ -4639,10 +4629,9 @@ app.all("/twilio/voice", async (req, res) => {
       const persona = pickPersona(contact);
       createOrGetCall(db, { callSid, phone, persona });
 
-      const { openingScript, openingScriptMale, openingScriptFemale } = settingsSnapshot();
-      const personaOpening =
-        persona === "female" ? (openingScriptFemale || openingScript) : (openingScriptMale || openingScript);
-      const greeting = sanitizeSayText(String(personaOpening || "").trim() || buildGreeting({ persona }));
+      const { openingScript, openingScriptFemale } = settingsSnapshot();
+      const personaOpening = openingScriptFemale || openingScript;
+      const greeting = sanitizeSayText(String(personaOpening || "").trim() || buildGreeting({ persona: "female" }));
 
       // Save greeting once so the LLM won't repeat it.
       try {
