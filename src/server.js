@@ -596,9 +596,17 @@ function detectBusyNow(text) {
     "לא עכשיו",
     "לא יכולה עכשיו",
     "לא יכול עכשיו",
+    "יותר מאוחר",
+    "מאוחר יותר",
     "אחר כך",
     "תתקשרו אחר כך",
     "תחזרו אחר כך",
+    "תחזרו אלי",
+    "תחזרו אליי",
+    "תחזרי אלי",
+    "תחזרי אליי",
+    "תחזור אלי",
+    "תחזור אליי",
     "דברי איתי אחר כך",
     "דבר איתי אחר כך"
   ];
@@ -1988,16 +1996,64 @@ function detectSmalltalk(text) {
     "מה העניינים",
     "הכל טוב",
     "שלום לך",
-    "שלום מה נשמע",
-    // very common call openers / mic checks
-    "הלו",
-    "הי",
-    "היי",
-    "שומעים",
-    "שומעת",
-    "שומע"
+    "שלום מה נשמע"
   ];
   return patterns.some((p) => t.includes(p));
+}
+
+function detectMicCheck(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  // "Hello?" / "Can you hear me?" / "Did you speak?"
+  const patterns = [
+    "הלו",
+    "הלו הלו",
+    "שומעים",
+    "שומעת",
+    "שומע",
+    "את שומעת",
+    "את שומע",
+    "שומעים אותי",
+    "אתם שומעים",
+    "שומעים שם",
+    "דיברת",
+    "דברת",
+    "את מדברת",
+    "את מדבר",
+    "מה אמרת",
+    "לא שמעתי",
+    "לא שומעת",
+    "לא שומע"
+  ];
+  return patterns.some((p) => t === p || t.includes(p));
+}
+
+function detectWhereCallingFrom(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  // "מאיפה את מדברת/מתקשרת", "איפה את מדברת"
+  return (
+    (t.includes("מאיפה") && (t.includes("מדברת") || t.includes("מתקשרת") || t.includes("התקשרת"))) ||
+    (t.includes("איפה") && t.includes("מדברת")) ||
+    t.includes("מאיפה את") ||
+    t.includes("מאיפה אתם")
+  );
+}
+
+function looksLikeVeryShortUnclear(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return true;
+  // Treat pure filler as unclear (avoid looping).
+  const fillers = new Set(["היי", "הי", "טוב", "וואי", "מה", "כן כן", "כן", "אוקיי", "אוקי", "שלום"]);
+  if (fillers.has(t)) return true;
+  // 1–2 words with no clear intent => unclear
+  const words = t.split(/\s+/).filter(Boolean);
+  if (words.length <= 2) {
+    if (detectAffirmativeShort(t) || detectNotInterested(t) || detectOptOut(t) || detectInterested(t)) return false;
+    if (detectMicCheck(t) || detectRepeatRequest(t) || detectSmalltalk(t)) return false;
+    return true;
+  }
+  return false;
 }
 
 function looksLikeSeekingButUnfinished(text) {
@@ -2477,11 +2533,15 @@ function detectFaq(text) {
   const t = String(text || "").toLowerCase();
   const hasQWord =
     t.includes("מי") || t.includes("מה") || t.includes("איפה") || t.includes("מתי") || t.includes("כמה");
+  const isWhereCallingFrom =
+    (t.includes("מאיפה") && (t.includes("מדבר") || t.includes("מדברת") || t.includes("מתקשר") || t.includes("מתקשרת"))) ||
+    (t.includes("איפה") && (t.includes("מדבר") || t.includes("מדברת")));
   return {
     hasQWord,
-    who: t.includes("מי זה") || t.includes("מאיפה") || t.includes("מאיפה יש"),
+    who: isWhereCallingFrom || t.includes("מי זה") || t.includes("מאיפה") || t.includes("מאיפה יש"),
     what: t.includes("מה זה") || t.includes("מה עושים") || t.includes("על מה") || t.includes("איך זה עובד"),
-    where: t.includes("איפה") || t.includes("כתובת"),
+    // "איפה את מדברת" is NOT "where is the event" — treat it as 'who'.
+    where: !isWhereCallingFrom && (t.includes("איפה") || t.includes("כתובת")),
     when: t.includes("מתי") || t.includes("שעה") || t.includes("יום"),
     cost: t.includes("כמה עולה") || t.includes("עולה") || t.includes("מחיר") || t.includes("חינם"),
     howLong: t.includes("כמה זמן") || t.includes("אורך") || t.includes("משך"),
@@ -2506,7 +2566,7 @@ function quickReplyByRules({ speech, persona }) {
   if (faq.who) {
     return {
       text:
-        "אני מתקשר בנוגע להצעה קצרה. המספר אצלנו ברשימה של אנשים שאישרו לקבל עדכון. אם לא מתאים—אני מוריד אותך מיד.",
+        "מדברת נועה מהמרכז הארצי להפרשת חלה. אם לא מתאים—אני מורידה אותך מיד.",
       end: false
     };
   }
@@ -6611,9 +6671,22 @@ wssMediaStream.on("connection", (ws, req) => {
       // - If user says "מה נשמע/מה שלומך" → respond politely and re-ask the current step question.
       // - If user says "מה אמרת/מה נאמר/לא הבנתי" → repeat the current step question.
       const ns0 = normalizeIntentText(speech);
-      if (detectRepeatRequest(ns0) || detectSmalltalk(ns0) || looksLikeSeekingButUnfinished(ns0)) {
+      if (
+        detectRepeatRequest(ns0) ||
+        detectSmalltalk(ns0) ||
+        detectMicCheck(ns0) ||
+        detectWhereCallingFrom(ns0) ||
+        looksLikeSeekingButUnfinished(ns0) ||
+        looksLikeVeryShortUnclear(ns0)
+      ) {
         let prefix = "";
-        if (detectSmalltalk(ns0) || looksLikeSeekingButUnfinished(ns0)) {
+        if (detectWhereCallingFrom(ns0)) {
+          prefix = "מדברת נועה מהמרכז הארצי להפרשת חלה.";
+        } else if (detectMicCheck(ns0)) {
+          prefix = persona === "female" ? "כן, שומעת אותך. את שומעת אותי?" : "כן, שומע אותך. אתה שומע אותי?";
+        } else if (looksLikeVeryShortUnclear(ns0) || looksLikeSeekingButUnfinished(ns0)) {
+          prefix = persona === "female" ? "לא בטוח שהבנתי—תוכלי לחזור על זה בקצרה?" : "לא בטוח שהבנתי—תוכל לחזור על זה בקצרה?";
+        } else if (detectSmalltalk(ns0)) {
           // Optional override in KB (white-label friendly):
           // FLOW_SMALLTALK_REPLY=הכל טוב, תודה. :)
           prefix = stripQuestionLikeSuffix(String(flowText.FLOW_SMALLTALK_REPLY || "הכל טוב, תודה.").trim()) || "הכל טוב, תודה.";
@@ -6627,7 +6700,17 @@ wssMediaStream.on("connection", (ws, req) => {
         const msg = limitPhoneReply(`${prefix ? prefix + " " : ""}${q0 || ""}`.trim() || q0, 240);
         msLog("guided", {
           callSid,
-          kind: looksLikeSeekingButUnfinished(ns0) ? "seeking_unfinished" : detectSmalltalk(ns0) ? "smalltalk" : "repeat_request",
+          kind: detectWhereCallingFrom(ns0)
+            ? "where_calling_from"
+            : detectMicCheck(ns0)
+              ? "mic_check"
+              : looksLikeVeryShortUnclear(ns0)
+                ? "unclear_short"
+                : looksLikeSeekingButUnfinished(ns0)
+                  ? "seeking_unfinished"
+                  : detectSmalltalk(ns0)
+                    ? "smalltalk"
+                    : "repeat_request",
           step: guidedStep
         });
         try {
