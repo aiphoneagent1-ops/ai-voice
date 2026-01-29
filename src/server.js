@@ -2050,6 +2050,55 @@ function detectWhereCallingFrom(text) {
   );
 }
 
+function detectWhoIdentityQuestion(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  return (
+    t === "מי זה" ||
+    t === "מי זאת" ||
+    t.includes("מי זה") ||
+    t.includes("מי זאת") ||
+    t.includes("מי מדבר") ||
+    t.includes("מי מדברת") ||
+    t.includes("מי מדבר איתי") ||
+    t.includes("מי מדברת איתי") ||
+    t.includes("מי איתי") ||
+    t.includes("מי על הקו")
+  );
+}
+
+function looksLikeHebrewGibberish(text) {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  // Only for Hebrew-ish text.
+  if (!/[\u0590-\u05FF]/.test(t)) return false;
+  // If it contains a clearly meaningful cue, it's not gibberish.
+  const meaningful = [
+    "מי",
+    "מה",
+    "איפה",
+    "מאיפה",
+    "לא",
+    "כן",
+    "תודה",
+    "שלום",
+    "הלו",
+    "שומע",
+    "שומעת",
+    "דיברת",
+    "דברת",
+    "פרטים",
+    "תאריך",
+    "יום",
+    "שבוע",
+    "מחר"
+  ];
+  if (meaningful.some((w) => t.includes(w))) return false;
+  const words = t.split(/\s+/).filter(Boolean);
+  // A short multi-word utterance with no known cue is likely a bad transcription.
+  return t.length <= 42 && words.length >= 2 && words.length <= 6;
+}
+
 function looksLikeVeryShortUnclear(text) {
   const t = normalizeIntentText(text);
   if (!t) return true;
@@ -6579,6 +6628,33 @@ wssMediaStream.on("connection", (ws, req) => {
         confirmCount = 0;
         msLog("guided", { callSid, kind: "opt_out" });
         await sayFinalAndHangup({ text: "אין בעיה, הסרתי אותך. יום טוב.", outcome: "do_not_call" });
+        return;
+      }
+
+      // Identity / "who is this" question: answer deterministically (do NOT rely on LLM).
+      if (detectWhoIdentityQuestion(speech) || detectWhereCallingFrom(speech)) {
+        guidedInterestRecheckAsked = true;
+        const q = String(flowText.FLOW_INTEREST_RECHECK || "רק כדי לוודא—רוצה לשמוע עוד פרטים?").trim();
+        const msg = limitPhoneReply(`מדברת נועה מהמרכז הארצי להפרשת חלה. ${q}`.trim(), 220);
+        msLog("guided", { callSid, kind: "who_identity", step: guidedStep });
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+        } catch {}
+        guidedLastQuestionAt = Date.now();
+        await sayText(msg, { label: "reply" });
+        return;
+      }
+
+      // If STT produced Hebrew gibberish, do not advance the flow. Ask for a short repeat.
+      if (looksLikeHebrewGibberish(speech)) {
+        const msg =
+          persona === "female" ? "לא בטוח שהבנתי—תוכלי לחזור על זה בקצרה?" : "לא בטוח שהבנתי—תוכל לחזור על זה בקצרה?";
+        msLog("guided", { callSid, kind: "stt_gibberish", step: guidedStep });
+        try {
+          if (callSid && phone) addMessage(db, { callSid, role: "assistant", content: msg });
+        } catch {}
+        guidedLastQuestionAt = Date.now();
+        await sayText(msg, { label: "reply" });
         return;
       }
 
