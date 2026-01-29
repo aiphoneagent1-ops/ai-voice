@@ -3845,9 +3845,35 @@ function toGoogleCsvUrl(url) {
   return `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv${gid ? `&gid=${gid}` : ""}`;
 }
 
+function extractGoogleSheetIdFromUrl(url) {
+  const u = String(url || "").trim();
+  if (!u) return "";
+  const m = u.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  return m ? String(m[1] || "") : "";
+}
+
+async function tryFetchGoogleSheetTitle({ url }) {
+  try {
+    const sheetId = extractGoogleSheetIdFromUrl(url);
+    if (!sheetId) return "";
+    // For public sheets, this returns an HTML page that contains <title>NAME - Google Sheets</title>
+    const viewUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/edit`;
+    const r = await fetch(viewUrl, { headers: { "User-Agent": "ai-voice/1.0" } });
+    if (!r.ok) return "";
+    const html = await r.text();
+    const m = html.match(/<title>\s*([^<]+?)\s*<\/title>/i);
+    const raw = m ? String(m[1] || "").trim() : "";
+    if (!raw) return "";
+    return raw.replace(/\s*-\s*Google Sheets\s*$/i, "").trim();
+  } catch {
+    return "";
+  }
+}
+
 // Import contacts: Google Sheets public CSV
 app.post("/api/contacts/import-sheet", async (req, res) => {
-  const url = toGoogleCsvUrl(req.body?.url);
+  const originalUrl = String(req.body?.url || "").trim();
+  const url = toGoogleCsvUrl(originalUrl);
   if (!url) return res.status(400).json({ error: "missing url" });
   const listNameRaw = String(req.body?.listName || req.body?.list_name || "").trim();
 
@@ -3924,7 +3950,13 @@ app.post("/api/contacts/import-sheet", async (req, res) => {
 
   let listId = null;
   try {
-    const name = listNameRaw || `Google Sheets ${imported}`;
+    // If no list name provided, try to use the Google Sheet document title as the list name.
+    const sheetTitle = listNameRaw ? "" : await tryFetchGoogleSheetTitle({ url: originalUrl || url });
+    const fallbackName = (() => {
+      const sid = extractGoogleSheetIdFromUrl(originalUrl || url);
+      return sid ? `Google Sheets ${sid}` : `Google Sheets ${imported}`;
+    })();
+    const name = listNameRaw || sheetTitle || fallbackName;
     listId = upsertContactList(db, { name, source: "google_sheets" });
     if (listId) {
       addContactsToList(db, { listId, phones: phonesForList });
