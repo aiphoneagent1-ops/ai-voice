@@ -287,6 +287,7 @@ const OPENAI_STT_PROMPT =
   "תמלול שיחה טלפונית בעברית (ישראל). שמור ניסוח מלא ככל האפשר ואל תחליף משפטים ב'תודה/כן' אם לא נאמר. " +
   "מילים/ביטויים נפוצים: כן, לא, לא תודה, תודה, תודה רבה, סבבה, בסדר, אוקיי, מעולה, מצוין, הכל טוב, מה שלומך, " +
   "מעוניין, מעוניינת, רוצה, אשמח, תעביר, תעבירו, תעביר את הפרטים, תעבירו את הפרטים, פרטים, שיחזרו, לחזור אלי, " +
+  "מי זה, מי זאת, מי מדברת, מי מדבר, מאיפה את מדברת, מאיפה אתם מתקשרים, לא הבנתי מי זאת, " +
   "מה השעות שלכם, איזו שעה, מתי, להסיר, אל תתקשרו, תפסיקו להתקשר.";
 const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
 const OPENAI_TTS_VOICE_MALE = process.env.OPENAI_TTS_VOICE_MALE || "alloy";
@@ -6823,6 +6824,9 @@ wssMediaStream.on("connection", (ws, req) => {
           guidedStep !== "PARTICIPANTS_PERSUADE" &&
           !isLikelyDateAnswer &&
           (nsq.includes("?") ||
+            nsq.startsWith("מי ") ||
+            nsq.startsWith("מאיפה ") ||
+            nsq.startsWith("איפה ") ||
             nsq.startsWith("מה ") ||
             nsq.startsWith("למה ") ||
             nsq.startsWith("איך ") ||
@@ -6831,6 +6835,9 @@ wssMediaStream.on("connection", (ws, req) => {
             nsq.startsWith("את יכולה ") ||
             nsq.startsWith("האם ") ||
             nsq.includes("במה מדובר") ||
+            nsq.includes("מאיפה") ||
+            nsq.includes("איפה את מדברת") ||
+            nsq.includes("מי זאת") ||
             nsq.includes("פרטים"));
         if (looksQuestion) {
           let followUp = "";
